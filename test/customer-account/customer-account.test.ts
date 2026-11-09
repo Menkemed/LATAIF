@@ -453,7 +453,8 @@ if (process.env.CA_DUMP) (await import('node:fs')).writeFileSync(process.env.CA_
   ok(!/\b(INSERT|UPDATE|DELETE)\b/.test(core.replace(/\/\/.*$/gm, '')) && !/postEntries|trackChange|runOnPrimary/.test(core),
     'I2 das Kundenkonto schreibt nichts (kein INSERT/UPDATE/DELETE, keine Buchung, kein Sync)');
   ok(!/partner_transactions/.test(core.replace(/\/\/.*$/gm, '')), 'I3 keine Gesellschafter-/Eigenkapitalkonten im Kundenkonto');
-  ok(/linkedPartnerIds[\s\S]{0,400}return \[\];/.test(core), 'I4 Partner zählen nur über eine ausdrückliche Verknüpfung (heute keine — Owner-Entscheidung P1)');
+  ok(/export function linkedPartnerIds[\s\S]{0,200}FROM partners WHERE branch_id = \? AND linked_customer_id = \?/.test(core),
+    'I4 Partner zählen nur über die ausdrückliche Verknüpfung partners.linked_customer_id (A2 / P1; ohne Verknüpfung nur Hinweis)');
 }
 
 // ══ J — A1.1: P3 Lieferantenguthaben, Befunde 1–3, Oberfläche ══════════════════════════════════════════════════

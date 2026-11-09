@@ -38,23 +38,36 @@ Stand 08.11.2026, Branch `feature/customer-account` (Basis `origin/main` = v0.8.
 
 ## Partner Account
 
-- Die Tabelle `partners` hat **keine Verknüpfung zu einem Kunden**. Deshalb zählt im A1 kein Partnerbetrag im Saldo.
-- Ein möglicher Partner (gleiches Telefon oder gleicher Name) erscheint mit seinem vollen Stand aus der Partnerlogik, ausdrücklich als „not counted":
+- **Seit A2 (09.11.)** gibt es die ausdrückliche Verknüpfung `partners.linked_customer_id` (siehe P1). Nur ein verknüpfter Partner zählt. Seine **offenen** Beträge laufen über `partnerOpenRows` in den Saldo, also dieselbe Zahl wie in Receivables/Payables, je Partner und Artikel genau einmal:
+  - Kostenanteil oder Rückforderung = der Partner schuldet uns.
+  - „Pay out" = LATAIF schuldet ihm.
+  - Eine Auszahlung, die wartet, zählt als gebunden.
+- Ein nicht verknüpfter möglicher Partner (gleiches Telefon oder gleicher Name) erscheint mit seinem vollen Stand aus der Partnerlogik, ausdrücklich als „not counted", mit dem Knopf „Link to this client":
   - Artikel und Einkauf, Anteil
   - vereinbarter Beitrag und eingezahlter Beitrag
   - Verkauf, abgerechneter Gewinnanteil
   - Auszahlung und Verrechnung, offener Stand
 - Ein rechnerischer Gewinnanteil aus einem noch nicht abgerechneten Verkauf wird nur angezeigt und **nie** gezählt.
 - Gesellschafterkonten (`partner_transactions`, Eigenkapital) bleiben außen vor.
-- Sobald es eine Verknüpfung gibt, laufen die Partnerbeträge ohne weitere Änderung in den Saldo (`linkedPartnerIds` → `partnerDocsOf`). Der Test belegt das simuliert.
+## Owner-Entscheidungen
 
-## Offene Owner-Entscheidungen
-
-- **P1 Partner ↔ Kunde verknüpfen.**
-  - Empfehlung: eine ausdrückliche Verknüpfung wie bei der Lieferantenrolle, also Spalte `partners.linked_customer_id` und eine Aktion „Link to client" (Primary und PC2).
-  - Dafür braucht es eine Schemaänderung und einen Schreibweg, deshalb ist es nicht im A1.
-  - Bis dahin bleibt es beim Hinweis.
-- **P2 „Assign to this client"** für Darlehen ohne Kunde. Geplant als A2, ein Schreibweg, deshalb nicht im A1.
+- **P1 Partner ↔ Kunde — umgesetzt in A2 (09.11.):**
+  - **Schema:** Spalte `partners.linked_customer_id` (rein additiv, Altzeilen NULL) mit eindeutigem Index „höchstens ein Partner je Kunde und Filiale". Die Spalte ist im Abgleich-Manifest eingetragen.
+  - **„Link to client"** im Partner-Dialog (Kunde auswählen) und „Link to this client" im Kundenkonto, jeweils mit App-Rückfrage. „Unlink" gibt es im Partner-Dialog.
+  - **Prüfung im Haus (`partnerLinkCheck`), abgelehnt werden:**
+    - ein Kunde einer anderen Filiale oder ein System-Kunde,
+    - ein schon verknüpfter Partner (er wird nie still umgehängt),
+    - ein Kunde, der schon einen Partner hat,
+    - ein veralteter Kundenstand.
+  - Jede Änderung wird protokolliert, mit der Person, die sie wirklich gemacht hat.
+  - **PC2:** über den bestehenden Befehl `partners.update` mit einem eigenen, schmalen Auftrag (Verknüpfen oder Lösen, nie zusammen mit Stammdaten). Prüfung, Transaktion und Wiederholungsschutz laufen am Primary.
+  - Wird der Kunde gelöscht, wird nur der Verweis gelöst.
+- **P2 Darlehen zuordnen — umgesetzt in A2 (09.11.):**
+  - „Assign to client" im Darlehen-Detail (Kunde auswählen) und „Assign to this client" im Kundenkonto, nur bei Darlehen ohne Kunde und nur mit App-Rückfrage.
+  - **Weg:** bestehender Befehl `debts.update` mit `assignCustomerId`, immer allein und mit der gesehenen Fassung.
+  - **Es ändert sich nur `customer_id`:** Betrag, Zahlungen, Status, Freitext der Gegenpartei und Buchung bleiben, wie sie sind.
+  - **Abgelehnt werden:** Umhängen eines schon zugeordneten Darlehens, ein storniertes Darlehen, eine fremde Filiale, ein System-Kunde.
+  - Die Zuordnung wird protokolliert.
 - **P3 Lieferantenguthaben — entschieden und umgesetzt in A1.1 (09.11.):** Die Unterscheidung folgt dem gespeicherten Status (`supplier_credits.status`; dieselbe Regel wie `supplierCreditsFor`):
   - `REFUND_DUE`: Der Lieferant muss Geld zurückzahlen („Record Repayment"). Zählt **frei**.
   - `OPEN`: Die App löst es nur auf seine Einkäufe oder Ausgaben ein (Retoure, Überzahlung, Kostenkorrektur, Vorauszahlung). Zählt **gebunden**.
@@ -66,7 +79,7 @@ Stand 08.11.2026, Branch `feature/customer-account` (Basis `origin/main` = v0.8.
    - `createDebtInHouse` nimmt auch `MONEY_GIVEN` / `MONEY_RECEIVED` an.
    - Kundenkennzahlen (`customerStatsFor`) und Payables zählen jetzt beide Schreibweisen. Der Status wird ohne Groß-/Kleinschreibung gelesen, wie bei `canonicalLoanStatus`; ein „repaid" in Kleinschrift galt vorher als offen.
    - Die Darlehensliste auf der Kundenseite trennt die Richtungen jetzt über `isLoanGiven`.
-   - **Nicht behoben (außerhalb des Auftrags):** Der Geldfluss in Analytics (`analytics-snapshot.ts`) zählt `MONEY_GIVEN` als „geliehen".
+   - **Behoben in A2 (eigener Commit):** Der Geldfluss in Analytics (`analytics-snapshot.ts`) zählte `MONEY_GIVEN` als „geliehen"; jetzt über `isLoanGiven`, Rückzahlungen ebenso.
 2. **Einkaufsentwürfe — nicht bestätigt, keine Änderung.**
    - Jede Statusregel setzt `DRAFT` nur bei Betrag ≤ 0.
    - Ein Entwurf trägt im Lieferantenkonto deshalb nie etwas Offenes (`max(0, …)`). Der Test belegt das.

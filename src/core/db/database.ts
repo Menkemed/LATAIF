@@ -2720,6 +2720,14 @@ function runMigrations(database: Database): void {
     `ALTER TABLE consignments ADD COLUMN group_seq INTEGER`,
     `ALTER TABLE consignments ADD COLUMN group_quantity INTEGER`,
     `CREATE INDEX IF NOT EXISTS idx_consignments_group ON consignments(group_id)`,
+
+    // CUSTOMER ACCOUNT A2 (P1) — dieselbe Person kann Partner (gemeinsam gekaufte Artikel) UND Kunde sein. Der Partner
+    // behält seine EIGENE Kennung (Beteiligungen, Bewegungen, Abrechnungen hängen weiter an `partner_id`) und zeigt nur
+    // ausdrücklich auf den Kunden — gesetzt allein über „Link to client" mit Bestätigung, nie über Name oder Telefon.
+    // Rein additiv: Altzeilen bleiben NULL (= nicht verknüpft). Höchstens EIN Partner je Kunde und Filiale — der Index ist
+    // die Sperre gegen eine versehentliche Doppelzuordnung (wie bei der Lieferantenrolle `uq_suppliers_linked_customer`).
+    `ALTER TABLE partners ADD COLUMN linked_customer_id TEXT REFERENCES customers(id) ON DELETE SET NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_partners_linked_customer ON partners(branch_id, linked_customer_id) WHERE linked_customer_id IS NOT NULL`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

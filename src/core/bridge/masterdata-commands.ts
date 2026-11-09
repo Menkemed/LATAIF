@@ -259,6 +259,34 @@ export function parsePartnerCreate(raw: unknown): PartnerCreateInput {
   return rule(() => partnerCreateInput(strict(raw, PARTNER_CREATE_FIELDS, MASTERDATA_COMPUTED.partner)));
 }
 
+/** CUSTOMER ACCOUNT A2 (P1) — „Link to client" / „Unlink" reisen als eigener, schmaler Auftrag von `partners.update`. */
+export interface PartnerLinkRequest {
+  id: string;
+  link?: { customerId: string; seenCustomerUpdatedAt: string };
+  unlink?: { customerId: string };
+}
+
+export function parsePartnerLink(raw: unknown): PartnerLinkRequest | null {
+  if (!isPlain(raw)) return null;
+  if ('linkedCustomerId' in raw) {
+    const r = strict(raw, ['linkedCustomerId', 'linkedCustomerUpdatedAt'], MASTERDATA_COMPUTED.partner, ['id']);
+    const id = requiredId(r);
+    const customerId = r.linkedCustomerId;
+    if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('linkedCustomerId is required');
+    const seen = r.linkedCustomerUpdatedAt;
+    if (typeof seen !== 'string' || !seen) throw new MasterdataPayloadError('linkedCustomerUpdatedAt is required — the state of the client you saw');
+    return { id, link: { customerId, seenCustomerUpdatedAt: seen } };
+  }
+  if ('unlinkCustomerId' in raw) {
+    const r = strict(raw, ['unlinkCustomerId'], MASTERDATA_COMPUTED.partner, ['id']);
+    const id = requiredId(r);
+    const customerId = r.unlinkCustomerId;
+    if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('unlinkCustomerId is the client the link points to now');
+    return { id, unlink: { customerId } };
+  }
+  return null;
+}
+
 export function parsePartnerUpdate(raw: unknown): { id: string; fields: PartnerUpdateInput } {
   const r = strict(raw, PARTNER_UPDATE_FIELDS, MASTERDATA_COMPUTED.partner, ['id']);
   const id = requiredId(r);
@@ -425,6 +453,19 @@ export function runPartnerCreate(deps: EngineDeps, identity: CommandIdentity, ra
 }
 
 export function runPartnerUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const link = parsePartnerLink(raw);
+  if (link) {
+    return runRemoteCommand(deps, identity, () => {
+      assertHouseBranch(identity);
+      const actor = { userId: identity.userId, branchId: identity.branchId };
+      if (link.link) {
+        const r = urteil(() => usePartnerStore.getState().linkPartnerToCustomer(link.id, link.link!.customerId, link.link!.seenCustomerUpdatedAt, actor));
+        return { partnerId: link.id, name: r.partner.name, linkedCustomerId: link.link.customerId, existing: r.existing };
+      }
+      const r = urteil(() => usePartnerStore.getState().unlinkPartnerFromCustomer(link.id, link.unlink!.customerId, actor));
+      return { partnerId: link.id, name: r.partner.name, linkedCustomerId: null, changed: r.changed };
+    });
+  }
   const { id, fields } = parsePartnerUpdate(raw);
   return runRemoteCommand(deps, identity, () => {
     assertHouseBranch(identity);

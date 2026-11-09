@@ -15,12 +15,11 @@
 // Was nur nach Name oder Telefon aussieht, ist ein HINWEIS: es steht im Kasten „Not linked", zählt nicht im Saldo und
 // macht den Saldo als unvollständig kenntlich.
 //
-// PARTNER: Ein Partner (`partners`) hat heute KEINE Verknüpfung zu einem Kunden. Deshalb zählt im A1 kein Partnerbetrag
-// im Saldo; ein möglicher Partner (gleicher Name/gleiches Telefon) wird mit seinem offenen Stand aus der Partnerlogik
-// angezeigt, ausdrücklich als nicht gezählt. Owner-Entscheidung P1 (docs/customer-account/a1-report.md): ausdrückliche
-// Verknüpfung Partner ↔ Kunde. Sobald es sie gibt, liefert `linkedPartnerIds` die Kennungen, und die Partnerbeträge
-// laufen ohne weitere Änderung über `partnerOpenRows` (dieselbe Zahl wie Receivables/Payables) in den Saldo.
-// Gesellschafter-Konten (`partner_transactions`, Eigenkapital) gehören NICHT hierher.
+// PARTNER (A2 / P1): Ein Partner zählt nur, wenn er ausdrücklich mit dem Kunden verknüpft ist (`partners.linked_customer_id`,
+// „Link to client" mit Bestätigung). Dann laufen seine OFFENEN Beträge über `partnerOpenRows` (dieselbe Zahl wie
+// Receivables/Payables, je Partner und Artikel genau einmal) in den Saldo. Ein nur rechnerischer Gewinnanteil aus einem
+// noch nicht abgerechneten Verkauf zählt nie. Ein möglicher Partner (gleicher Name/gleiches Telefon) ohne Verknüpfung ist
+// nur ein Hinweis. Gesellschafter-Konten (`partner_transactions`, Eigenkapital) gehören NICHT hierher.
 //
 // Gold in Gramm steht getrennt und wird nie in BHD gerechnet.
 //
@@ -159,11 +158,11 @@ export interface PartnerAccountView {
   items: PartnerItemAccountView[];
 }
 
-export interface DebtHint { id: string; loanNumber: string; counterparty: string; direction: 'WE_LENT' | 'WE_BORROWED'; open: number; date: string }
+export interface DebtHint { id: string; loanNumber: string; counterparty: string; direction: 'WE_LENT' | 'WE_BORROWED'; open: number; date: string; revision: number }
 export interface SupplierHint { id: string; name: string; matchedBy: string; outstanding: number }
 
 export interface CustomerAccount {
-  customer: { id: string; name: string; phone: string | null };
+  customer: { id: string; name: string; phone: string | null; updatedAt: string };
   supplierRole: { id: string; name: string } | null;
   owesUs: SideTotals;
   weOwe: SideTotals;
@@ -257,7 +256,7 @@ export function buildCustomerAccount(raw: CustomerAccountRaw): CustomerAccount {
   const incomplete: string[] = [];
   if (raw.hints.debts.length) incomplete.push(`${raw.hints.debts.length} loan(s) without a client link look like this client`);
   if (raw.hints.suppliers.length) incomplete.push('a supplier with the same name or phone is not linked to this client');
-  if (raw.hints.partners.length) incomplete.push('a partner with the same name or phone exists — partners cannot be linked to a client yet');
+  if (raw.hints.partners.length) incomplete.push('a partner with the same name or phone is not linked to this client');
 
   return {
     customer: raw.customer,
@@ -293,12 +292,11 @@ const norm = (s: unknown): string => txt(s).replace(/\s+/g, '').toLowerCase();
 const normName = (s: unknown): string => txt(s).trim().replace(/\s+/g, ' ').toLowerCase();
 
 /**
- * Die Partnerkennungen, die AUSDRÜCKLICH mit diesem Kunden verknüpft sind. Heute gibt es dafür kein Feld (P1) —
- * deshalb leer: kein Partnerbetrag zählt, bis die Verknüpfung entschieden und gebaut ist.
+ * Die Partnerkennungen, die AUSDRÜCKLICH mit diesem Kunden verknüpft sind (`partners.linked_customer_id`, gesetzt nur
+ * über „Link to client" — CUSTOMER ACCOUNT A2 / P1). Höchstens einer je Kunde und Filiale (Index).
  */
 export function linkedPartnerIds(ctx: { branchId: string }, customerId: string): string[] {
-  void ctx; void customerId;
-  return [];
+  return query('SELECT id FROM partners WHERE branch_id = ? AND linked_customer_id = ?', [ctx.branchId, customerId]).map((r) => txt(r.id));
 }
 
 /**
@@ -342,7 +340,7 @@ export function partnerView(p: PartnerItemsOfPartner, link: PartnerAccountView['
 export function customerAccountFor(ctx: BusinessReadContext | { branchId: string }, customerId: unknown): CustomerAccount {
   if (typeof customerId !== 'string' || customerId.trim() === '') throw new CustomerAccountRejected('PARTY_REQUIRED', 'choose the client');
   const branchId = ctx.branchId;
-  const c = query("SELECT id, first_name, last_name, company, phone FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [customerId, branchId])[0];
+  const c = query("SELECT id, first_name, last_name, company, phone, updated_at FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [customerId, branchId])[0];
   if (!c) throw new CustomerAccountRejected('PARTY_NOT_FOUND', 'no such client in this branch');
   const name = `${txt(c.first_name)} ${txt(c.last_name)}`.trim() || txt(c.company) || customerId;
   const docs: AccountDocRaw[] = [];
@@ -663,11 +661,17 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   for (const pid of linked) {
     const ov = partnerItemsOverview(branchId, pid);
     for (const p of ov) partners.push(partnerView(p, 'LINKED', null));
+    // Ein verknüpfter Partner ohne gemeinsamen Artikel steht trotzdem da (nichts offen), damit die Verknüpfung sichtbar ist.
+    if (ov.length === 0) {
+      const p = query('SELECT name, active FROM partners WHERE id = ?', [pid])[0];
+      partners.push({ partnerId: pid, name: txt(p?.name), active: Number(p?.active) === 1, link: 'LINKED', matchedBy: null, owedToPartner: 0, owedByPartner: 0, items: [] });
+    }
     docs.push(...partnerDocsOf(ov));
   }
   const phone = norm(c.phone);
   const partnerHints: PartnerAccountView[] = [];
-  for (const p of query('SELECT id, name, phone FROM partners WHERE branch_id = ?', [branchId])) {
+  // Ein schon mit einem (anderen) Kunden verknüpfter Partner ist nie ein Hinweis — er gehört dorthin.
+  for (const p of query("SELECT id, name, phone FROM partners WHERE branch_id = ? AND (linked_customer_id IS NULL OR linked_customer_id = '')", [branchId])) {
     if (linked.includes(txt(p.id))) continue;
     const byPhone = phone !== '' && norm(p.phone) === phone;
     const byName = normName(p.name) !== '' && normName(p.name) === normName(name);
@@ -682,7 +686,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   const debtHints: DebtHint[] = [];
   const names = [normName(name), normName(c.company)].filter((x) => x !== '');
   for (const r of query(
-    `SELECT d.id, d.loan_number, d.counterparty, d.direction, d.amount, d.created_at,
+    `SELECT d.id, d.loan_number, d.counterparty, d.direction, d.amount, d.created_at, d.revision,
             COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid
        FROM debts d WHERE d.branch_id = ? AND (d.customer_id IS NULL OR d.customer_id = '')
         AND UPPER(d.status) NOT IN ('CANCELLED', 'REPAID', 'SETTLED')`,
@@ -692,7 +696,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
     const openF = F(r.amount) - F(r.paid);
     if (openF <= OPEN_EPS_F) continue;
     const lent = txt(r.direction) === 'we_lend' || txt(r.direction) === 'MONEY_GIVEN';
-    debtHints.push({ id: txt(r.id), loanNumber: txt(r.loan_number) || txt(r.id).slice(0, 8), counterparty: txt(r.counterparty), direction: lent ? 'WE_LENT' : 'WE_BORROWED', open: B(openF), date: day(r.created_at) });
+    debtHints.push({ id: txt(r.id), loanNumber: txt(r.loan_number) || txt(r.id).slice(0, 8), counterparty: txt(r.counterparty), direction: lent ? 'WE_LENT' : 'WE_BORROWED', open: B(openF), date: day(r.created_at), revision: Number(r.revision ?? 1) });
   }
   const supplierHints: SupplierHint[] = [];
   if (!supplierRole) {
@@ -719,7 +723,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
     .filter((g) => g.grams > 0.0005);
 
   return buildCustomerAccount({
-    customer: { id: customerId, name, phone: txt(c.phone) || null },
+    customer: { id: customerId, name, phone: txt(c.phone) || null, updatedAt: txt(c.updated_at) },
     supplierRole, docs, partners, gold,
     hints: { debts: debtHints, suppliers: supplierHints, partners: partnerHints },
   });

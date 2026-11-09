@@ -346,7 +346,10 @@ const gegenparteien = (db: Db): string => all(db,
     // CUSTOMER ACCOUNT A1 (Owner 08.11.2026) — das Kundenkonto ZEIGT die offenen Posten der ausdrücklich verknüpften
     // Rolle neben denen des Kunden (nur lesen). Es bucht nichts und verrechnet nichts; Ledger, Rechnungen und Einkäufe
     // lesen die Verknüpfung weiterhin nicht.
-    'core/parties/customer-account.ts'];
+    'core/parties/customer-account.ts',
+    // CUSTOMER ACCOUNT A2 (P1) — die GLEICHNAMIGE Spalte des Partners (`partners.linked_customer_id`): Verknüpfen/Lösen im
+    // Partner-Dialog und im Partner-Speicher. Keine Lieferanten-Verknüpfung, kein Ledger-, Rechnungs- oder Einkaufscode.
+    'components/partners/PartnerClientLink.tsx', 'stores/partnerStore.ts'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');

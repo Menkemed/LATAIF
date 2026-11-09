@@ -26,6 +26,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { saveDebtCreate, saveDebtPayment, saveDebtUpdate } from '@/core/finance/money-save';
 import { WriteError } from '@/components/shared/WriteError';
+import { DebtAssignClient } from '@/components/debts/DebtAssignClient';
 import type { DebtView } from '@/stores/debtStore';
 import { useListState } from '@/hooks/useListNav';
 
@@ -717,6 +718,11 @@ export function DebtsPage() {
                 <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>{detail.notes}</div>
               )}
             </div>
+
+            {/* CUSTOMER ACCOUNT A2 (P2) — nur ein Darlehen ohne Kunde bekommt „Assign to client". */}
+            {!detail.customerId && canonicalLoanStatus(detail.status) !== 'CANCELLED' && (
+              <DebtAssignClient debt={detail} onDone={() => { loadDebts(); }} />
+            )}
 
             {/* Payments history */}
             <div>

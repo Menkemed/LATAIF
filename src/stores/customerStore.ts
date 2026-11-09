@@ -239,6 +239,11 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       db.run('UPDATE suppliers SET linked_customer_id = NULL, updated_at = ? WHERE id = ?', [jetzt, r.id]);
       trackUpdate('suppliers', String(r.id), { linkedCustomerId: null });
     }
+    // CUSTOMER ACCOUNT A2 — ebenso der verknüpfte Partner: er bleibt mit seinen Beteiligungen, nur der Verweis geht.
+    for (const r of query('SELECT id FROM partners WHERE linked_customer_id = ?', [id])) {
+      db.run('UPDATE partners SET linked_customer_id = NULL, updated_at = ? WHERE id = ?', [jetzt, r.id]);
+      trackUpdate('partners', String(r.id), { linkedCustomerId: null });
+    }
     db.run('DELETE FROM customers WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('customers', id);

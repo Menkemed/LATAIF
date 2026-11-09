@@ -22,6 +22,7 @@ import { savePartnerCreate, savePartnerUpdate } from '@/core/masterdata/masterda
 import { savePartnerTx } from '@/core/finance/money-save';
 // PARTNER-ITEMS — Beteiligungen an gemeinsam gekauften Artikeln (eigenes Ausgleichskonto).
 import { PartnerItemsPanel } from '@/components/partners/PartnerItemsPanel';
+import { PartnerClientLink } from '@/components/partners/PartnerClientLink';
 import { PartnerCardItems, type PartnerItemAction } from '@/components/partners/PartnerCardItems';
 import { useListState } from '@/hooks/useListNav';
 
@@ -303,6 +304,12 @@ export function PartnersPage() {
               ))}
             </div>
           </div>
+          {editPartner && (
+            <PartnerClientLink partner={editPartner} onChanged={() => {
+              const neu = usePartnerStore.getState().partners.find((p) => p.id === editPartner.id);
+              if (neu) setEditPartner(neu);
+            }} />
+          )}
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>
             <textarea value={editForm.notes || ''}

@@ -192,6 +192,26 @@ export async function saveDebtPayment(
  * „Edit Debt" — nur, was sich gegen den geladenen Stand geändert hat (vorher reiste jedes Mal der
  * ganze Stand samt Betrag, und ein Betrag 0 warf ungefangen). Ohne Änderung: nichts zu tun.
  */
+/**
+ * CUSTOMER ACCOUNT A2 (P2) — ein Darlehen ohne Kunde dem bewusst gewählten Kunden zuordnen (nach Bestätigung). Am PC2
+ * `debts.update` mit `assignCustomerId` und der gesehenen Fassung; nur `customer_id` ändert sich.
+ */
+export async function saveDebtAssignCustomer(
+  w: MoneyWrite,
+  base: { id: string; revision?: number },
+  customerId: string,
+): Promise<WriteOutcome<{ debtId: string }>> {
+  let input: DebtUpdateInput;
+  try { input = debtUpdateInput({ debtId: base.id, expectedRevision: base.revision, assignCustomerId: customerId }); } catch (e) { return absage(e); }
+  const r = await w.save<{ debtId: string }>(OP_DEBTS_UPDATE, {
+    local: async () => { await updateDebtOnPrimary(input); return { debtId: base.id }; },
+    remote: () => rumpf(input),
+    shape: () => ({ debtId: base.id }),
+  });
+  if (r.kind === 'ok' && w.remote) debtsNeu(base.id);
+  return r;
+}
+
 export async function saveDebtUpdate(
   w: MoneyWrite,
   base: DebtView,

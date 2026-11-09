@@ -14,7 +14,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht, Anteil 0–100 %).
-import { partnerCreateInput, partnerUpdateInput } from '@/core/masterdata/masterdata-rules';
+import { MasterdataInputError, partnerCreateInput, partnerUpdateInput } from '@/core/masterdata/masterdata-rules';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 import {
   postPartnerTransactionReversed,
   hasLedgerEntries,
@@ -42,6 +43,11 @@ interface PartnerStore {
   getPartner: (id: string) => Partner | undefined;
   createPartner: (data: Partial<Partner>) => Partner;
   updatePartner: (id: string, data: Partial<Partner>) => void;
+  /** CUSTOMER ACCOUNT A2 — einen Partner ausdrücklich mit einem Kunden (dieselbe Person) verknüpfen. Ändert NUR
+   *  `linked_customer_id`; Beteiligungen, Bewegungen, Abrechnungen und Buchungen bleiben unberührt. */
+  linkPartnerToCustomer: (partnerId: string, customerId: string, seenCustomerUpdatedAt?: string, actor?: PartnerLinkActor) => { partner: Partner; existing: boolean };
+  /** Die Verknüpfung wieder lösen — nur, wenn sie noch auf den genannten Kunden zeigt. */
+  unlinkPartnerFromCustomer: (partnerId: string, expectedCustomerId: string, actor?: PartnerLinkActor) => { partner: Partner; changed: boolean };
   deletePartner: (id: string) => void;
   // Transactions
   recordInvestment: (partnerId: string, amount: number, method: 'cash' | 'bank' | 'benefit', date?: string, notes?: string) => PartnerTransaction;
@@ -51,6 +57,30 @@ interface PartnerStore {
   markTransactionPaid: (id: string) => void;
   deleteTransaction: (id: string) => void;
   getPartnerLedger: (partnerId: string) => { totalInvested: number; totalWithdrawn: number; totalProfitShare: number; balance: number };
+}
+
+/** Wer die Verknüpfung WIRKLICH ändert (am PC2 der geprüfte Absender, nicht die Sitzung des Primary). */
+export interface PartnerLinkActor { userId?: string; branchId?: string }
+
+/**
+ * CUSTOMER ACCOUNT A2 (P1) — die Prüfung der Verknüpfung Partner ↔ Kunde, rein lesend (Maske und Haus):
+ * Partner und Kunde in DIESER Filiale, kein System-Kunde, keine stille Umhängung, höchstens ein Partner je Kunde.
+ */
+export function partnerLinkCheck(partnerId: string, customerId: string, branchId: string, seenCustomerUpdatedAt?: string): { existing: boolean; customerName: string } {
+  const p = query('SELECT id, branch_id, linked_customer_id FROM partners WHERE id = ?', [partnerId])[0];
+  if (!p || String(p.branch_id) !== branchId) throw new MasterdataInputError('PARTNER_NOT_FOUND', 'no such partner in this branch');
+  const c = query("SELECT id, branch_id, first_name, last_name, company, updated_at FROM customers WHERE id = ? AND id NOT LIKE 'sys-%'", [customerId])[0];
+  if (!c) throw new MasterdataInputError('CUSTOMER_NOT_FOUND', 'no such client');
+  if (String(c.branch_id) !== branchId) throw new MasterdataInputError('CUSTOMER_BRANCH_MISMATCH', 'this client belongs to another branch');
+  const customerName = `${String(c.first_name ?? '')} ${String(c.last_name ?? '')}`.trim() || String(c.company ?? '') || customerId;
+  if (p.linked_customer_id === customerId) return { existing: true, customerName };
+  if (p.linked_customer_id) throw new MasterdataInputError('PARTNER_ALREADY_LINKED', 'this partner is already linked to another client — unlink it there first');
+  if (seenCustomerUpdatedAt !== undefined && String(c.updated_at) !== seenCustomerUpdatedAt) {
+    throw new MasterdataInputError('CUSTOMER_CHANGED', 'this client changed since you opened it — reload and check');
+  }
+  const andere = query('SELECT id, name FROM partners WHERE branch_id = ? AND linked_customer_id = ? AND id != ? LIMIT 1', [branchId, customerId, partnerId])[0];
+  if (andere) throw new MasterdataInputError('CUSTOMER_ALREADY_PARTNER', `this client is already linked to partner ${String(andere.name ?? '')}`);
+  return { existing: false, customerName };
 }
 
 function rowToPartner(row: Record<string, unknown>): Partner {
@@ -63,6 +93,7 @@ function rowToPartner(row: Record<string, unknown>): Partner {
     sharePercentage: (row.share_percentage as number) || 0,
     active: Number(row.active) === 1,
     notes: row.notes as string | undefined,
+    linkedCustomerId: (row.linked_customer_id as string | null) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -151,6 +182,50 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     saveDatabase();
     trackUpdate('partners', id, input);
     get().loadPartners();
+  },
+
+  linkPartnerToCustomer: (partnerId, customerId, seenCustomerUpdatedAt, actor) => {
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    if (actor?.branchId) branchId = actor.branchId;
+    const check = partnerLinkCheck(partnerId, customerId, branchId, seenCustomerUpdatedAt);
+    if (check.existing) { get().loadPartners(); return { partner: get().getPartner(partnerId)!, existing: true }; }
+    const now = new Date().toISOString();
+    const row = query('SELECT name FROM partners WHERE id = ?', [partnerId])[0];
+    // NUR die Verknüpfung — kein Feld des Partners, keine Beteiligung, keine Buchung wird berührt.
+    getDatabase().run('UPDATE partners SET linked_customer_id = ?, updated_at = ? WHERE id = ? AND linked_customer_id IS NULL', [customerId, now, partnerId]);
+    if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new MasterdataInputError('PARTNER_LINK_CHANGED', 'the partner changed meanwhile — reload');
+    trackUpdate('partners', partnerId, { linkedCustomerId: customerId });
+    logAuditOrThrow({
+      module: 'Partner', entityType: 'partners', entityId: partnerId, action: 'UPDATE', field: 'linked_customer_id',
+      oldValue: null, newValue: { customerId, customerName: check.customerName, partnerName: String(row?.name ?? '') },
+      actor: actor ? { userId: actor.userId, branchId } : undefined,
+    });
+    saveDatabase();
+    get().loadPartners();
+    return { partner: get().getPartner(partnerId)!, existing: false };
+  },
+
+  unlinkPartnerFromCustomer: (partnerId, expectedCustomerId, actor) => {
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    if (actor?.branchId) branchId = actor.branchId;
+    const p = query('SELECT id, branch_id, name, linked_customer_id FROM partners WHERE id = ?', [partnerId])[0];
+    if (!p || String(p.branch_id) !== branchId) throw new MasterdataInputError('PARTNER_NOT_FOUND', 'no such partner in this branch');
+    if (!p.linked_customer_id) { get().loadPartners(); return { partner: get().getPartner(partnerId)!, changed: false }; }
+    if (p.linked_customer_id !== expectedCustomerId) throw new MasterdataInputError('PARTNER_LINK_CHANGED', 'this partner is linked to a different client now — reload');
+    const now = new Date().toISOString();
+    getDatabase().run('UPDATE partners SET linked_customer_id = NULL, updated_at = ? WHERE id = ? AND linked_customer_id = ?', [now, partnerId, expectedCustomerId]);
+    if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new MasterdataInputError('PARTNER_LINK_CHANGED', 'the partner changed meanwhile — reload');
+    trackUpdate('partners', partnerId, { linkedCustomerId: null });
+    logAuditOrThrow({
+      module: 'Partner', entityType: 'partners', entityId: partnerId, action: 'UPDATE', field: 'linked_customer_id',
+      oldValue: expectedCustomerId, newValue: { customerId: null, partnerName: String(p.name ?? '') },
+      actor: actor ? { userId: actor.userId, branchId } : undefined,
+    });
+    saveDatabase();
+    get().loadPartners();
+    return { partner: get().getPartner(partnerId)!, changed: true };
   },
 
   deletePartner: (id) => {

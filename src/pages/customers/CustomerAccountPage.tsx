@@ -12,7 +12,10 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useGoBack } from '@/hooks/useGoBack';
 import { useSharedRead } from '@/core/data/shared-read';
 import { OP_PARTIES_ACCOUNT_GET, partyAccountReadFor, type PartyAccountRead } from '@/core/parties/party-account';
-import { CUSTOMER_ACCOUNT_VIEW, type AccountDoc, type CustomerAccount, type PartnerAccountView, type StatementRow } from '@/core/parties/customer-account';
+import { CUSTOMER_ACCOUNT_VIEW, type AccountDoc, type CustomerAccount, type DebtHint, type PartnerAccountView, type StatementRow } from '@/core/parties/customer-account';
+import { useSharedWrites, fehlertext, type WriteAdapters } from '@/core/data/shared-write';
+import { saveDebtAssignCustomer } from '@/core/finance/money-save';
+import { savePartnerLinkToCustomer } from '@/core/masterdata/masterdata-save';
 
 const INK = '#0F0F10';
 const GREY = '#6B7280';
@@ -75,7 +78,7 @@ function SideTable({ title, docs, testId, showSettled }: { title: string; docs: 
   );
 }
 
-function PartnerBlock({ p }: { p: PartnerAccountView }) {
+function PartnerBlock({ p, onLink, busy }: { p: PartnerAccountView; onLink?: () => void; busy?: boolean }) {
   const possible = p.link === 'POSSIBLE';
   return (
     <div style={{ border: `1px ${possible ? 'dashed' : 'solid'} ${possible ? '#F5C78E' : LINE}`, borderRadius: 12, padding: 14, marginTop: 10, background: possible ? '#FFFBF3' : '#fff' }} data-partner-block={p.partnerId} data-partner-link={p.link}>
@@ -83,11 +86,17 @@ function PartnerBlock({ p }: { p: PartnerAccountView }) {
         <div>
           <Link to={`/partners?partner=${encodeURIComponent(p.partnerId)}`} style={{ color: INK, fontWeight: 600 }}>{p.name}</Link>
           <span style={{ fontSize: 12, color: possible ? AMBER : GREY, marginLeft: 8 }}>
-            {possible ? `possible match by ${p.matchedBy} — not linked, NOT counted in the balance` : 'linked partner — counted in the balance'}
+            {possible ? `possible match by ${p.matchedBy} — not linked, NOT counted in the balance` : 'linked partner — open amounts counted in the balance'}
           </span>
         </div>
-        <div style={{ fontSize: 12, color: GREY }}>
-          We owe the partner <b style={{ color: INK }}><Bhd v={p.owedToPartner} /></b> · partner owes us <b style={{ color: INK }}><Bhd v={p.owedByPartner} /></b>
+        <div className="flex items-center gap-3" style={{ fontSize: 12, color: GREY, flexWrap: 'wrap' }}>
+          <span>We owe the partner <b style={{ color: INK }}><Bhd v={p.owedToPartner} /></b> · partner owes us <b style={{ color: INK }}><Bhd v={p.owedByPartner} /></b></span>
+          {possible && onLink && (
+            <button onClick={onLink} disabled={busy} className="cursor-pointer" data-partner-link-here={p.partnerId}
+              style={{ background: '#fff', border: `1px solid ${INK}`, borderRadius: 8, padding: '5px 12px', fontSize: 12, color: INK }}>
+              Link to this client
+            </button>
+          )}
         </div>
       </div>
       {p.items.length > 0 && (
@@ -187,6 +196,32 @@ export function CustomerAccountPage() {
   const weOwe = useMemo(() => acc?.docs.filter((d) => d.side === 'WE_OWE') ?? [], [acc]);
   const possiblePartners = acc?.hints.partners ?? [];
 
+  // CUSTOMER ACCOUNT A2 — die beiden ausdrücklichen Zuordnungen aus dem Konto heraus, je mit Rückfrage: ein Darlehen ohne
+  // Kunde diesem Kunden zuordnen (P2), einen möglichen Partner mit diesem Kunden verknüpfen (P1). Danach neu lesen.
+  const w = useSharedWrites();
+  const [aktionFehler, setAktionFehler] = useState('');
+  async function darlehenZuordnen(h: DebtHint) {
+    if (!acc) return;
+    setAktionFehler('');
+    const ok = await window.confirm(`Assign loan ${h.loanNumber} (counterparty “${h.counterparty}”) to ${acc.customer.name}?\n\nOnly the client link is saved — amount, repayments, status and bookings stay as they are. It cannot be moved to another client afterwards.`);
+    if (!ok) return;
+    const r = await saveDebtAssignCustomer(w, { id: h.id, revision: h.revision }, acc.customer.id);
+    if (r.kind !== 'ok') { setAktionFehler(`Could not assign ${h.loanNumber}: ${fehlertext(r)}`); return; }
+    setTick((t) => t + 1);
+  }
+  async function partnerVerknuepfen(p: PartnerAccountView) {
+    if (!acc) return;
+    setAktionFehler('');
+    const ok = await window.confirm(`Link partner "${p.name}" to ${acc.customer.name} (same person)?\n\nOnly the link is saved — shares, settlements and bookings stay as they are. The partner's open amounts then count in this account.`);
+    if (!ok) return;
+    const r = await savePartnerLinkToCustomer(
+      { remote: w.remote, save: (a: WriteAdapters<{ partnerId: string; existing: boolean }>) => w.save('partners.update', a) },
+      p.partnerId, { id: acc.customer.id, updatedAt: acc.customer.updatedAt },
+    );
+    if (r.kind !== 'ok') { setAktionFehler(`Could not link ${p.name}: ${fehlertext(r)}`); return; }
+    setTick((t) => t + 1);
+  }
+
   return (
     <div className="app-content" style={{ background: '#FFFFFF' }}>
       <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }} data-customer-account={id}>
@@ -220,6 +255,11 @@ export function CustomerAccountPage() {
               <div style={{ border: '1px dashed #F5C78E', background: '#FFFBF3', borderRadius: 12, padding: '12px 14px', marginBottom: 18, fontSize: 13 }} data-account-incomplete>
                 <b>The balance may be incomplete.</b>
                 <ul style={{ margin: '6px 0 0 18px', padding: 0, color: '#7A5B1E' }}>{acc.incomplete.map((t) => <li key={t}>{t}</li>)}</ul>
+              </div>
+            )}
+            {aktionFehler && (
+              <div style={{ border: '1px solid #FCA5A5', background: '#FEF2F2', color: '#B91C1C', borderRadius: 10, padding: '10px 14px', marginBottom: 18, fontSize: 13 }} data-account-action-error>
+                {aktionFehler}
               </div>
             )}
 
@@ -270,10 +310,10 @@ export function CustomerAccountPage() {
               {acc.partners.map((p) => <PartnerBlock key={p.partnerId} p={p} />)}
               {possiblePartners.length > 0 && (
                 <p style={{ fontSize: 12, color: GREY, marginTop: 8 }}>
-                  Partners cannot be linked to a client yet. A partner with the same name or phone is shown below for checking; its amounts are not part of the balance.
+                  A partner with the same name or phone is shown below for checking; its amounts are not part of the balance until you link it — the app never links by name or phone.
                 </p>
               )}
-              {possiblePartners.map((p) => <PartnerBlock key={p.partnerId} p={p} />)}
+              {possiblePartners.map((p) => <PartnerBlock key={p.partnerId} p={p} busy={w.busy} onLink={() => void partnerVerknuepfen(p)} />)}
             </Card>
 
             <Card style={{ marginBottom: 18 }}>
@@ -300,7 +340,13 @@ export function CustomerAccountPage() {
                 {acc.hints.debts.map((h) => (
                   <div key={h.id} className="flex items-center justify-between" style={{ padding: '4px 0', gap: 12 }} data-hint-debt={h.id}>
                     <span><Link to="/debts" style={{ color: INK, fontWeight: 500 }}>{h.loanNumber}</Link> · {h.direction === 'WE_LENT' ? 'We Lent' : 'We Borrowed'} · {fmtDate(h.date)} · counterparty “{h.counterparty}”</span>
-                    <span className="font-mono">open <Bhd v={h.open} /></span>
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono">open <Bhd v={h.open} /></span>
+                      <button onClick={() => void darlehenZuordnen(h)} disabled={w.busy} className="cursor-pointer" data-hint-debt-assign={h.id}
+                        style={{ background: '#fff', border: `1px solid ${INK}`, borderRadius: 8, padding: '5px 12px', fontSize: 12, color: INK }}>
+                        Assign to this client
+                      </button>
+                    </span>
                   </div>
                 ))}
                 {acc.hints.suppliers.map((h) => (

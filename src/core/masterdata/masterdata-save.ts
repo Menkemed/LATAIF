@@ -249,6 +249,42 @@ export async function savePartnerUpdate(write: MasterdataWrite<Saved>, base: Par
   return r;
 }
 
+/**
+ * CUSTOMER ACCOUNT A2 (P1) — einen Partner ausdrücklich mit einem Kunden verknüpfen (nach Bestätigung in der Maske).
+ * Am Primary in einer Klammer, am PC2 `partners.update` mit Kunde und gesehenem Stand. Nur `linked_customer_id`.
+ */
+export async function savePartnerLinkToCustomer(
+  write: MasterdataWrite<{ partnerId: string; existing: boolean }>,
+  partnerId: string,
+  customer: { id: string; updatedAt: string },
+): Promise<WriteOutcome<{ partnerId: string; existing: boolean }>> {
+  const r = await write.save({
+    local: () => runOnPrimary(() => {
+      const out = usePartnerStore.getState().linkPartnerToCustomer(partnerId, customer.id, customer.updatedAt);
+      return { partnerId, existing: out.existing };
+    }, partnersHier),
+    remote: () => ({ id: partnerId, linkedCustomerId: customer.id, linkedCustomerUpdatedAt: customer.updatedAt }),
+    shape: (v) => ({ partnerId: String(v.partnerId ?? partnerId), existing: v.existing === true }),
+  });
+  if (r.kind === 'ok') await partnersNeu();
+  return r;
+}
+
+/** Die Verknüpfung lösen — nur, wenn sie noch auf diesen Kunden zeigt. */
+export async function savePartnerUnlink(
+  write: MasterdataWrite<{ partnerId: string }>,
+  partnerId: string,
+  customerId: string,
+): Promise<WriteOutcome<{ partnerId: string }>> {
+  const r = await write.save({
+    local: () => runOnPrimary(() => { usePartnerStore.getState().unlinkPartnerFromCustomer(partnerId, customerId); return { partnerId }; }, partnersHier),
+    remote: () => ({ id: partnerId, unlinkCustomerId: customerId }),
+    shape: () => ({ partnerId }),
+  });
+  if (r.kind === 'ok') await partnersNeu();
+  return r;
+}
+
 // ── Mitarbeiter ────────────────────────────────────────────────────────────
 
 export async function saveEmployeeCreate(write: MasterdataWrite<Saved>, form: Partial<Employee>): Promise<WriteOutcome<Saved>> {

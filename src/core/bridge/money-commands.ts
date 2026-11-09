@@ -140,7 +140,7 @@ export function parseDebtPayment(raw: unknown): DebtPaymentInput & { expectedRev
 }
 
 export function parseDebtUpdate(raw: unknown): DebtUpdateInput & { expectedRevision: number } {
-  const r = strict(raw, ['debtId', 'expectedRevision', 'counterparty', 'amount', 'dueDate', 'notes', 'source'], MONEY_COMPUTED.debtUpdate);
+  const r = strict(raw, ['debtId', 'expectedRevision', 'counterparty', 'amount', 'dueDate', 'notes', 'source', 'assignCustomerId'], MONEY_COMPUTED.debtUpdate);
   const expectedRevision = revisionOf(r.expectedRevision);
   const input = rule(() => debtUpdateInput(r));
   if (Object.keys(input).filter((k) => k !== 'debtId' && k !== 'expectedRevision').length === 0) {

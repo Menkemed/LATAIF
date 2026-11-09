@@ -31,6 +31,7 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { financeFor } from '@/core/reports/analytics-snapshot';
 import {
@@ -77,6 +78,8 @@ export const DEBT_REPAID = 'DEBT_REPAID';
 export const DEBT_OVERPAYMENT = 'DEBT_OVERPAYMENT';
 export const DEBT_AMOUNT_BELOW_PAID = 'DEBT_AMOUNT_BELOW_PAID';
 export const DEBT_COUNTERPARTY_REQUIRED = 'DEBT_COUNTERPARTY_REQUIRED';
+export const DEBT_ALREADY_ASSIGNED = 'DEBT_ALREADY_ASSIGNED';
+export const DEBT_ASSIGN_ALONE = 'DEBT_ASSIGN_ALONE';
 export const RECORD_CHANGED = 'RECORD_CHANGED';
 
 // ── Wo gebucht wird ─────────────────────────────────────────────────────────
@@ -610,12 +613,23 @@ export interface DebtUpdateInput {
   /** `null` löscht */
   notes?: string | null;
   source?: CashSource;
+  /**
+   * CUSTOMER ACCOUNT A2 (P2) — „Assign to this client": ein Darlehen OHNE Kunde einem Kunden zuordnen. Ein eigener
+   * Schritt (nie zusammen mit anderen Feldern); ein schon zugeordnetes Darlehen wird nie still umgehängt.
+   */
+  assignCustomerId?: string;
 }
 
 export function debtUpdateInput(raw: Record<string, unknown>): DebtUpdateInput {
   const out: DebtUpdateInput = { debtId: idOf(raw.debtId, 'debtId') };
   const rev = expectedRevisionOpt(raw.expectedRevision);
   if (rev !== undefined) out.expectedRevision = rev;
+  if (raw.assignCustomerId !== undefined) {
+    const andere = ['counterparty', 'amount', 'dueDate', 'notes', 'source'].filter((k) => raw[k] !== undefined);
+    if (andere.length) throw new MoneyRejected(DEBT_ASSIGN_ALONE, `assigning a client is its own step — not together with ${andere.join(', ')}`);
+    out.assignCustomerId = idOf(raw.assignCustomerId, 'assignCustomerId');
+    return out;
+  }
   if (raw.counterparty !== undefined) {
     const c = textOf(raw.counterparty, 'counterparty');
     // Das Feld ist in der Maske Pflicht — ein Darlehen ohne Gegenpartei gibt es nicht.
@@ -632,6 +646,41 @@ export function debtUpdateInput(raw: Record<string, unknown>): DebtUpdateInput {
 export interface DebtUpdateResult { debtId: string; status: DebtStatus; amount: number; source: CashSource; revision: number; changed: boolean; reposted: boolean }
 
 /**
+ * CUSTOMER ACCOUNT A2 (P2) — die Zuordnung selbst: NUR `customer_id`. Betrag, Zahlungen, Status, Gegenpartei-Freitext
+ * und Buchung bleiben, wie sie sind (die Darlehensbuchung trägt keinen Kunden). Schon zugeordnet → nie umhängen; derselbe
+ * Kunde noch einmal → nichts zu tun. Protokolliert mit dem, der es wirklich getan hat.
+ */
+function assignDebtCustomer(debtId: string, customerId: string, d: Record<string, unknown>, ctx: MoneyCtx): DebtUpdateResult {
+  const unchanged = (): DebtUpdateResult => ({
+    debtId, status: d.status as DebtStatus, amount: Number(d.amount ?? 0), source: d.source as CashSource,
+    revision: Number(d.revision ?? 0), changed: false, reposted: false,
+  });
+  const jetzt = d.customer_id ? String(d.customer_id) : '';
+  if (jetzt === customerId) return unchanged();
+  if (jetzt) throw new MoneyRejected(DEBT_ALREADY_ASSIGNED, `this loan already belongs to a client — it is never moved to another one here`);
+  const c = query(
+    "SELECT first_name, last_name, company FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'",
+    [customerId, ctx.branchId],
+  )[0];
+  if (!c) throw new MoneyRejected(CUSTOMER_NOT_FOUND, 'no such client in this branch');
+  const name = `${String(c.first_name ?? '')} ${String(c.last_name ?? '')}`.trim() || String(c.company ?? '');
+  const now = new Date().toISOString();
+  getDatabase().run(`UPDATE debts SET customer_id = ?, updated_at = ? WHERE id = ? AND (customer_id IS NULL OR customer_id = '')`, [customerId, now, debtId]);
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new MoneyRejected(RECORD_CHANGED, 'the loan changed meanwhile — reload');
+  trackUpdate('debts', debtId, { customerId });
+  logAuditOrThrow({
+    module: 'Finance', entityType: 'debts', entityId: debtId, action: 'UPDATE', field: 'customer_id',
+    oldValue: null, newValue: { customerId, customerName: name, loanNumber: d.loan_number ?? null, counterparty: d.counterparty ?? null },
+    actor: { userId: ctx.userId, branchId: ctx.branchId },
+  });
+  const row = query('SELECT status, amount, source, revision FROM debts WHERE id = ?', [debtId])[0];
+  return {
+    debtId, status: row.status as DebtStatus, amount: Number(row.amount ?? 0), source: row.source as CashSource,
+    revision: Number(row.revision ?? 0), changed: true, reposted: false,
+  };
+}
+
+/**
  * „Edit Debt": nur was sich gegen die Datenbank wirklich ändert. Ändert sich Betrag oder Konto,
  * wird die Darlehensbuchung in DERSELBEN Transaktion gespiegelt und neu gebucht — vorher lief das
  * Hauptbuch hier still auseinander. Ein storniertes Darlehen wird nicht mehr berichtigt (vorher
@@ -645,6 +694,8 @@ export function updateDebtInHouse(raw: DebtUpdateInput, ctx: MoneyCtx): DebtUpda
   if (canonicalLoanStatus(d.status as DebtStatus) === 'CANCELLED') {
     throw new MoneyRejected(DEBT_CANCELLED, 'this loan is cancelled — it is no longer edited');
   }
+
+  if (v.assignCustomerId !== undefined) return assignDebtCustomer(v.debtId, v.assignCustomerId, d, ctx);
 
   const paidF = paidFilsOf(v.debtId);
   const sets: string[] = [];

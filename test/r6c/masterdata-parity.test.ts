@@ -430,7 +430,8 @@ marker('CENTRAL_UI_R6C_PRIMARY_PARITY_PROVED');
   // MEDIA-IDENTITY §3 — neun statt sieben plus zwei: das Ausweisfoto wird jetzt VOR der Klammer
   // aufgenommen (`prepareIdentityPhoto`), also brauchen auch die zwei Lieferanten-Anschlüsse keine
   // asynchrone Vorstufe INNERHALB der Klammer mehr.
-  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 9 && !/local: async \(\) => \{/.test(ms),
+  // CUSTOMER ACCOUNT A2 — elf statt neun: dazu „Partner mit Kunde verknüpfen" und „Verknüpfung lösen" (beide in der Klammer).
+  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 11 && !/local: async \(\) => \{/.test(ms),
     'UI am Primary läuft jede Stammdaten-Handlung in der Schreibreihenfolge (runOnPrimary) — nicht mehr an ihr vorbei');
   // POST-PARITY R7B PP-12 — dieselbe Ablage; PC2 rechnet das Foto vorher durch den Normalisierer.
   // MEDIA-IDENTITY §3 — derselbe Weg, an EINER Stelle: `prepareIdentityPhoto` legt auf PC2 in die

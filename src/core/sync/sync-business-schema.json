@@ -1054,6 +1054,7 @@
         "created_by",
         "email",
         "id",
+        "linked_customer_id",
         "name",
         "notes",
         "phone",

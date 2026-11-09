@@ -1639,6 +1639,8 @@ export interface Partner {
   sharePercentage: number;  // 0–100
   active: boolean;
   notes?: string;
+  /** CUSTOMER ACCOUNT A2 — ausdrücklich verknüpfter Kunde (dieselbe Person); nur über „Link to client". */
+  linkedCustomerId?: string;
   createdAt: string;
   updatedAt: string;
   // Computed

@@ -462,6 +462,74 @@ try {
     const fremdNachher = foreignProcesses('lataif.exe').map((p) => p.pid).sort();
     ok(S(fremdVorher) === S(fremdNachher), 'ISOLATION fremde LATAIF-Prozesse unberührt');
   }
+
+  // ── F A2 — PC2: möglichen Partner mit diesem Kunden verknüpfen (Maus, App-Rückfrage) ─────────────────────────
+  const ROHDATEN = () => S([
+    dbQ(BIZ_DB, 'SELECT id, status, gross_amount, paid_amount FROM invoices ORDER BY id'), dbQ(BIZ_DB, 'SELECT id, amount FROM payments ORDER BY id'),
+    dbQ(BIZ_DB, 'SELECT id, amount, used_amount, status FROM customer_credits ORDER BY id'), dbQ(BIZ_DB, 'SELECT id, amount FROM debt_payments ORDER BY id'),
+    dbQ(BIZ_DB, 'SELECT id, total_amount, paid_amount, status FROM purchases ORDER BY id'), dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM ledger_entries'),
+    dbQ(BIZ_DB, 'SELECT id, amount, status, counterparty, direction, source FROM debts ORDER BY id'), dbQ(BIZ_DB, 'SELECT id, name, phone, share_percentage, active FROM partners ORDER BY id'),
+  ]);
+  const ROH_VOR = ROHDATEN();
+  // Der ausdrückliche Protokolleintrag der Verknüpfung (das allgemeine Änderungsprotokoll schreibt zusätzlich seine Zeile).
+  const auditZahl = (typ, id) => zahl('SELECT COUNT(*) AS n FROM audit_log WHERE entity_type = ? AND entity_id = ? AND field_name = ?',
+    [typ, id, typ === 'partners' ? 'linked_customer_id' : 'customer_id']);
+  {
+    client = await lade(client, `/clients/${K}/account`);
+    await waitFor(client, '[data-partner-link-here="ca-partner"]', 45000);
+    ok(await mausKlick(client, '[data-partner-link-here="ca-partner"]') === 'OK', 'F Maus auf „Link to this client" (möglicher Partner)');
+    const frage = await warteBis(client, "document.querySelector('[data-app-confirm]')", 10000);
+    const text = frage ? await client.ev("return document.querySelector('[data-app-confirm-text]')?.textContent || '';") : '';
+    ok(frage && /Link partner "Partner AK" to Ahmed Karimi/.test(text), `F App-Rückfrage vor dem Verknüpfen (${String(text).slice(0, 60)})`);
+    ok(await mausKlick(client, '[data-app-confirm-ok]') === 'OK', 'F Maus auf „OK"');
+    const da = await warteBis(client, "document.querySelector('[data-partner-block=\"ca-partner\"][data-partner-link=\"LINKED\"]')", 45000);
+    const v = da ? await ansicht(client) : {};
+    ok(da && v.net === -330 && !(await client.ev("return !!document.querySelector('[data-partner-link-here]');")),
+      `F PC2: Partner jetzt verknüpft (ohne offene Beträge, Saldo bleibt −330), kein Hinweis mehr (${S([da, v.net])})`);
+    await syncRuhe();
+    ok(String(dbQ(BIZ_DB, 'SELECT linked_customer_id AS l FROM partners WHERE id = ?', ['ca-partner'])[0]?.l) === K && auditZahl('partners', 'ca-partner') === 1,
+      'F Datenbank: partners.linked_customer_id gesetzt, ein Protokolleintrag');
+    const cmds = await kommandos(client);
+    ok(cmds.some((x) => x.op === 'partners.update' && x.payload?.linkedCustomerId === K && x.payload?.id === 'ca-partner'), 'F PC2 schrieb über partners.update (am Primary geprüft)');
+    await foto(client, 'ca-f-pc2-partner-linked', '[data-partner-block="ca-partner"]');
+  }
+
+  // ── G A2 — Primary: Darlehen ohne Kunde diesem Kunden zuordnen (Maus, App-Rückfrage) ─────────────────────────
+  {
+    await gehFrisch(primary, `/clients/${K}/account`);
+    await waitFor(primary, '[data-hint-debt-assign="ca-hint"]', 45000);
+    // Am Primary ist die Rückfrage für diesen Lauf ersetzt (DIALOGE_PRIMARY: bestätigt sofort) — sie wird hier
+    // mitgeschrieben, damit sichtbar bleibt, DASS und WAS gefragt wurde. Der echte App-Dialog ist in F am PC2 geklickt.
+    await primary.ev('window.__fragen = []; window.confirm = (m) => { window.__fragen.push(String(m)); return true; }; return 1;');
+    ok(await mausKlick(primary, '[data-hint-debt-assign="ca-hint"]') === 'OK', 'G Maus auf „Assign to this client" (LOA-2026-000905)');
+    await warteBis(primary, '(window.__fragen || []).length > 0', 10000);
+    const fragen = await primary.ev('return JSON.stringify(window.__fragen || []);').then((x) => JSON.parse(x));
+    ok(fragen.length === 1 && /Assign loan LOA-2026-000905 .*to Ahmed Karimi/.test(fragen[0]), `G Rückfrage vor dem Zuordnen gestellt (${String(fragen[0] || '').slice(0, 70)})`);
+    const da = await warteBis(primary, "document.querySelector('[data-account-doc=\"debt:ca-hint\"]')", 45000);
+    const v = da ? await ansicht(primary) : {};
+    ok(da && v.weOwe === 3000 && v.net === -580 && v.lastBalance === -580 && !v.incomplete && !v.netIncomplete,
+      `G Primary: Darlehen gezählt (wir schulden 3.000, Netto −580), keine Hinweise mehr, Saldo vollständig (${S([v.weOwe, v.net, v.lastBalance, v.incomplete])})`);
+    await spuelen(primary);
+    const d = dbQ(BIZ_DB, 'SELECT customer_id, amount, status, counterparty FROM debts WHERE id = ?', ['ca-hint'])[0] || {};
+    ok(d.customer_id === K && Number(d.amount) === 250 && d.counterparty === 'Ahmed Karimi' && auditZahl('debts', 'ca-hint') === 1,
+      'G Datenbank: nur customer_id gesetzt (Betrag, Status, Freitext bleiben), ein Protokolleintrag');
+    await foto(primary, 'ca-g-primary-after-links', '[data-customer-account]');
+  }
+
+  // ── H PC2 liest denselben Stand; nichts anderes geändert ─────────────────────────────────────────────────────
+  {
+    await syncRuhe();
+    client = await lade(client, `/clients/${K}/account`);
+    await waitFor(client, '[data-account-net]', 45000);
+    // syncRuhe kann den Primary auf die Sync-Seite geführt haben — frisch zurück ins Konto.
+    await gehFrisch(primary, `/clients/${K}/account`);
+    await waitFor(primary, '[data-account-net]', 45000);
+    const p = await ansicht(client), q = await ansicht(primary);
+    const diff = Object.keys(p).filter((k) => k !== 'path' && S(p[k]) !== S(q[k])).map((k) => k + ':' + S(p[k]) + '|' + S(q[k]));
+    ok(diff.length === 0 && p.net === -580, `H PC2 zeigt nach beiden Zuordnungen genau dasselbe wie der Primary (${S(diff).slice(0, 400)})`);
+    ok(ROHDATEN() === ROH_VOR, 'H Belege, Zahlungen, Darlehensbeträge, Partner-Stammdaten und Buchungen unverändert — nur die beiden Verknüpfungen');
+    ok((await treffer(client)).length === 0 && !existsSync(join(CLIENT_DATA_DIR, 'lataif.db')), 'SAFETY PC2 weiter ohne eigene Datenbank');
+  }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));
 } finally {
