@@ -149,23 +149,26 @@ function toFilsMap(bhd: Map<string, number>): FilsMap {
   return out;
 }
 
-// AR je Kunde — Spiegel von domainAR (4 Beine, Overpay-Cap, CANCELLED-Regel).
+// AR je Kunde — Spiegel von domainAR (4 Beine, Overpay-Cap, CANCELLED-Regel). Owner 09.11.2026: storniert ÜBER EINE
+// RÜCKGABE (wirksame Gutschrift) zählt wie lebend — dieselbe Bedingung wie domainAR und der Storno-Code (reversedByReturn).
+const BOOKED_INVOICE = (a: string): string =>
+  `(${a}.status!='CANCELLED' OR EXISTS (SELECT 1 FROM credit_notes cnb WHERE cnb.invoice_id=${a}.id AND cnb.status!='CANCELLED'))`;
 function domainArMap(run: SqlRunner, branchId: string): FilsMap {
   const bhd = new Map<string, number>();
   accumulate(run,
-    `SELECT COALESCE(customer_id,'') AS cid, COALESCE(SUM(gross_amount),0) AS t
-     FROM invoices WHERE branch_id=? AND status!='CANCELLED' GROUP BY cid`,
+    `SELECT COALESCE(i.customer_id,'') AS cid, COALESCE(SUM(i.gross_amount),0) AS t
+     FROM invoices i WHERE i.branch_id=? AND ${BOOKED_INVOICE('i')} GROUP BY cid`,
     [branchId], 1, bhd);
   accumulate(run,
     `SELECT COALESCE(i.customer_id,'') AS cid, COALESCE(SUM(MIN(pp.paid,i.gross_amount)),0) AS t
      FROM invoices i
      JOIN (SELECT invoice_id, SUM(amount) AS paid FROM payments GROUP BY invoice_id) pp ON pp.invoice_id=i.id
-     WHERE i.branch_id=? AND i.status!='CANCELLED' GROUP BY cid`,
+     WHERE i.branch_id=? AND ${BOOKED_INVOICE('i')} GROUP BY cid`,
     [branchId], -1, bhd);
   accumulate(run,
     `SELECT COALESCE(i.customer_id,'') AS cid, COALESCE(SUM(p.amount),0) AS t
      FROM payments p JOIN invoices i ON i.id=p.invoice_id
-     WHERE i.branch_id=? AND i.status='CANCELLED' GROUP BY cid`,
+     WHERE i.branch_id=? AND NOT ${BOOKED_INVOICE('i')} GROUP BY cid`,
     [branchId], -1, bhd);
   accumulate(run,
     `SELECT COALESCE(customer_id,'') AS cid, COALESCE(SUM(receivable_cancel_amount),0) AS t

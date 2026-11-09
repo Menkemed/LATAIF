@@ -341,6 +341,18 @@ function paidEventCount(id: string): number {
  * Je Rechnung und Transaktion höchstens einmal.
  */
 const paidKey = (id: string): string => `invoice.paid:${id}`;
+/**
+ * Owner 09.11.2026 — der Stand einer Rechnung, wenn nach dem Löschen oder Ändern einer Zahlung NICHTS mehr bezahlt ist.
+ * Eine ausgestellte Rechnung bleibt ausgestellt und ganz offen (PARTIAL mit bezahlt 0 = Anzeige „Unpaid", wie frisch
+ * ausgestellt): „Record Payment"/„Settle Balance" bleiben, das PDF bleibt eine Rechnung (kein Proforma), Receivables und
+ * Kundenkonto zählen sie weiter, eine schon vergebene Endnummer bleibt (die Vergabe ist einmalig). Vorher fiel sie auf
+ * DRAFT („Pending") — damit verschwand die offene Forderung aus Receivables/Kundenkonto, während das Hauptbuch sie hielt.
+ * Ein echter Entwurf bleibt Entwurf, ein Storno bleibt Storno.
+ */
+function statusWithoutPayment(prev: InvoiceStatus): InvoiceStatus {
+  return prev === 'CANCELLED' ? 'CANCELLED' : prev === 'DRAFT' ? 'DRAFT' : 'PARTIAL';
+}
+
 function emitInvoicePaid(id: string, payload: Record<string, unknown> = {}): void {
   runAtOuterCommit(paidKey(id), () => { void eventBus.emit('invoice.paid', 'invoice', id, payload); });
 }
@@ -2186,7 +2198,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         const tip = Math.max(0, newPaid - inv.grossAmount);
         const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
           : newPaid > 0 ? 'PARTIAL'
-          : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
+          : statusWithoutPayment(inv.status);
         db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
           [newPaid, tip, newStatus, now, invoiceId]);
         if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
@@ -2287,11 +2299,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const tip = 0; // Slice 3 — Ueberschuss ist Store-Guthaben, kein tip (Scope A)
-      // CUSTOMER ACCOUNT B1 — eine aufgehobene Verrechnung stellt den Stand davor her: die Rechnung war offen (PARTIAL;
-      // ein Entwurf wird nie verrechnet), nicht „Pending". Der Rückfall auf DRAFT bleibt für alle anderen Zahlungen wie bisher.
+      // Owner 09.11.2026 — die letzte Zahlung (echt oder Verrechnung) entfernt: ausgestellt bleibt ausgestellt und offen.
       const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
         : newPaid > 0 ? 'PARTIAL'
-        : (inv.status === 'CANCELLED' ? 'CANCELLED' : delMethod === DEBT_OFFSET_METHOD ? 'PARTIAL' : 'DRAFT');
+        : statusWithoutPayment(inv.status);
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, invoiceId]);
       if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);

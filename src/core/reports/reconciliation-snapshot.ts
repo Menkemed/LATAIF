@@ -52,18 +52,29 @@ function status(row: Row): 'ok' | 'mismatch' {
 // ── Domain-Aggregate ──────────────────────────────────────────
 // Pro Account die Erwartung aus den Domain-Tabellen.
 
+/**
+ * Owner 09.11.2026 — eine stornierte Rechnung MIT wirksamer Gutschrift (Storno über die Rückgabe): `updateInvoice`
+ * dreht dann weder die Rechnungsbuchung noch ihre Zahlungen (`reversedByReturn`) — die Gutschrift kehrt die Forderung um,
+ * die Erstattung das Geld. Im Hauptbuch steht sie also wie eine lebende Rechnung (Brutto − Zahlungen − Gutschrift = 0).
+ * Dieselbe Bedingung wie im Storno-Code; vorher zählte die Abstimmung ihr Brutto nicht, zog Zahlungen und Gutschrift aber
+ * ab (Abstand = Brutto je solcher Rechnung, nur in der Abstimmung).
+ */
+export const BOOKED_INVOICE_SQL = (alias: string): string =>
+  `(${alias}.status != 'CANCELLED' OR EXISTS (SELECT 1 FROM credit_notes cnb WHERE cnb.invoice_id = ${alias}.id AND cnb.status != 'CANCELLED'))`;
+
 function domainAR(branchId: string): number {
   // Ledger-Mechanik:
   //   + DR(AR) pro non-cancelled Invoice (Original bleibt; cancelled hat Reversal-Pair = netto 0)
+  //     — ausser storniert ÜBER EINE RÜCKGABE (wirksame Gutschrift): kein Reversal-Pair, zählt wie lebend (BOOKED_INVOICE_SQL)
   //   - CR(AR) pro Payment (auch zu cancelled Invoices: das Geld floss real, AR ↓)
   //   - CR(AR) pro CN.receivableCancelAmount
   // Wir summieren also: gross der aktiven Invoices - ALLE Payments - CN-AR-Cancellations.
   // Wichtig: Payments NICHT über invoices.paid_amount filtern, sondern direkt aus payments-Tabelle —
   // sonst gehen Payments zu later-cancelled Invoices verloren und produzieren einen Phantom-Diff.
   const inv = query(
-    `SELECT COALESCE(SUM(gross_amount), 0) AS t
-     FROM invoices
-     WHERE branch_id = ? AND status != 'CANCELLED'`,
+    `SELECT COALESCE(SUM(i.gross_amount), 0) AS t
+     FROM invoices i
+     WHERE i.branch_id = ? AND ${BOOKED_INVOICE_SQL('i')}`,
     [branchId]
   );
   // Slice 3 — Ueberzahlung: der Teil einer Zahlung ueber dem Invoice-gross geht im Ledger
@@ -75,7 +86,7 @@ function domainAR(branchId: string): number {
      FROM invoices i
      JOIN (SELECT invoice_id, SUM(amount) AS paid FROM payments GROUP BY invoice_id) pp
        ON pp.invoice_id = i.id
-     WHERE i.branch_id = ? AND i.status != 'CANCELLED'`,
+     WHERE i.branch_id = ? AND ${BOOKED_INVOICE_SQL('i')}`,
     [branchId]
   );
   // Zahlungen zu CANCELLED Invoices voll subtrahieren (Geld floss real, Beine wurden beim
@@ -83,7 +94,7 @@ function domainAR(branchId: string): number {
   const cancelledPay = query(
     `SELECT COALESCE(SUM(p.amount), 0) AS t
      FROM payments p JOIN invoices i ON i.id = p.invoice_id
-     WHERE i.branch_id = ? AND i.status = 'CANCELLED'`,
+     WHERE i.branch_id = ? AND NOT ${BOOKED_INVOICE_SQL('i')}`,
     [branchId]
   );
   // R6E-CN — eine stornierte Gutschrift ist im Hauptbuch umgekehrt (AR wieder offen) → nicht abziehen.
