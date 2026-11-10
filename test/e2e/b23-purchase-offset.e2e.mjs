@@ -15,6 +15,7 @@
 // Die installierte Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 werden nie berührt. Nur künstliche Testdaten.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
+import { maus, tippe } from './_e2e-mouse.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses, closeTestWindow, startedPids, clearTestClientPendingSaves } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
@@ -495,6 +496,70 @@ try {
     ok(zahl("SELECT COUNT(*) AS n FROM purchase_payments WHERE method = 'offset' AND voided_at IS NOT NULL") === 2
       && zahl("SELECT COUNT(*) AS n FROM purchase_payments WHERE method = 'offset' AND voided_at IS NULL") === 0, 'F beide Einkaufszeilen storniert, keine wirksame mehr');
     ok((await treffer(client)).length === 0 && !existsSync(join(CLIENT_DATA_DIR, 'lataif.db')), 'SAFETY PC2 ohne eigene Datenbank');
+  }
+
+  // ── G PC2 (Nachbesserung 10.11.): Einkauf PC → „Settle Balance" ⇒ NUR PC vorgewählt; „Change amount" mit echter Maus und
+  //    Tastatur: über der Obergrenze abgewiesen, Teilbetrag 120.500 (Rest geht per FIFO an Rechnung B), B auf 0 ⇒ EINE
+  //    Zuordnung 120.500, PC teilweise verrechnet (Rest 79.500). Ein Fernauftrag mit den Beträgen.
+  {
+    await syncRuhe();
+    const vorKommandos = (await kommandos(client)).filter((x) => x.op === 'customers.settle_balance').length;
+    client = await lade(client, `/purchases/${PC}`);
+    await waitFor(client, '[data-purchase-settle-open]', 45000);
+    ok(await maus(client, '[data-purchase-settle-open]') === 'OK', 'G PC2: Maus auf „Settle Balance" am Kommissions-Einkauf');
+    await waitFor(client, 'div[data-settle-balance]', 30000);
+    const src = await attrs(client, '[data-settle-source]', 'data-settle-source');
+    const an = await attrs(client, '[data-settle-source]', 'data-settle-on');
+    ok(S(src) === S(['PUR-2026-000981', 'PUR-2026-000982']) && S(an) === S(['0', '1']),
+      `G vom Einkauf: genau dieser Einkauf vorgewählt, der andere offene Einkauf NICHT (${S(src)} ${S(an)})`);
+    ok(S(await attrs(client, '[data-settle-invoice]', 'data-settle-on')) === S(['1', '1']), 'G Rechnungen: beide angeboten und gewählt (älteste zuerst)');
+    const zeileA = '[data-settle-pair="PUR-2026-000982>PINV-2026-000981"]';
+    // Rechnung B trägt seit Schritt B ihre Endnummer (bleibt nach dem Aufheben) — die Zeile wird über diese Nummer gefunden.
+    const nrB = String(await client.ev(`return [...document.querySelectorAll('[data-settle-invoice]')].map(e=>e.getAttribute('data-settle-invoice'))[1] || '';`));
+    const zeileB = `[data-settle-pair="PUR-2026-000982>${nrB}"]`;
+    ok(!!nrB && nrB !== 'PINV-2026-000982', `G Rechnung B steht mit ihrer Endnummer da (${nrB})`);
+    ok((await attrs(client, zeileA, 'data-settle-pair-amount'))[0] === '200.000' && (await attrs(client, zeileA, 'data-settle-pair-max'))[0] === '200.000',
+      'G Vorschlag: PC 200 → A (Obergrenze 200)');
+    ok(await maus(client, `${zeileA} [data-settle-amount-edit]`) === 'OK', 'G Maus auf „Change amount" (PC → A)');
+    await waitFor(client, `${zeileA} [data-settle-amount-input]`, 10000);
+    ok(await tippe(client, `${zeileA} [data-settle-amount-input]`, '250') === 'OK', 'G Tastatur: 250 (über der Obergrenze)');
+    await warteBis(client, `document.querySelector('${zeileA} [data-settle-amount-error]')`, 5000);
+    const fehler = await text(client, `${zeileA} [data-settle-amount-error]`);
+    ok(/At most 200\.000/.test(fehler) && await client.ev("return document.querySelector('[data-settle-confirm]').disabled === true;"),
+      `G über der Obergrenze: Hinweis „At most 200.000", „Confirm" gesperrt (${fehler})`);
+    ok(await tippe(client, `${zeileA} [data-settle-amount-input]`, '120.5') === 'OK', 'G Tastatur: 120.5');
+    await warteBis(client, `document.querySelector('${zeileB}')`, 5000);
+    ok((await attrs(client, zeileA, 'data-settle-pair-amount'))[0] === '120.500' && (await attrs(client, zeileB, 'data-settle-pair-amount'))[0] === '79.500'
+      && (await attrs(client, '[data-settle-total]', 'data-settle-total'))[0] === '200.000',
+      'G sofort neu gerechnet: A 120.500, der Rest 79.500 geht per FIFO an B, Summe 200.000');
+    ok(await maus(client, `${zeileA} [data-settle-amount-done]`) === 'OK', 'G Maus auf „Done"');
+    ok(await maus(client, `${zeileB} [data-settle-amount-edit]`) === 'OK', 'G Maus auf „Change amount" (PC → B)');
+    await waitFor(client, `${zeileB} [data-settle-amount-input]`, 10000);
+    ok(await tippe(client, `${zeileB} [data-settle-amount-input]`, '0') === 'OK', 'G Tastatur: 0 (B bleibt aus)');
+    await warteBis(client, `document.querySelector('[data-settle-pairs="1"]')`, 5000);
+    ok(await maus(client, `${zeileB} [data-settle-amount-done]`) === 'OK', 'G Maus auf „Done"');
+    const quelle = await text(client, '[data-settle-source="PUR-2026-000982"]');
+    ok((await attrs(client, '[data-settle-total]', 'data-settle-total'))[0] === '120.500' && /open after 79\.500/.test(quelle) && /purchase → Partially paid/.test(quelle),
+      `G Vorschau: Summe 120.500, Einkauf danach 79.500 offen, „→ Partially paid" (${quelle.slice(0, 160)})`);
+    await foto(client, 'b23-g-pc2-change-amount');
+    ok(await maus(client, '[data-settle-confirm]') === 'OK', 'G Maus auf „Confirm settlement"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM party_offsets WHERE payable_id = 'b23-pc' AND status = 'ACTIVE'") === 1);
+    const stl3 = String(dbQ(BIZ_DB, "SELECT settlement_number FROM party_offsets WHERE payable_id = ? AND status = 'ACTIVE' LIMIT 1", [PC])[0]?.settlement_number || '');
+    const rows = stlRows(stl3);
+    const pc = einkaufZeile(PC), ra = rechnung(INV_A), rb = rechnung(INV_B);
+    ok(rows.length === 1 && rows[0].receivable_id === INV_A && Number(rows[0].amount) === 120.5, `G Datenbank: EINE Zuordnung PC → A 120.500 unter ${stl3} (${S(rows)})`);
+    ok(pc.status === 'PARTIALLY_PAID' && Number(pc.remaining_amount) === 79.5 && Number(pc.paid_amount) === 0, `G PC teilweise verrechnet, Rest 79.500, kein Geld (${S(pc)})`);
+    ok(Number(ra.paid_amount) === 120.5 && ra.status === 'PARTIAL' && Number(rb.paid_amount) === 0, `G A 120.500 verrechnet, B unberührt (${S(ra)} ${S(rb)})`);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'customers.settle_balance');
+    const am = cmds[cmds.length - 1]?.payload?.amounts;
+    ok(cmds.length === vorKommandos + 1 && S(am) === S([{ invoiceId: INV_A, sourceId: PC, amount: 120.5 }, { invoiceId: INV_B, sourceId: PC, amount: 0 }]),
+      `G PC2 schickt EINEN Auftrag mit den von Hand gesetzten Beträgen (${S(am)})`);
+    ok(geldBuchungen() === geld0, 'G keine Geldbuchung');
+    client = await lade(client, `/purchases/${PC}`);
+    const sel = `[data-purchase-payment-offset="${stl3}/1"]`;
+    const da = await warteBis(client, `document.querySelector(${S(sel)})`, 45000);
+    ok(da && await exists(client, '[data-purchase-settle-open]'), 'G Einkauf zeigt die Verrechnungszeile; der Rest 79.500 bleibt verrechenbar');
+    await foto(client, 'b23-g-pc2-purchase-partial');
   }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));

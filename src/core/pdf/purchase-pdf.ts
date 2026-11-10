@@ -106,6 +106,9 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
   const livePayments = purchase.payments.filter(p => !p.voidedAt);
   // B2/B3 — eine Verrechnung mit einer Kundenrechnung ist kein Geld: eigene Zeile „Settled by offset STL-… — invoice …".
   const offsetF = livePayments.filter(p => p.method === 'offset').reduce((a, p) => a + Math.round(p.amount * 1000), 0);
+  // B2/B3 Nachbesserung — damit Total − Paid − Guthaben − Verrechnung = Rest auf dem Beleg nachrechenbar ist, steht auch das
+  // angerechnete Lieferantenguthaben (kein Geld, nicht in „Paid") als eigene Zeile da.
+  const creditF = livePayments.filter(p => p.method === 'credit').reduce((a, p) => a + Math.round(p.amount * 1000), 0);
   const paymentsHtml = livePayments.length === 0 ? '' : `
     <div style="margin-top:18px">
       <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Payments</div>
@@ -202,11 +205,13 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
   <div class="totals">
     <div class="row"><span>Total</span><span style="font-family:monospace">${fmtBhd(purchase.totalAmount)} BHD</span></div>
     <div class="row" style="color:#16A34A"><span>Paid</span><span style="font-family:monospace">${fmtBhd(purchase.paidAmount)} BHD</span></div>
-    ${offsetF > 0 ? `<div class="row" style="color:#6D28D9"><span>Settled by offset (no cash)</span><span style="font-family:monospace">${fmtBhd(offsetF / 1000)} BHD</span></div>` : ''}
+    ${creditF > 0 ? `<div class="row" style="color:#555"><span>Supplier credit applied (no cash)</span><span style="font-family:monospace">${fmtBhd(creditF / 1000)} BHD</span></div>` : ''}
+    ${offsetF > 0 ? `<div class="row" style="color:#6D28D9" data-pdf-offset-total><span>Settled by offset (no cash)</span><span style="font-family:monospace">${fmtBhd(offsetF / 1000)} BHD</span></div>` : ''}
     <div class="row ${purchase.remainingAmount > 0 ? 'outstanding' : ''} grand">
-      <span>${purchase.remainingAmount > 0 ? 'Outstanding (Payable)' : 'Settled'}</span>
+      <span>${purchase.remainingAmount > 0 ? (offsetF > 0 ? 'Remaining after offset (Payable)' : 'Outstanding (Payable)') : 'Settled'}</span>
       <span style="font-family:monospace">${fmtBhd(purchase.remainingAmount)} BHD</span>
     </div>
+    ${offsetF > 0 && purchase.remainingAmount > 0 ? `<div style="font-size:10px;color:#6D28D9;margin-top:4px" data-pdf-offset-partial>Partly settled by offset: ${fmtBhd(offsetF / 1000)} BHD offset against the client's invoice(s), ${fmtBhd(purchase.remainingAmount)} BHD still payable.</div>` : ''}
   </div>
 
   ${paymentsHtml}

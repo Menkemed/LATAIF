@@ -19,6 +19,8 @@ registerHooks({
     if (specifier === '@tauri-apps/api/core') {
       return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
     }
+    // Der Ankaufbeleg importiert das Logo (Vite liefert eine URL) — im Test eine leere Zeichenkette.
+    if (specifier.endsWith('.png')) return { url: 'data:text/javascript,export default ""', shortCircuit: true };
     if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
@@ -467,6 +469,165 @@ marker('B23_PURCHASE_CANCEL_PROVED');
   ok(ps.PURCHASE_NON_CASH_SQL === "('credit', 'offset')", 'B23-E2 die eine Liste: Guthaben + Verrechnung');
 }
 marker('B23_ONE_RULE_PROVED');
+
+// ════════════════════════════════════════════════════════════════════════════
+// B2/B3 NACHBESSERUNG (Owner 10.11.2026) — „Change amount": frei wählbarer Betrag je Zuordnung (voll/teilweise),
+// Obergrenzen, FIFO für den Rest, Serverprüfung, PC2, Undo, Ankaufbeleg.
+// ════════════════════════════════════════════════════════════════════════════
+const pdf = await import('../../src/core/pdf/purchase-pdf.ts');
+const K6 = 'cust-6';
+const sup6 = imHaus(() => useSupplierStore.getState().createSupplier({ name: 'Kunde 6' } as never, { linkedCustomerId: K6 } as never)).id;
+const P6a = einkauf(sup6, 200, '2026-10-02');
+const P6b = einkauf(sup6, 300, '2026-10-03');
+const J1 = verkauf(K6, 250, '2026-10-05');
+const J2 = verkauf(K6, 400, '2026-10-06');
+const key = sr.settlePairKey;
+/** Ein Auftrag mit von Hand gesetzten Beträgen — Summe aus derselben Rechnung wie die Maske. */
+const mitBetraegen = (cid: string, amounts: Array<{ invoiceId: string; sourceId: string; amount: number }>, sel?: { invoiceIds: string[]; sourceIds: string[] }, extra: Record<string, unknown> = {}) => {
+  const r = lese(cid);
+  const s0 = sel ?? { invoiceIds: r.invoices.map((i) => i.id), sourceIds: r.sources.map((x) => x.id) };
+  const hand = Object.fromEntries(amounts.map((a) => [key(a.sourceId, a.invoiceId), Math.round(a.amount * 1000)]));
+  const pairs = sr.planSettlement(r.invoices, r.sources, { ...s0, amounts: hand });
+  const fin = sr.finalizingInvoices(r.invoices, pairs).filter((i) => !i.finalized);
+  return { customerId: cid, ...s0, amounts, expectedStamp: r.stamp, expectedTotal: pairs.reduce((a, p) => a + p.amountF, 0) / 1000,
+    settlementDate: '2026-10-22', ...(fin.length ? { finalNumbers: Object.fromEntries(fin.map((i) => [i.id, 'normal'])) } : {}), ...extra };
+};
+const pdfHtml = (pid: string): string => {
+  usePurchaseStore.getState().loadPurchases();
+  const p = usePurchaseStore.getState().getPurchase(pid)!;
+  return pdf.generatePurchasePdfHtml({ purchase: p, products: [], categories: [] } as never);
+};
+{
+  // N1 — ohne von Hand gesetzte Beträge genau der bisherige Vorschlag (zwei Zeiger), 400 Zufallsfälle.
+  const alt = (iv: Array<{ id: string; open: number }>, sv: Array<{ id: string; open: number }>) => {
+    const a2 = iv.map((x) => ({ id: x.id, left: F(x.open) })).filter((x) => x.left > 5);
+    const b2 = sv.map((x) => ({ id: x.id, left: F(x.open) })).filter((x) => x.left > 5);
+    const out: string[] = []; let a = 0, b = 0;
+    while (a < a2.length && b < b2.length) {
+      const m = Math.min(a2[a].left, b2[b].left); out.push(`${b2[b].id}>${a2[a].id}:${m}`);
+      a2[a].left -= m; b2[b].left -= m; if (a2[a].left <= 5) a++; if (b2[b].left <= 5) b++;
+    }
+    return out;
+  };
+  let gleich = 0; let seed = 7;
+  const rnd = (): number => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  for (let t = 0; t < 400; t++) {
+    const iv = Array.from({ length: 1 + Math.floor(rnd() * 4) }, (_, i) => ({ id: 'i' + i, number: 'I' + i, date: '2026-10-0' + (i + 1), total: 0, paid: 0, open: Math.round(rnd() * 900000) / 1000, finalized: false, revision: 0 }));
+    const sv = Array.from({ length: 1 + Math.floor(rnd() * 4) }, (_, i) => ({ kind: 'PURCHASE' as const, id: 's' + i, number: 'S' + i, date: '2026-10-0' + (i + 1), label: '', total: 0, open: Math.round(rnd() * 900000) / 1000, revision: 0 }));
+    const neu = sr.planSettlement(iv, sv, { invoiceIds: iv.map((x) => x.id), sourceIds: sv.map((x) => x.id) }).map((p) => `${p.sourceId}>${p.invoiceId}:${p.amountF}`);
+    if (S(neu) === S(alt(iv, sv))) gleich++;
+  }
+  ok(gleich === 400, `N1 ohne „Change amount" exakt der bisherige FIFO-Vorschlag (${gleich}/400)`);
+
+  // N2 — Obergrenzen je Zeile.
+  const r = lese(K6);
+  const rows0 = sr.planSettlementRows(r.invoices, r.sources, { invoiceIds: [J1, J2], sourceIds: [P6a, P6b] });
+  ok(S(rows0.map((x) => [x.sourceId === P6a ? 'a' : 'b', x.invoiceId === J1 ? 1 : 2, x.amountF, x.maxF])) === S([['a', 1, 200000, 200000], ['b', 1, 50000, 50000], ['b', 2, 250000, 250000]]),
+    `N2 Vorschlag J1←P6a 200, J1←P6b 50, J2←P6b 250 mit Obergrenzen (${S(rows0.map((x) => [x.amountF, x.maxF]))})`);
+  // N3 — P6a→J1 auf 120, P6a→J2 auf 0: Rest J1 geht an P6b, P6a bleibt teilweise offen.
+  const hand = { [key(P6a, J1)]: 120000, [key(P6a, J2)]: 0 };
+  const rows1 = sr.planSettlementRows(r.invoices, r.sources, { invoiceIds: [J1, J2], sourceIds: [P6a, P6b], amounts: hand });
+  ok(S(rows1.map((x) => [x.sourceId === P6a ? 'a' : 'b', x.invoiceId === J1 ? 1 : 2, x.amountF, x.maxF, x.edited])) ===
+    S([['a', 1, 120000, 200000, true], ['b', 1, 130000, 130000, false], ['a', 2, 0, 80000, true], ['b', 2, 170000, 170000, false]]),
+    `N3 sofort neu gerechnet: 120 / 130 (Rest J1 an P6b) / 0 (ausgelassen) / 170 (${S(rows1.map((x) => [x.amountF, x.maxF]))})`);
+  ok(sr.planSettlement(r.invoices, r.sources, { invoiceIds: [J1, J2], sourceIds: [P6a, P6b], amounts: hand }).length === 3, 'N3 die 0-Zeile wird nicht gebucht');
+}
+marker('B23_AMOUNT_PLAN_PROVED');
+
+// ── N4–N9 Serverprüfung: zu hoch, ungültig, alles 0, falsche Summe — nichts geändert ──
+{
+  const vorher = abdruck();
+  const faelle: Array<[string, Record<string, unknown>, string]> = [
+    ['über der Obergrenze (P6a→J1 201 > 200)', mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 201 }]), 'SETTLE_AMOUNT_TOO_HIGH'],
+    ['über der Obergrenze nach früherer Zeile (P6b→J1 131 > 130)', mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 120 }, { invoiceId: J1, sourceId: P6b, amount: 131 }]), 'SETTLE_AMOUNT_TOO_HIGH'],
+    ['vier Nachkommastellen', mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 10.0005 }]), 'SETTLE_AMOUNT_INVALID'],
+    ['negativ', { ...mitBetraegen(K6, []), amounts: [{ invoiceId: J1, sourceId: P6a, amount: -1 }] }, 'SETTLE_AMOUNT_INVALID'],
+    ['nicht gewählte Rechnung', mitBetraegen(K6, [{ invoiceId: J2, sourceId: P6a, amount: 10 }], { invoiceIds: [J1], sourceIds: [P6a, P6b] }), 'SETTLE_AMOUNT_INVALID'],
+    ['doppelt', { ...mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 10 }]), amounts: [{ invoiceId: J1, sourceId: P6a, amount: 10 }, { invoiceId: J1, sourceId: P6a, amount: 10 }] }, 'SETTLE_AMOUNT_INVALID'],
+    ['keine Liste', { ...mitBetraegen(K6, []), amounts: 'x' }, 'SETTLE_AMOUNT_INVALID'],
+    ['Zuordnung, die der Vorschlag nicht hat', mitBetraegen(K6, [{ invoiceId: J2, sourceId: P6a, amount: 10 }], { invoiceIds: [J1, J2], sourceIds: [P6a] }), 'SETTLE_AMOUNT_INVALID'],
+    // Jede mögliche Zuordnung auf 0 (sonst ginge der Rest der Reihe nach an die nächste — FIFO, siehe N3).
+    ['alles 0', mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 0 }, { invoiceId: J1, sourceId: P6b, amount: 0 },
+      { invoiceId: J2, sourceId: P6a, amount: 0 }, { invoiceId: J2, sourceId: P6b, amount: 0 }]), 'SETTLE_NOTHING_TO_OFFSET'],
+    // Mit P6a→J1 = 120 geht der Rest per FIFO weiter (Summe bleibt 500) — die Maske hätte 500 gezeigt, nicht 499.
+    ['Summe passt nicht', { ...mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 120 }]), expectedTotal: 499 }, 'SETTLE_TOTAL_CHANGED'],
+  ];
+  for (const [was, req, code] of faelle) {
+    const o = await settle(req);
+    ok(!o.ok && o.code === code, `N4 ${was} → ${code} (${o.ok ? 'gebucht!' : o.code})`);
+  }
+  ok(abdruck() === vorher, 'N4 kein Nein hat etwas geändert (Rechnungen, Zahlungen, Verrechnungen, Hauptbuch, Protokoll)');
+  ok(/Einkäufe der ausdrücklich verknüpften/.test(src('src/core/offsets/party-settlement-reads.ts')), 'N4 Kopf der Leseschicht beschreibt die dritte Gruppe');
+}
+marker('B23_AMOUNT_SERVER_CHECKS_PROVED');
+
+// ── N5–N8 Buchen mit Teilbeträgen (Primary), Ankaufbeleg, PC2 gleich, Undo ──
+let STL6 = '';
+{
+  const geld0 = geldKonten(), vat0 = vatBal(), ap0 = apSupplier(sup6), ar0 = arCustomer(K6);
+  const req = mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6a, amount: 120 }, { invoiceId: J2, sourceId: P6a, amount: 0 }]);
+  ok(eq(Number(req.expectedTotal), 420), `N5 Summe 420 (120 + 130 + 170) (${req.expectedTotal})`);
+  const o = await settle(req);
+  ok(o.ok, `N5 gebucht (${S(o).slice(0, 140)})`);
+  if (o.ok) STL6 = o.v.settlementNumber;
+  ok(zeilen("SELECT ROUND(amount,3) FROM party_offsets WHERE settlement_number = ? ORDER BY offset_number", [STL6]) === S([[120], [130], [170]]),
+    'N5 genau die gewählten Beträge, eine STL, FIFO-Reihenfolge');
+  ok(eq(purOpen(P6a), 80) && String(pur(P6a)[0]) === 'PARTIALLY_PAID' && eq(purOpen(P6b), 0) && String(pur(P6b)[0]) === 'PAID',
+    `N5 P6a teilweise verrechnet (Rest 80, Partially paid), P6b bezahlt (${purOpen(P6a)} ${pur(P6a)[0]} / ${purOpen(P6b)} ${pur(P6b)[0]})`);
+  ok(status(J1) === 'FINAL' && eq(offen(J2), 230), `N5 J1 voll bezahlt, J2 Rest 230 (${status(J1)} ${offen(J2)})`);
+  ok(geldKonten() === geld0 && vatBal() === vat0 && eq(ap0 - apSupplier(sup6), 420) && eq(ar0 - arCustomer(K6), 420), 'N5 kein Geld, keine Steuer; Soll AP Lieferant / Haben AR Kunde je 420');
+  ok(ledgerBalanced() && cpDiff('apBySupplier', sup6) === 0 && cpDiff('arByCustomer', K6) === 0, 'N5 Hauptbuch und Abgleich je Gegenpartei stimmen');
+  ok(n(DB, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'party_settlements' AND entity_id = ? AND new_value LIKE '%changedAmounts%'", [STL6]) === 1,
+    'N5 Protokoll nennt die von Hand gesetzten Beträge');
+  // Ankaufbeleg: verrechneter Betrag und Rest nachvollziehbar.
+  const html = pdfHtml(P6a);
+  ok(/Settled by offset \(no cash\)<\/span><span[^>]*>120\.000 BHD/.test(html) && /Remaining after offset \(Payable\)<\/span>\s*<span[^>]*>80\.000 BHD/.test(html)
+    && /Partly settled by offset: 120\.000 BHD offset against the client's invoice\(s\), 80\.000 BHD still payable\./.test(html),
+    'N6 Ankaufbeleg P6a: „Settled by offset 120.000", „Remaining after offset 80.000", Hinweis Teilverrechnung');
+  ok(/Settled by offset STL-/.test(html) && /Offset · no cash/.test(html), 'N6 Ankaufbeleg: Zeile „Settled by offset STL-… — invoice …"');
+  const html2 = pdfHtml(P6b);
+  ok(!/Remaining after offset/.test(html2) && /<span>Settled<\/span>/.test(html2), 'N6 voll verrechneter Einkauf: „Settled", kein Rest');
+  // Undo der Teil-STL: beide Seiten wieder ganz offen.
+  const u = await undo({ settlementNumber: STL6, expectedActiveLines: 3 });
+  ok(u.ok && eq(purOpen(P6a), 200) && eq(purOpen(P6b), 300) && String(pur(P6a)[0]) === 'UNPAID' && eq(offen(J1), 250) && eq(offen(J2), 400),
+    `N7 Undo der Teilverrechnung: alles wieder offen (${purOpen(P6a)} ${purOpen(P6b)} ${offen(J1)} ${offen(J2)})`);
+  ok(geldKonten() === geld0 && ledgerBalanced() && cpDiff('apBySupplier', sup6) === 0, 'N7 kein Geld, Abgleich stimmt');
+}
+marker('B23_AMOUNT_BOOKING_PROVED');
+
+// ── N8 PC2: derselbe Auftrag mit Beträgen, Wiederholung wirkt einmal; Rumpf und Prüfung ──
+{
+  const req = mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6b, amount: 50.5 }], { invoiceIds: [J1], sourceIds: [P6b] });
+  const body = st.settleBalanceBody(req as never);
+  ok(S((body as { amounts?: unknown }).amounts) === S([{ invoiceId: J1, sourceId: P6b, amount: 50.5 }]), 'N8 PC2-Rumpf trägt die Beträge');
+  const meldung = (fn: () => unknown): string => { try { fn(); return ''; } catch (e) { return (e as Error).message; } };
+  ok(/amounts: amount must be 0 or more/.test(meldung(() => pcmd.parseSettleBalance({ ...body, amounts: [{ invoiceId: J1, sourceId: P6b, amount: -2 }] })))
+    && /unknown field: x/.test(meldung(() => pcmd.parseSettleBalance({ ...body, amounts: [{ invoiceId: J1, sourceId: P6b, amount: 1, x: 1 }] }))),
+    'N8 PC2-Prüfung: negativer Betrag und fremdes Feld abgewiesen');
+  const a = await fern(() => pcmd.runSettleBalance(deps() as never, identity('961', 'customers.settle_balance'), body));
+  const b = await fern(() => pcmd.runSettleBalance(deps() as never, identity('961', 'customers.settle_balance'), body));
+  ok(a.kind === 'ok' && b.kind === 'ok' && (b as { replayed?: boolean }).replayed === true, `N8 PC2 bucht, Wiederholung einmal (${a.kind}/${b.kind})`);
+  ok(eq(purOpen(P6b), 249.5) && eq(offen(J1), 199.5) && n(DB, "SELECT COUNT(*) FROM party_offsets WHERE payable_id = ? AND status = 'ACTIVE'", [P6b]) === 1,
+    `N8 PC2 genau 50.500 verrechnet (${purOpen(P6b)} ${offen(J1)})`);
+  const zuHoch = mitBetraegen(K6, [{ invoiceId: J1, sourceId: P6b, amount: 199.501 }], { invoiceIds: [J1], sourceIds: [P6b] });
+  const c = await fern(() => pcmd.runSettleBalance(deps() as never, identity('962', 'customers.settle_balance'), st.settleBalanceBody(zuHoch as never)));
+  ok(c.kind !== 'ok' && /SETTLE_AMOUNT_TOO_HIGH/.test(S(c)), `N8 PC2 über der Obergrenze → SETTLE_AMOUNT_TOO_HIGH (${S(c).slice(0, 120)})`);
+  ok(ledgerBalanced() && cpDiff('apBySupplier', sup6) === 0 && cpDiff('arByCustomer', K6) === 0, 'N8 Abgleich stimmt');
+}
+marker('B23_AMOUNT_PC2_PROVED');
+
+// ── N9 Maske: „Change amount" je Zeile, Obergrenze, sofort neu, Einstieg Einkauf nur dieser Einkauf ──
+{
+  const m = codeOf(src('src/components/parties/SettleBalanceModal.tsx'));
+  ok(/data-settle-amount-edit/.test(m) && /data-settle-amount-input/.test(m) && /data-settle-pair-max/.test(m) && /data-settle-amount-reset/.test(m),
+    'N9 jede Zeile: „Change amount", Eingabe mit Obergrenze, Reset');
+  ok(/\^\\d\+\(\\\.\\d\{0,3\}\)\?\$/.test(m) && /f > maxF/.test(m), 'N9 Eingabe: BHD mit höchstens drei Nachkommastellen, nie über der Obergrenze');
+  ok(/planSettlementRows\(data\.invoices, data\.sources, \{ invoiceIds: \[\.\.\.invSel\], sourceIds: \[\.\.\.srcSel\], amounts: hand \}\)/.test(m),
+    'N9 dieselbe Rechnung wie das Haus (planSettlementRows mit den Beträgen)');
+  ok(/focus\?\.sourceId \? data\.sources\.filter\(\(s\) => s\.id === focus\.sourceId\)/.test(m), 'N9 Einstieg vom Einkauf: nur dieser Einkauf vorgewählt');
+  ok(/focus=\{\{ sourceId: purchase\.id \}\}/.test(src('src/pages/purchases/PurchaseDetail.tsx')), 'N9 PurchaseDetail öffnet mit genau diesem Einkauf');
+}
+marker('B23_AMOUNT_UI_PROVED');
 
 console.log(`\nb23 purchase offset: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }

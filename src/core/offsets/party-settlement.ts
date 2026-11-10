@@ -39,8 +39,8 @@ import { createPurchaseOffsetInHouse } from './purchase-offsets';
 import { OFFSET_PAYABLE_STORE_CREDIT, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 export { OFFSET_HAS_LATER_RETURN, assertOffsetUndoSafe } from './party-offset-restore';
 import {
-  OP_CUSTOMERS_SETTLE_BALANCE, OP_CUSTOMERS_SETTLEMENT_REVERSE, finalizingInvoices, planSettlement, settleBalanceFor,
-  type SettleSourceKind,
+  OP_CUSTOMERS_SETTLE_BALANCE, OP_CUSTOMERS_SETTLEMENT_REVERSE, finalizingInvoices, planSettlementRows, settleBalanceFor,
+  settlePairKey, type SettlePair, type SettleSourceKind,
 } from './party-settlement-reads';
 
 export const SETTLE_NOTHING_TO_OFFSET = 'SETTLE_NOTHING_TO_OFFSET';
@@ -51,6 +51,12 @@ export const FINAL_NUMBER_CHOICE_REQUIRED = 'FINAL_NUMBER_CHOICE_REQUIRED';
 export const SETTLEMENT_NOT_FOUND = 'SETTLEMENT_NOT_FOUND';
 export const SETTLEMENT_ALREADY_REVERSED = 'OFFSET_ALREADY_REVERSED';
 export const SETTLE_PERMISSION_DENIED = 'PERMISSION_DENIED';
+/** B2/B3 Nachbesserung — ein von Hand gesetzter Betrag ist keine gültige BHD-Zahl oder gehört zu keiner Zuordnung. */
+export const SETTLE_AMOUNT_INVALID = 'SETTLE_AMOUNT_INVALID';
+/** B2/B3 Nachbesserung — ein von Hand gesetzter Betrag übersteigt den offenen Rest der Rechnung oder des Gegenpostens. */
+export const SETTLE_AMOUNT_TOO_HIGH = 'SETTLE_AMOUNT_TOO_HIGH';
+/** Höchstzahl von Hand gesetzter Beträge in einem Auftrag. */
+const MAX_HAND_AMOUNTS = 200;
 
 const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
 const B = (f: number): number => f / 1000;
@@ -60,6 +66,9 @@ const todayLocal = (): string => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 const isStr = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
+
+/** Ein von Hand gesetzter Betrag einer Zuordnung (Gegenposten → Rechnung), BHD mit höchstens drei Nachkommastellen; 0 = ausgelassen. */
+export interface SettleAmountLine { invoiceId: string; sourceId: string; amount: number }
 
 export interface SettleBalanceRequest {
   customerId: string;
@@ -74,6 +83,11 @@ export interface SettleBalanceRequest {
   expectedTotal?: number;
   /** Je Rechnung, die dadurch VOLL bezahlt wird und noch keine Endnummer hat: 'normal' oder 'special'. */
   finalNumbers?: Record<string, 'normal' | 'special'>;
+  /**
+   * B2/B3 Nachbesserung (Owner 10.11.2026) — „Betrag ändern": je Zuordnung ein von Hand gesetzter Betrag (voll oder teilweise).
+   * Fehlt er, gilt der Vorschlag (kleinerer Rest). Das Haus rechnet mit derselben Regel neu und prüft jede Obergrenze.
+   */
+  amounts?: SettleAmountLine[];
 }
 
 export interface SettlementBookedLine {
@@ -105,8 +119,51 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
   if (invoiceIds.some((id) => !read.invoices.some((i) => i.id === id)) || sourceIds.some((id) => !read.sources.some((s) => s.id === id))) {
     throw nein(SETTLE_SELECTION_INVALID, 'an item of the selection is not open for this client (or is not offered here)');
   }
-  const pairs = planSettlement(read.invoices, read.sources, { invoiceIds, sourceIds });
+  // ── Von Hand gesetzte Beträge: gültige BHD (≤ 3 Nachkommastellen, ≥ 0), je Zuordnung einmal, nur gewählte Posten.
+  const handF: Record<string, number> = {};
+  if (req.amounts !== undefined) {
+    if (!Array.isArray(req.amounts) || req.amounts.length > MAX_HAND_AMOUNTS) throw nein(SETTLE_AMOUNT_INVALID, 'the changed amounts must be a list');
+    for (const a of req.amounts) {
+      const x = a as Partial<SettleAmountLine> | null;
+      if (!x || !isStr(x.invoiceId) || !isStr(x.sourceId) || typeof x.amount !== 'number' || !Number.isFinite(x.amount) || x.amount < 0) {
+        throw nein(SETTLE_AMOUNT_INVALID, 'a changed amount must name the invoice, the counter item and an amount of 0 or more');
+      }
+      const f = x.amount * 1000;
+      if (Math.abs(f - Math.round(f)) > 1e-6) throw nein(SETTLE_AMOUNT_INVALID, 'an amount has at most three decimals (BHD)');
+      if (!invoiceIds.includes(x.invoiceId) || !sourceIds.includes(x.sourceId)) {
+        throw nein(SETTLE_AMOUNT_INVALID, 'a changed amount names an invoice or counter item that is not selected');
+      }
+      const k = settlePairKey(x.sourceId, x.invoiceId);
+      if (k in handF) throw nein(SETTLE_AMOUNT_INVALID, 'each pairing may have one changed amount only');
+      handF[k] = Math.round(f);
+    }
+  }
+  const rows = planSettlementRows(read.invoices, read.sources, { invoiceIds, sourceIds, amounts: handF });
+  const nummer = (id: string): string => read.invoices.find((i) => i.id === id)?.number ?? read.sources.find((s) => s.id === id)?.number ?? id;
+  for (const [k, f] of Object.entries(handF)) {
+    const row = rows.find((r) => settlePairKey(r.sourceId, r.invoiceId) === k);
+    if (!row) {
+      if (f > 0) throw nein(SETTLE_AMOUNT_INVALID, 'a changed amount belongs to a pairing that is not part of this proposal (an earlier line already settles it) — check the proposal');
+      continue;
+    }
+    if (f > row.maxF) {
+      throw nein(SETTLE_AMOUNT_TOO_HIGH, `${nummer(row.sourceId)} → ${nummer(row.invoiceId)}: at most ${B(row.maxF).toFixed(3)} can be offset here (the open rest of the invoice or of the counter item), not ${B(f).toFixed(3)}`);
+    }
+  }
+  const pairs: SettlePair[] = rows.filter((r) => r.amountF > 0)
+    .map(({ invoiceId, sourceKind, sourceId, amountF }) => ({ invoiceId, sourceKind, sourceId, amountF }));
   if (pairs.length === 0) throw nein(SETTLE_NOTHING_TO_OFFSET, 'nothing can be offset with this selection');
+  // Unverrückbar: keine Rechnung und kein Gegenposten über seinen offenen Rest — auch nicht in Summe mehrerer Zuordnungen.
+  for (const i of read.invoices) {
+    if (pairs.filter((p) => p.invoiceId === i.id).reduce((s, p) => s + p.amountF, 0) > F(i.open)) {
+      throw new OffsetRestoreError('SETTLE_OVER_OPEN', `${i.number}: the offsets exceed the open amount — nothing was offset`);
+    }
+  }
+  for (const q of read.sources) {
+    if (pairs.filter((p) => p.sourceId === q.id).reduce((s, p) => s + p.amountF, 0) > F(q.open)) {
+      throw new OffsetRestoreError('SETTLE_OVER_OPEN', `${q.number}: the offsets exceed what is open — nothing was offset`);
+    }
+  }
   const totalF = pairs.reduce((s, p) => s + p.amountF, 0);
   if (typeof req.expectedTotal !== 'number' || F(req.expectedTotal) !== totalF) {
     throw nein(SETTLE_TOTAL_CHANGED, `the settlement total is ${B(totalF).toFixed(3)}, not what the window showed — check the proposal and confirm again`);
@@ -222,6 +279,7 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
     newValue: {
       settlementNumber, customerId: req.customerId, settlementDate: tag, total: B(totalF),
       lines: lines.map((l) => ({ offsetNumber: l.offsetNumber, invoiceId: l.invoiceId, sourceKind: l.sourceKind, sourceId: l.sourceId, amount: l.amount })),
+      ...(Object.keys(handF).length > 0 ? { changedAmounts: Object.entries(handF).map(([k, f]) => ({ pair: k, amount: B(f) })) } : {}),
       noCash: true,
     },
     actor: { userId: userId || undefined, branchId: ctx.branchId },
@@ -309,6 +367,7 @@ export function settleBalanceBody(req: SettleBalanceRequest): Record<string, unk
     ...(req.settlementDate ? { settlementDate: req.settlementDate } : {}),
     expectedStamp: req.expectedStamp, expectedTotal: req.expectedTotal,
     ...(req.finalNumbers ? { finalNumbers: { ...req.finalNumbers } } : {}),
+    ...(req.amounts && req.amounts.length > 0 ? { amounts: req.amounts.map((a) => ({ invoiceId: a.invoiceId, sourceId: a.sourceId, amount: a.amount })) } : {}),
   };
 }
 export function settlementReverseBody(req: SettlementReverseRequest): Record<string, unknown> {

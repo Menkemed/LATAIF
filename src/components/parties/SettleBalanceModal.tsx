@@ -6,6 +6,10 @@
 // Ein Klick „Confirm settlement" — werden Rechnungen voll bezahlt, zuerst die Endnummer je Rechnung (Normal/Special).
 // Gebucht wird alles in EINER Transaktion unter einer STL-Nummer (Primary lokal, PC2 über `customers.settle_balance`).
 // Hat sich der Stand inzwischen geändert, bucht der Primary nichts; das Fenster liest neu und schlägt neu vor.
+// B2/B3 Nachbesserung (Owner 10.11.2026): jede Zeile hat „Change amount" — voll oder teilweise, 0 bis zur Obergrenze der Zeile
+// (kleinerer Rest von Rechnung und Gegenposten nach den früheren Zeilen), BHD mit drei Nachkommastellen. Was dadurch offen
+// bleibt, geht der Reihe nach (FIFO) an den nächsten gewählten Posten; alle Reste rechnen bei jeder gültigen Eingabe neu.
+// Das Haus rechnet mit derselben Funktion und prüft jede Obergrenze erneut (SETTLE_AMOUNT_TOO_HIGH / _INVALID).
 // ════════════════════════════════════════════════════════════════════════════
 import { useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
@@ -13,7 +17,7 @@ import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import {
-  SETTLE_SOURCE_LABEL, SETTLE_SOURCE_ORDER, finalizingInvoices, planSettlement, type SettleBalanceRead,
+  SETTLE_SOURCE_LABEL, SETTLE_SOURCE_ORDER, finalizingInvoices, planSettlementRows, settlePairKey, type SettleBalanceRead,
 } from '@/core/offsets/party-settlement-reads';
 import {
   settleBalanceBody, settleBalanceOnPrimary, type SettleBalanceRequest, type SettlementBooked,
@@ -58,11 +62,36 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
   const [step, setStep] = useState<'select' | 'numbers'>('select');
   const [choice, setChoice] = useState<Record<string, 'normal' | 'special'>>({});
   const [msg, setMsg] = useState<string | null>(null);
+  // B2/B3 Nachbesserung — „Change amount": je Zuordnung ein von Hand gesetzter Betrag (Fils); die Zeile im Bearbeiten.
+  const [hand, setHand] = useState<Record<string, number>>({});
+  const [edit, setEdit] = useState<{ key: string; text: string } | null>(null);
 
-  const pairs = useMemo(
-    () => planSettlement(data.invoices, data.sources, { invoiceIds: [...invSel], sourceIds: [...srcSel] }),
-    [data, invSel, srcSel],
+  const rows = useMemo(
+    () => planSettlementRows(data.invoices, data.sources, { invoiceIds: [...invSel], sourceIds: [...srcSel], amounts: hand }),
+    [data, invSel, srcSel, hand],
   );
+  const pairs = useMemo(() => rows.filter((r) => r.amountF > 0), [rows]);
+  /** Eingabe prüfen: BHD mit höchstens drei Nachkommastellen, 0 bis zur Obergrenze der Zeile. */
+  const pruefe = (text: string, maxF: number): { f: number } | { fehler: string } => {
+    const t = text.trim();
+    if (!/^\d+(\.\d{0,3})?$/.test(t)) return { fehler: 'Enter an amount in BHD (up to 3 decimals).' };
+    const f = Math.round(Number(t) * 1000);
+    if (f > maxF) return { fehler: `At most ${fmt(maxF)} here (open rest of the invoice or of the counter item).` };
+    return { f };
+  };
+  const editRow = edit ? rows.find((r) => settlePairKey(r.sourceId, r.invoiceId) === edit.key) : undefined;
+  const editCheck = edit && editRow ? pruefe(edit.text, editRow.maxF) : null;
+  const editBad = !!editCheck && 'fehler' in editCheck;
+  function tippe(key: string, text: string, maxF: number): void {
+    setEdit({ key, text });
+    const c = pruefe(text, maxF);
+    // Sofort neu rechnen, sobald die Eingabe gültig ist — Vorschau und alle Reste folgen.
+    if ('f' in c) setHand((h) => (h[key] === c.f ? h : { ...h, [key]: c.f }));
+  }
+  function zuruecksetzen(key: string): void {
+    setHand((h) => { const n = { ...h }; delete n[key]; return n; });
+    setEdit(null);
+  }
   const totalF = pairs.reduce((s, p) => s + p.amountF, 0);
   const usedInv = (id: string): number => pairs.filter((p) => p.invoiceId === id).reduce((s, p) => s + p.amountF, 0);
   const usedSrc = (id: string): number => pairs.filter((p) => p.sourceId === id).reduce((s, p) => s + p.amountF, 0);
@@ -85,11 +114,15 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
       expectedStamp: data.stamp, expectedTotal: totalF / 1000,
       ...(needChoice.length > 0 ? { finalNumbers: Object.fromEntries(needChoice.map((i) => [i.id, choice[i.id] ?? 'normal'])) } : {}),
     };
+    // Nur die von Hand gesetzten Beträge der Zeilen, die dieser Vorschlag zeigt (das Haus prüft jede Obergrenze erneut).
+    const geaendert = rows.filter((r) => r.edited).map((r) => ({ invoiceId: r.invoiceId, sourceId: r.sourceId, amount: r.amountF / 1000 }));
+    if (geaendert.length > 0) req.amounts = geaendert;
     const out = await w.save<SettlementBooked>('customers.settle_balance', {
       local: () => settleBalanceOnPrimary(req),
       remote: () => settleBalanceBody(req),
     });
     if (out.kind !== 'ok') {
+      // Ein Nein zu einem von Hand gesetzten Betrag (SETTLE_AMOUNT_*) kommt erst NACH dem Stand-Abgleich: es bleibt hier stehen.
       if ('code' in out && (out.code === 'OPEN_ITEMS_CHANGED' || out.code === 'SETTLE_TOTAL_CHANGED' || out.code === 'SETTLE_SELECTION_INVALID')) {
         setStep('select');
         onStale();
@@ -103,7 +136,8 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
   }
 
   function bestaetigen(): void {
-    if (pairs.length === 0) return;
+    if (pairs.length === 0 || editBad) return;
+    setEdit(null);
     if (needChoice.length > 0) {
       setChoice((c) => Object.fromEntries(needChoice.map((i) => [i.id, c[i.id] ?? 'normal'])));
       setStep('numbers');
@@ -151,8 +185,9 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
     <Modal open onClose={onClose} title={`Settle Balance — ${customerName}`} width={980}>
       <div data-settle-balance style={{ display: 'grid', gap: 14, fontSize: 13 }}>
         <p style={{ color: GREY, margin: 0 }}>
-          The app proposes what to offset. Untick what should stay out — the proposal is calculated again at once. No money moves:
-          cash, bank, Benefit and card stay as they are.
+          The app proposes what to offset. Untick what should stay out, or use “Change amount” on a line to offset less (full or
+          partial) — the proposal and every remaining amount are calculated again at once. No money moves: cash, bank, Benefit and
+          card stay as they are.
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
           <div>
@@ -236,7 +271,7 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
 
         <div>
           <p style={ueber}>What will happen</p>
-          {pairs.length === 0 ? (
+          {rows.length === 0 ? (
             <p style={{ color: '#B91C1C' }} data-settle-nothing>Nothing to offset with this selection.</p>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }} data-settle-pairs={pairs.length}>
@@ -244,22 +279,59 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
                 <th style={{ ...zelle, textAlign: 'left', color: GREY }}>We owe</th><th style={zelle} />
                 <th style={{ ...zelle, textAlign: 'left', color: GREY }}>Invoice</th>
                 <th style={{ ...zahl, color: GREY }}>Invoice open before → after</th>
+                <th style={{ ...zahl, color: GREY }}>Counter item open before → after</th>
                 <th style={{ ...zahl, color: GREY }}>Amount</th>
               </tr></thead>
               <tbody>
                 {(() => {
                   const offenNach = new Map(data.invoices.map((i) => [i.id, F(i.open)]));
-                  return pairs.map((p, k) => {
+                  const quelleNach = new Map(data.sources.map((q) => [q.id, F(q.open)]));
+                  return rows.map((p) => {
                     const s = src(p.sourceId);
+                    const key = settlePairKey(p.sourceId, p.invoiceId);
                     const vor = offenNach.get(p.invoiceId) ?? 0;
                     offenNach.set(p.invoiceId, vor - p.amountF);
+                    const qVor = quelleNach.get(p.sourceId) ?? 0;
+                    quelleNach.set(p.sourceId, qVor - p.amountF);
+                    const offen = edit?.key === key;
+                    const fehler = offen && editCheck && 'fehler' in editCheck ? editCheck.fehler : null;
                     return (
-                      <tr key={k} data-settle-pair={`${s?.number}>${invNo(p.invoiceId)}`}>
+                      <tr key={key} data-settle-pair={`${s?.number}>${invNo(p.invoiceId)}`} data-settle-pair-amount={fmt(p.amountF)}
+                        data-settle-pair-max={fmt(p.maxF)} data-settle-pair-edited={p.edited ? '1' : '0'} style={{ opacity: p.amountF > 0 ? 1 : 0.6 }}>
                         <td style={zelle}><b>{s?.number}</b> <span style={{ color: GREY }}>· {s ? (s.kind === 'PURCHASE' ? (s.consignment ? 'consignment purchase' : 'purchase') : SETTLE_SOURCE_LABEL[s.kind]) : ''}</span></td>
                         <td style={zelle}>→</td>
                         <td style={zelle}><b>{invNo(p.invoiceId)}</b></td>
                         <td style={zahl}>{fmt(vor)} → {fmt(vor - p.amountF)}</td>
-                        <td style={zahl}>{fmt(p.amountF)}</td>
+                        <td style={zahl}>{fmt(qVor)} → {fmt(qVor - p.amountF)}</td>
+                        <td style={zahl}>
+                          {offen ? (
+                            <div style={{ display: 'grid', gap: 4, justifyItems: 'end' }}>
+                              <input autoFocus inputMode="decimal" value={edit.text} data-settle-amount-input
+                                onChange={(e) => tippe(key, e.target.value, p.maxF)}
+                                onKeyDown={(e) => { if (e.key === 'Enter' && !fehler) setEdit(null); if (e.key === 'Escape') setEdit(null); }}
+                                style={{ width: 110, textAlign: 'right', padding: '3px 6px', fontFamily: 'inherit', fontSize: 12,
+                                  border: `1px solid ${fehler ? '#B91C1C' : LINE}`, borderRadius: 6 }} />
+                              <span style={{ fontSize: 10, color: GREY }}>max {fmt(p.maxF)} BHD</span>
+                              {fehler && <span style={{ fontSize: 10, color: '#B91C1C', whiteSpace: 'normal', maxWidth: 220 }} data-settle-amount-error>{fehler}</span>}
+                              <span className="flex" style={{ gap: 6 }}>
+                                <button type="button" data-settle-amount-done disabled={!!fehler} onClick={() => setEdit(null)}
+                                  style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, border: `1px solid ${INK}`, background: INK, color: '#FFF', cursor: fehler ? 'not-allowed' : 'pointer', opacity: fehler ? 0.5 : 1 }}>Done</button>
+                                {p.edited && <button type="button" data-settle-amount-reset onClick={() => zuruecksetzen(key)}
+                                  style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, border: `1px solid ${LINE}`, background: '#FFF', cursor: 'pointer' }}>Reset</button>}
+                              </span>
+                            </div>
+                          ) : (
+                            <div style={{ display: 'grid', gap: 2, justifyItems: 'end' }}>
+                              <span>{fmt(p.amountF)}{p.edited && <span style={{ color: GREY, fontSize: 10 }}> · changed</span>}</span>
+                              <span className="flex" style={{ gap: 6 }}>
+                                <button type="button" data-settle-amount-edit onClick={() => setEdit({ key, text: fmt(p.amountF) })} disabled={w.busy || editBad}
+                                  style={{ fontSize: 11, padding: 0, border: 'none', background: 'none', color: '#1D4ED8', cursor: 'pointer', textDecoration: 'underline' }}>Change amount</button>
+                                {p.edited && <button type="button" data-settle-amount-reset onClick={() => zuruecksetzen(key)}
+                                  style={{ fontSize: 11, padding: 0, border: 'none', background: 'none', color: GREY, cursor: 'pointer', textDecoration: 'underline' }}>Reset</button>}
+                              </span>
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     );
                   });
@@ -267,6 +339,7 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
               </tbody>
             </table>
           )}
+          {rows.length > 0 && pairs.length === 0 && <p style={{ color: '#B91C1C', margin: '6px 0 0' }} data-settle-nothing>Every amount is 0 — nothing to offset.</p>}
         </div>
 
         {pairs.length > 0 && (
@@ -288,7 +361,7 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
         {(msg || w.fehler) && <div style={{ color: '#B91C1C', fontSize: 12 }} data-settle-error>{msg || w.fehler}</div>}
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={bestaetigen} disabled={w.busy || pairs.length === 0} data-settle-confirm>
+          <Button variant="primary" onClick={bestaetigen} disabled={w.busy || pairs.length === 0 || editBad} data-settle-confirm>
             Confirm settlement · {pairs.length} offset{pairs.length === 1 ? '' : 's'} · {fmt(totalF)}
           </Button>
         </div>

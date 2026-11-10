@@ -6,11 +6,13 @@
 // Freigegeben (Owner 09.11.2026) sind ZWEI Arten von Gegenposten, in dieser Reihenfolge (V7):
 //   1. Store Credit — nur der freie Teil eines OPEN-Guthabens dieses Kunden in dieser Filiale (Betrag − verwendet);
 //   2. We Borrowed  — ein offenes Darlehen, AUSDRÜCKLICH diesem Kunden zugeordnet (wie B1).
-// Innerhalb jeder Gruppe das älteste zuerst; links die offenen Rechnungen, älteste zuerst. Einkäufe, Kommission,
-// Partner, Order-Anzahlungen, Eröffnungsposten und Gold werden hier NIE angeboten.
+// (B2/B3: 3. Einkäufe der ausdrücklich verknüpften Lieferantenrolle, normal und Kommission.) Innerhalb jeder Gruppe das
+// älteste zuerst; links die offenen Rechnungen, älteste zuerst. Partner, Order-Anzahlungen, Eröffnungsposten und Gold
+// werden hier NIE angeboten.
 //
-// Der Vorschlag paart der Reihe nach (zwei Zeiger): jede gewählte Rechnung mit den gewählten Gegenposten, bis eine Seite
-// leer ist. Dieselbe Funktion rechnet die Vorschau der Maske und — gegen den frischen Stand — die Buchung im Haus.
+// Der Vorschlag paart der Reihe nach (FIFO): jede gewählte Rechnung mit den gewählten Gegenposten, bis eine Seite leer ist —
+// je Zuordnung der kleinere Rest oder ein von Hand gesetzter Betrag („Change amount", nie über der Obergrenze). Dieselbe
+// Funktion rechnet die Vorschau der Maske und — gegen den frischen Stand — die Buchung im Haus.
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
 import { paidFilsOfDebt } from '@/core/finance/debt-status';
@@ -47,6 +49,16 @@ export interface SettleSource {
   consignment?: boolean;
 }
 export interface SettlePair { invoiceId: string; sourceKind: SettleSourceKind; sourceId: string; amountF: number }
+/**
+ * B2/B3 Nachbesserung (Owner 10.11.2026) — eine Zeile des Vorschlags MIT ihrer Obergrenze: `maxF` = was an dieser Stelle
+ * höchstens geht (kleinerer Rest von Rechnung und Gegenposten, nachdem die früheren Zeilen gerechnet sind). `edited`:
+ * der Betrag ist von Hand gesetzt (`amountF` = der gesetzte Betrag; 0 = diese Zuordnung bleibt aus).
+ */
+export interface SettlePlanRow extends SettlePair { maxF: number; edited: boolean }
+/** Schlüssel einer Zuordnung (Gegenposten → Rechnung) für einen von Hand gesetzten Betrag. */
+export const settlePairKey = (sourceId: string, invoiceId: string): string => `${sourceId}>${invoiceId}`;
+/** Ein von Hand gesetzter Betrag je Zuordnung (Fils). Fehlt er: der Vorschlag (kleinerer Rest). */
+export type SettleAmountsF = Readonly<Record<string, number>>;
 
 export interface SettlementLine {
   offsetId: string; offsetNumber: string; status: string; amount: number; offsetDate: string;
@@ -168,28 +180,45 @@ export function settleStamp(invoices: readonly SettleInvoice[], sources: readonl
 }
 
 /**
- * Der Vorschlag: die gewählten Rechnungen (älteste zuerst) gegen die gewählten Gegenposten (Store Credit, dann We
- * Borrowed; je älteste zuerst), der Reihe nach, bis eine Seite aufgebraucht ist. Rein rechnend, in Fils.
+ * Der Vorschlag MIT Obergrenzen: die gewählten Rechnungen (älteste zuerst) gegen die gewählten Gegenposten (Store Credit,
+ * We Borrowed, Einkäufe; je älteste zuerst), der Reihe nach (FIFO). Jede Zuordnung nimmt den kleineren Rest beider Seiten —
+ * oder den von Hand gesetzten Betrag (`amounts`, nie mehr als die Obergrenze); was dann offen bleibt, geht der Reihe nach
+ * an den nächsten Gegenposten. Ohne `amounts` genau der bisherige Vorschlag. Rein rechnend, in Fils. Zeilen mit 0
+ * (von Hand ausgeschlossen) bleiben in der Liste, damit die Maske sie zeigen und zurücksetzen kann.
  */
-export function planSettlement(
+export function planSettlementRows(
   invoices: readonly SettleInvoice[], sources: readonly SettleSource[],
-  selected: { invoiceIds: readonly string[]; sourceIds: readonly string[] },
-): SettlePair[] {
+  selected: { invoiceIds: readonly string[]; sourceIds: readonly string[]; amounts?: SettleAmountsF },
+): SettlePlanRow[] {
   const invSel = new Set(selected.invoiceIds);
   const srcSel = new Set(selected.sourceIds);
   const iv = invoices.filter((i) => invSel.has(i.id)).map((i) => ({ id: i.id, left: F(i.open) })).filter((x) => x.left > OPEN_EPS_F);
   const sv = SETTLE_SOURCE_ORDER.flatMap((k) => sources.filter((s) => s.kind === k && srcSel.has(s.id)))
     .map((s) => ({ kind: s.kind, id: s.id, left: F(s.open) })).filter((x) => x.left > OPEN_EPS_F);
-  const pairs: SettlePair[] = [];
-  let a = 0, b = 0;
-  while (a < iv.length && b < sv.length) {
-    const amountF = Math.min(iv[a].left, sv[b].left);
-    pairs.push({ invoiceId: iv[a].id, sourceKind: sv[b].kind, sourceId: sv[b].id, amountF });
-    iv[a].left -= amountF; sv[b].left -= amountF;
-    if (iv[a].left <= OPEN_EPS_F) a++;
-    if (sv[b].left <= OPEN_EPS_F) b++;
+  const rows: SettlePlanRow[] = [];
+  for (const i of iv) {
+    for (const q of sv) {
+      if (i.left <= OPEN_EPS_F) break;
+      if (q.left <= OPEN_EPS_F) continue;
+      const maxF = Math.min(i.left, q.left);
+      const hand = selected.amounts?.[settlePairKey(q.id, i.id)];
+      const edited = typeof hand === 'number' && Number.isFinite(hand);
+      const amountF = edited ? Math.max(0, Math.min(Math.round(hand), maxF)) : maxF;
+      rows.push({ invoiceId: i.id, sourceKind: q.kind, sourceId: q.id, amountF, maxF, edited });
+      i.left -= amountF; q.left -= amountF;
+    }
   }
-  return pairs;
+  return rows;
+}
+
+/** Der Vorschlag (nur Zuordnungen mit Betrag) — dieselbe Rechnung für die Vorschau der Maske und die Buchung im Haus. */
+export function planSettlement(
+  invoices: readonly SettleInvoice[], sources: readonly SettleSource[],
+  selected: { invoiceIds: readonly string[]; sourceIds: readonly string[]; amounts?: SettleAmountsF },
+): SettlePair[] {
+  return planSettlementRows(invoices, sources, selected)
+    .filter((r) => r.amountF > 0)
+    .map(({ invoiceId, sourceKind, sourceId, amountF }) => ({ invoiceId, sourceKind, sourceId, amountF }));
 }
 
 /**

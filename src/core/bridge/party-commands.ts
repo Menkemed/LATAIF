@@ -145,7 +145,8 @@ export function runCustomerSettle(deps: EngineDeps, identity: CommandIdentity, r
 }
 
 // ── CUSTOMER ACCOUNT C — „Settle Balance" und ihre Aufhebung ─────────────────
-export const SETTLE_BALANCE_KEYS = ['customerId', 'invoiceIds', 'sourceIds', 'settlementDate', 'expectedStamp', 'expectedTotal', 'finalNumbers'] as const;
+export const SETTLE_BALANCE_KEYS = ['customerId', 'invoiceIds', 'sourceIds', 'settlementDate', 'expectedStamp', 'expectedTotal', 'finalNumbers', 'amounts'] as const;
+const SETTLE_AMOUNT_KEYS = ['invoiceId', 'sourceId', 'amount'] as const;
 export const SETTLEMENT_REVERSE_KEYS = ['settlementNumber', 'reason', 'expectedActiveLines'] as const;
 
 const idList = (v: unknown, name: string): string[] => {
@@ -169,10 +170,23 @@ export function parseSettleBalance(raw: unknown): SettleBalanceRequest {
       finalNumbers[k] = v;
     }
   }
+  // B2/B3 Nachbesserung — „Betrag ändern": je Zuordnung { invoiceId, sourceId, amount }; Obergrenzen prüft das Haus.
+  let amounts: SettleBalanceRequest['amounts'];
+  if (r.amounts !== undefined) {
+    if (!Array.isArray(r.amounts) || r.amounts.length > 200) throw new PartyPayloadError('amounts must be a list');
+    amounts = r.amounts.map((a) => {
+      const x = only(a, SETTLE_AMOUNT_KEYS);
+      if (typeof x.invoiceId !== 'string' || !x.invoiceId.trim() || x.invoiceId.length > 64) throw new PartyPayloadError('amounts: invoiceId is required');
+      if (typeof x.sourceId !== 'string' || !x.sourceId.trim() || x.sourceId.length > 64) throw new PartyPayloadError('amounts: sourceId is required');
+      if (typeof x.amount !== 'number' || !Number.isFinite(x.amount) || x.amount < 0) throw new PartyPayloadError('amounts: amount must be 0 or more');
+      return { invoiceId: x.invoiceId, sourceId: x.sourceId, amount: x.amount };
+    });
+  }
   return {
     customerId: r.customerId, invoiceIds: idList(r.invoiceIds, 'invoiceIds'), sourceIds: idList(r.sourceIds, 'sourceIds'),
     ...(r.settlementDate ? { settlementDate: r.settlementDate as string } : {}),
     expectedStamp: r.expectedStamp, expectedTotal: r.expectedTotal, ...(finalNumbers ? { finalNumbers } : {}),
+    ...(amounts ? { amounts } : {}),
   };
 }
 
