@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-// CUSTOMER ACCOUNT C — Variante C (Owner 10.11.2026) und die Diagnose `returns.approve`.
+// CUSTOMER ACCOUNT C — Variante C (Owner 10.11.2026) und `returns.approve` (geschlossen, Owner 10.11.2026).
 //   V: Rückgabe einer Rechnung, die ganz mit Store-Guthaben bezahlt ist → „Store Credit" vorgeschlagen (nur Vorbelegung);
 //      Geld weiter wählbar; gemischt → keine Vorbelegung, Hinweis; keine doppelte Erstattung/Guthaben; Primary = PC2.
 //   D: Wann bucht eine Erstattung Geld? „Refund now", „Refund later" + spätere Auszahlung, PC2 `returns.approve` ohne
@@ -512,64 +512,60 @@ const bankingAbfluss = (rid: string): number => Number(loadBankingFor(CTX as nev
   ok(o.kind === 'ok' && rueck(rid)[0] === 'REFUNDED' && eq(k0 - kasse(), 1000) && abstandKonto('CASH') === 0,
     `D2b spätere Auszahlung (PC2 returns.record_refund_payment): Freigabe + Auszahlung zusammen, 1.000 Kassenbuchung (${S({ kind: o.kind, code: o.code })})`);
 }
-let approveBeleg = '';
 {
-  // D3 PC2 `returns.approve` OHNE Auszahlung — die Diagnose.
+  // D3 PC2 `returns.approve` (Owner 10.11.2026 geschlossen): eindeutiges, endgültiges Nein ohne Teiländerung.
   const cid = 'cust-9';
   const r = rechnung(cid, [1000]);
   bar(r.id, 1000);
   const rid = maske(r.id, r.zeilen, 'cash', false);
   const k0 = kasse();
-  const o = await fern(() => rcmd.runApproveReturn(deps() as never, identity('921', 'returns.approve'),
-    { returnId: rid, expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) }));
+  const vorher = S([rueck(rid), cnVon(rid), n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]), n(DB, 'SELECT COUNT(*) FROM ledger_entries')]);
+  const body = { returnId: rid, expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) };
+  const o = await fern(() => rcmd.runApproveReturn(deps() as never, identity('921', 'returns.approve'), body));
   reload();
-  const kassenAbgang = k0 - kasse();
-  approveBeleg = `Status ${S(rueck(rid))} · Gutschrift (bar, Forderung) ${S(cnVon(rid))} · Kasse im Hauptbuch −${kassenAbgang.toFixed(3)} · Abstand Kasse ${abstandKonto('CASH')} Fils · AR ${abstandKonto('ACCOUNTS_RECEIVABLE')} Fils`;
-  console.log(`  D3 PC2 returns.approve ohne Auszahlung: ${approveBeleg}`);
-  ok(o.kind === 'ok' && rueck(rid)[0] === 'APPROVED' && rueck(rid)[1] === 'PENDING_REFUND' && Number(rueck(rid)[2]) === 0,
-    `D3a PC2 kann freigeben, ohne auszuzahlen: APPROVED, Erstattung offen, ausgezahlt 0 (${S(rueck(rid))})`);
-  ok(eq(kassenAbgang, 1000) && eq(cnBuchung(rid, ['CASH']), -1000),
-    `D3b BEFUND: die Gutschrift bucht die Erstattung schon bei der Freigabe aus der Kasse (−1.000), obwohl nichts ausgezahlt ist`);
-  ok(abstandKonto('CASH') === 0 && eq(bankingAbfluss(rid), 0),
-    `D3c BEFUND: Hauptbuch −1.000 Kasse, die Abstimmung zeigt KEINEN Abstand (ihr Bestand zählt die Erstattung der Gutschrift ebenso), Banking und Erstattungsstatus zeigen 0 ausgezahlt — Hauptbuch ≠ Banking bis zur Auszahlung (Abstand ${abstandKonto('CASH')} Fils, Banking ${bankingAbfluss(rid)})`);
-  // Auszahlung danach: keine doppelte Kassenbuchung (die Gutschrift wird neu gebucht).
+  const nachher = S([rueck(rid), cnVon(rid), n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]), n(DB, 'SELECT COUNT(*) FROM ledger_entries')]);
+  ok(o.code === rcmd.RETURN_APPROVE_CLOSED && nachher === vorher && eq(kasse(), k0) && bankingAbfluss(rid) === 0 && abstandKonto('CASH') === 0,
+    `D3 PC2 returns.approve: geschlossen (${o.code}) — keine Gutschrift, keine Kassenbuchung, Rückgabe unverändert REQUESTED`);
+  const w = await fern(() => rcmd.runApproveReturn(deps() as never, identity('921', 'returns.approve'), body));
+  ok(w.code === rcmd.RETURN_APPROVE_CLOSED && w.replayed === true, `D3b Wiederholung derselben Kennung: dasselbe eingefrorene Nein (${S({ code: w.code, replayed: w.replayed })})`);
+  const w2 = await fern(() => rcmd.runApproveReturn(deps() as never, identity('923', 'returns.approve'), body));
+  ok(w2.code === rcmd.RETURN_APPROVE_CLOSED, `D3c neue Kennung (z. B. ältere PC2-Version, wartender Auftrag): ebenfalls eindeutig abgelehnt (${w2.code})`);
+  // Der reguläre Weg danach: Auszahlung gibt frei und zahlt zusammen — genau einmal.
   const p = await fern(() => rcmd.runRecordRefundPayment(deps() as never, identity('922', 'returns.record_refund_payment'),
     { returnId: rid, amount: 1000, method: 'cash', expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) }));
   reload();
   ok(p.kind === 'ok' && eq(k0 - kasse(), 1000) && abstandKonto('CASH') === 0 && rueck(rid)[0] === 'REFUNDED' && eq(bankingAbfluss(rid), 1000),
-    `D3d nach der Auszahlung: insgesamt EINMAL 1.000 aus der Kasse, Abstimmung wieder ohne Abstand — keine doppelte Erstattung (${S(rueck(rid))})`);
+    `D3d danach „Pay out refund": einmal 1.000 aus der Kasse, Banking = Hauptbuch (${S(rueck(rid))})`);
 }
 {
-  // D4 Teilauszahlung nach PC2-Freigabe: die Gutschrift folgt dem Ausgezahlten; der Rest steht als Guthaben in der Forderung.
+  // D4 Teilauszahlung einer angelegten Rückgabe (Weg der Maske): gibt frei und zahlt 400; offener Rest als Guthaben in der Forderung.
   const cid = 'cust-10';
   const r = rechnung(cid, [1000]);
   bar(r.id, 1000);
   const rid = maske(r.id, r.zeilen, 'cash', false);
   const k0 = kasse();
-  await fern(() => rcmd.runApproveReturn(deps() as never, identity('931', 'returns.approve'), { returnId: rid, expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) }));
-  reload();
   await fern(() => rcmd.runRecordRefundPayment(deps() as never, identity('932', 'returns.record_refund_payment'),
     { returnId: rid, amount: 400, method: 'cash', expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) }));
   reload();
-  ok(eq(k0 - kasse(), 400) && rueck(rid)[1] === 'PARTIALLY_REFUNDED' && eq(arRechnung(r.id), -600) && abstandKonto('CASH') === 0,
-    `D4 Teilauszahlung 400: Kasse −400, offene Erstattung 600 als Forderung zugunsten des Kunden (AR −600), Kasse ohne Abstand (${S(rueck(rid))})`);
+  ok(eq(k0 - kasse(), 400) && rueck(rid)[1] === 'PARTIALLY_REFUNDED' && eq(arRechnung(r.id), -600) && abstandKonto('CASH') === 0 && eq(bankingAbfluss(rid), 400),
+    `D4 Teilauszahlung 400: Kasse −400 = Banking, offene Erstattung 600 als Guthaben in der Forderung (AR −600) (${S(rueck(rid))})`);
 }
 {
-  // D5 Storno vor der Auszahlung (Erstattung offen): die verfrühte Kassenbuchung geht mit zurück.
+  // D5 Storno einer angelegten Rückgabe (Erstattung offen): nichts gebucht, nichts zurückzunehmen.
   const cid = 'cust-11';
   const r = rechnung(cid, [1000]);
   bar(r.id, 1000);
   const rid = maske(r.id, r.zeilen, 'cash', false);
   const k0 = kasse();
-  await fern(() => rcmd.runApproveReturn(deps() as never, identity('941', 'returns.approve'), { returnId: rid, expectedRevision: n(DB, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) }));
-  reload();
   const e = wirft(() => imHaus(() => (cancelReturnInHouse as (...a: unknown[]) => unknown)(rid, 'Prüfung', { userId: 'user-test', role: 'ADMIN' }, 'branch-main')));
   reload();
-  ok(e === '' && eq(kasse(), k0) && abstandKonto('CASH') === 0 && rueck(rid)[0] === 'REJECTED',
-    `D5 Cancel Return vor der Auszahlung: Kasse wieder wie vorher, kein Abstand (${e || 'ok'})`);
-  ok(!/runApproveReturn|'returns\.approve'/.test(quelle), 'D6 keine Seite ruft die Freigabe allein (nur PC2-Befehl ohne Oberfläche)');
+  ok(e === '' && eq(kasse(), k0) && abstandKonto('CASH') === 0 && rueck(rid)[0] === 'REJECTED', `D5 Cancel Return vor der Auszahlung: Kasse unverändert (${e || 'ok'})`);
+  ok(!/runApproveReturn|'returns\.approve'/.test(quelle), 'D6 keine Seite ruft die Freigabe allein');
+  ok(/throw new CommandRejected\(RETURN_APPROVE_CLOSED,/.test(src('src/core/bridge/return-commands.ts'))
+    && src('src/core/bridge/command-registry.ts').includes("'returns.approve'") && src('src-tauri/src/bridge.rs').includes('OP_RETURNS_APPROVE,'),
+  'D7 serverseitig am Primary gesperrt; der Name bleibt registriert (ältere PC2 / wartende Aufträge bekommen ein eindeutiges Nein)');
 }
-void approveBeleg;
+
 
 void [cancelHouse, create, undo, geldKonten, abdruck, nummer, offen, kontoOffen, loadDebtPaymentsFor, payS, banking, analytics, backfill, executeCommand, lc, fc, money, po, geld, stand, sale, gap, TODAY, HCTX, readFileSync, existsSync, zeilen, insert, debtState, pcmd, perms, sr, st, useSupplierStore, usePurchaseStore, useCreditNoteStore, status, zurueck, fc2, darlehenOffen];
 console.log(`\nC refund suggestion + approve diagnosis: ${PASS} passed, ${fails.length} failed`);

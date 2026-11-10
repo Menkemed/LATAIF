@@ -183,9 +183,12 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   // gemeinsam rufen; sie ruft `createReturn` (und bei „sofort" `refundReturn`) des Stores.
   const haus = codeOf('src/core/returns/return-house.ts');
   ok(/createReturnInHouse\(/.test(mine) && /\.createReturn\(/.test(haus), 'REUSE der Fernweg ruft createReturn des Hauses (ueber die geteilte Folge)');
-  for (const fn of ['approveReturn(', 'refundReturn(', 'recordRefundPayment(']) {
+  // Owner 10.11.2026 — die alleinige Freigabe ist fern geschlossen; freigegeben wird nur noch innerhalb von Erstattung
+  // und Auszahlung (refundReturn / recordRefundPayment des Hauses).
+  for (const fn of ['refundReturn(', 'recordRefundPayment(']) {
     ok(mine.includes(`useSalesReturnStore.getState().${fn}`), `REUSE der Fernweg ruft ${fn.slice(0, -1)} des Hauses`);
   }
+  ok(!mine.includes('useSalesReturnStore.getState().approveReturn('), 'REUSE …und ruft approveReturn NICHT mehr allein (geschlossen)');
   ok(!/INSERT INTO|UPDATE \w+ SET|getNextDocumentNumber/i.test(haus), 'REUSE …und die Folge schreibt nichts selbst');
   ok(!/INSERT INTO (sales_returns|sales_return_lines|credit_notes|customer_credits|ledger_entries)/i.test(mine),
     'REUSE der Fernweg legt keine Rueckgabe, keine Gutschrift und keine Buchung selbst an');
@@ -268,28 +271,20 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   ok(n(db, "SELECT COUNT(*) FROM sync_changelog WHERE table_name = 'sales_return_lines'") > 0,
     'CHANGELOG …und ihre Zeilen ebenfalls');
 
-  // Genehmigen: Gutschrift, Steuerkorrektur, Forderung.
+  // Genehmigen ALLEIN ist fern geschlossen (Owner 10.11.2026): die Gutschrift buchte die Erstattung, bevor Geld floss.
+  // Ein eindeutiges, endgültiges Nein ohne jede Wirkung — auch beim Wiederholen derselben Kennung.
   const vatBefore = n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [inv]);
   const before = rrev(db, rid);
   const ap = await ret.runApproveReturn(d, identity('3', 'returns.approve'), { returnId: rid, expectedRevision: before });
-  ok(ap.kind === 'ok', 'APPROVE die Genehmigung laeuft');
-  const av = val<Record<string, unknown>>(ap);
-  ok(String(av.creditNoteId) !== '', 'APPROVE eine Gutschrift entsteht — die eigene Steuerurkunde');
-  ok(/^CN|^GS|.+/.test(String(av.creditNoteNumber)) && String(av.creditNoteNumber) !== '',
-    `APPROVE …mit eigener Nummer (${String(av.creditNoteNumber)})`);
-  ok(n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [inv]) < vatBefore,
-    'APPROVE die Steuer der Rechnung ist korrigiert');
-  ok(n(db, 'SELECT COUNT(*) FROM credit_notes WHERE sales_return_id = ?', [rid]) === 1,
-    'APPROVE genau EINE Gutschrift');
-  ok(rrev(db, rid) > before, 'REVISION die Genehmigung hebt die Fassung der Rueckgabe');
-  ok(String(av.status) === 'APPROVED', 'APPROVE der Zustand ist genehmigt');
-  ok(arNet(db, 'cust-1') <= arAfterSale, 'APPROVE die Forderung ist nicht groesser geworden');
-
-  // Eine zweite Genehmigung ist ein URTEIL, kein stilles Nichts.
-  const twice = await ret.runApproveReturn(d, identity('4', 'returns.approve'), { returnId: rid, expectedRevision: rrev(db, rid) });
-  ok(twice.kind === 'rejected' && code(twice) === 'RETURN_NOT_REQUESTED',
-    `APPROVE zweimal genehmigen wird abgewiesen (${code(twice)})`);
-  ok(twice.kind === 'rejected' && (twice as { frozen: boolean }).frozen, 'APPROVE …und das Urteil ist endgueltig');
+  ok(ap.kind === 'rejected' && code(ap) === 'RETURN_APPROVE_CLOSED' && (ap as { frozen: boolean }).frozen,
+    `APPROVE die alleinige Genehmigung ist geschlossen — endgültiges Nein (${code(ap)})`);
+  ok(n(db, 'SELECT COUNT(*) FROM credit_notes WHERE sales_return_id = ?', [rid]) === 0
+    && n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [inv]) === vatBefore && rrev(db, rid) === before
+    && arNet(db, 'cust-1') === arAfterSale,
+  'APPROVE …ohne Teiländerung: keine Gutschrift, Steuer, Fassung und Forderung unverändert');
+  const twice = await ret.runApproveReturn(d, identity('3', 'returns.approve'), { returnId: rid, expectedRevision: before });
+  ok(twice.kind === 'rejected' && code(twice) === 'RETURN_APPROVE_CLOSED' && (twice as { replayed?: boolean }).replayed === true,
+    `APPROVE dieselbe Kennung noch einmal: dasselbe eingefrorene Nein (${code(twice)})`);
 }
 
 // ── 3) Erstatten: Geld fliesst genau einmal ──────────────────────────────

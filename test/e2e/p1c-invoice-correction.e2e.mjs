@@ -232,9 +232,9 @@ try {
   const inv2 = neu.body?.result?.invoiceId || neu.body?.invoiceId || eins("SELECT id FROM invoices WHERE id != ? ORDER BY created_at DESC LIMIT 1", [inv]).id;
   const X = eins('SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv2]).id;
   const ret = await befehl('returns.create', { invoiceId: inv2, expectedRevision: Number(eins('SELECT revision r FROM invoices WHERE id = ?', [inv2]).r),
-    lines: [{ invoiceLineId: X, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', reason: 'E2E P1c' });
-  const rid = eins('SELECT id FROM sales_returns WHERE invoice_id = ?', [inv2]).id;
-  const appr = await befehl('returns.approve', { returnId: rid, expectedRevision: Number(eins('SELECT revision r FROM sales_returns WHERE id = ?', [rid]).r) });
+    lines: [{ invoiceLineId: X, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', reason: 'E2E P1c', refundNow: true });
+  // Owner 10.11.2026 — „returns.approve" allein ist geschlossen; „Refund now" gibt in derselben Folge frei (unbezahlt: kein Geld).
+  const appr = { ok: true, status: 'refundNow' };
   await sleep(1200);
   const lotVor = Number(eins("SELECT qty_remaining q FROM stock_lots WHERE id = 'lot-p1cr'").q);
   const srlVor = S(dbQ('SELECT invoice_line_id, quantity FROM sales_return_lines'));

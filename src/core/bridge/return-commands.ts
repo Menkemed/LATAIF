@@ -229,35 +229,27 @@ export function parseApproveReturn(raw: unknown): ReturnActionRequest {
   };
 }
 
-export function runApproveReturn(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const req = parseApproveReturn(raw);
-  return runRemoteCommand(deps, identity, () => {
-    const r = liveReturn(req.returnId, identity.branchId);
-    // `approveReturn` ist absichtlich idempotent — es tut bei schon genehmigten Rückgaben
-    // nichts. Für einen FERNAUFTRAG wäre das kein Erfolg, sondern ein stilles Nichts: der
-    // Mensch am anderen Rechner sähe „gespeichert" und hätte keine Gutschrift. Also hier ein
-    // ausdrückliches Urteil, bevor überhaupt etwas läuft.
-    if (String(r.status) !== 'REQUESTED') {
-      throw new CommandRejected('RETURN_NOT_REQUESTED',
-        `this return is "${String(r.status)}" — only a requested one is approved`);
-    }
-    assertRevision('sales_returns', req.returnId, req.expectedRevision, 'RETURN_NOT_FOUND');
-    useSalesReturnStore.getState().loadReturns();
-    useSalesReturnStore.getState().approveReturn(req.returnId);
+/**
+ * Owner 10.11.2026 — die ALLEINIGE Freigabe einer Rückgabe ist für Fernaufträge GESCHLOSSEN. Sie legte die Gutschrift an,
+ * und die bucht den erstattbaren Betrag sofort aus Kasse/Bank (`postCreditNote`), obwohl noch nichts ausgezahlt ist —
+ * Hauptbuch und Banking liefen bis zur Auszahlung auseinander. Keine Oberfläche braucht sie: „Refund now" gibt frei UND
+ * zahlt in einer Folge (`returns.create`), „Refund later" bleibt angelegt, und die spätere Auszahlung
+ * (`returns.record_refund_payment`) gibt frei und zahlt zusammen.
+ *
+ * Der Name bleibt registriert (Rust-Liste, Registry): eine ältere PC2-Version oder ein noch wartender Auftrag bekommt so
+ * ein EINDEUTIGES, endgültiges Nein (eingefroren, eine Wiederholung bekommt dasselbe) statt eines Transportfehlers — und es
+ * wird nichts geschrieben. Ein vor der Sperre schon ausgeführter Auftrag behält beim Wiederholen seine alte Antwort
+ * (Nachweis im Befehlsjournal), er wird nicht erneut ausgeführt. Die Hausfunktion `approveReturn` bleibt für die
+ * zusammengesetzten Wege (Erstattung, Rechnungsstorno) unverändert.
+ */
+export const RETURN_APPROVE_CLOSED = 'RETURN_APPROVE_CLOSED';
 
-    const after = returnState(req.returnId);
-    if (String(after.status) === 'REQUESTED') {
-      // Nicht als Erfolg einfrieren, was nicht geschehen ist.
-      throw new CommandNotEvaluated('APPROVE_NOT_APPLIED', 'the return is still requested');
-    }
-    const cn = query('SELECT id, credit_note_number FROM credit_notes WHERE sales_return_id = ? LIMIT 1', [req.returnId])[0];
-    useInvoiceStore.getState().loadInvoices();
-    return {
-      ...after,
-      creditNoteId: String(cn?.id ?? ''),
-      creditNoteNumber: String(cn?.credit_note_number ?? ''),
-      invoice: invoiceState(String(after.invoiceId)),
-    };
+export function runApproveReturn(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  parseApproveReturn(raw);
+  return runRemoteCommand(deps, identity, () => {
+    throw new CommandRejected(RETURN_APPROVE_CLOSED,
+      'Approving a return on its own is closed: it would book the refund before any money is paid. Use "Refund now" '
+      + 'when creating the return, or pay out the open refund (that approves and pays together). Nothing was changed.');
   });
 }
 

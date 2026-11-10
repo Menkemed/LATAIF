@@ -223,19 +223,13 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   ok(s1.cash === before.cash, 'STAGE-1 …und es floss noch kein Geld — die Gutschrift kommt erst');
   ok(s1.cn === before.cn, 'STAGE-1 …und es gibt noch keine Gutschrift');
 
-  // ── Stufe 2: genehmigen. Gutschrift und Steuer — kein Bestand, kein Geld.
+  // ── Stufe 2: die ALLEINIGE Genehmigung ist fern geschlossen (Owner 10.11.2026) — sie buchte die Erstattung, bevor
+  //    Geld floss. Ein eindeutiges Nein, nichts bewegt sich.
   const a = await ret.runApproveReturn(d, identity('3', 'returns.approve'), { returnId: rid, expectedRevision: rrev(db, rid) });
-  ok(a.kind === 'ok', 'STAGE-2 die Genehmigung laeuft');
+  ok(a.kind === 'rejected' && code(a) === 'RETURN_APPROVE_CLOSED', `STAGE-2 die alleinige Genehmigung ist geschlossen (${code(a)})`);
   const total0 = n(db, 'SELECT total_amount FROM sales_returns WHERE id = ?', [rid]);
   const s2 = snap();
-  ok(s2.cn === s1.cn + 1, `STAGE-2 GENAU eine Gutschrift entsteht (${s1.cn} → ${s2.cn})`);
-  ok(s2.vat < s1.vat, `STAGE-2 die Steuer wird korrigiert (${s1.vat} → ${s2.vat})`);
-  ok(s2.lot === s1.lot, 'STAGE-2 das Los bleibt unangetastet — keine zweite Bestandsrueckgabe');
-  ok(s2.qty === s1.qty, 'STAGE-2 …und der Bestand ebenso');
-  ok(s2.cogs === s1.cogs, 'STAGE-2 …und KEIN zweiter Wareneinsatz-Storno');
-  // Hier faellt die Geldbuchung: die Gutschrift IST die Urkunde ueber den Bar-/Forderungs-Split.
-  ok(before.cash - s2.cash <= total0 + 0.005,
-    `STAGE-2 die Gutschrift bucht hoechstens den Rueckgabebetrag (${(before.cash - s2.cash).toFixed(3)} von ${total0})`);
+  ok(JSON.stringify(s2) === JSON.stringify(s1), 'STAGE-2 …und nichts bewegt sich: keine Gutschrift, keine Steuer, kein Geld, kein Bestand');
 
   // ── Stufe 3: erstatten. NUR Geld. `refundReturn` genehmigt intern noch einmal — idempotent.
   const total = total0;
@@ -247,10 +241,10 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
   // Und der eigentliche Schutz: ueber die GANZE Kette bewegte sich der Betrag genau einmal.
   ok(Math.abs(before.cash - s3.cash - total) < 0.005,
     `STAGE-3 ueber die ganze Kette floss GENAU der Rueckgabebetrag (${(before.cash - s3.cash).toFixed(3)} von ${total})`);
-  ok(s3.cn === s2.cn, 'STAGE-3 KEINE zweite Gutschrift — die interne Genehmigung ist idempotent');
-  ok(s3.vat === s2.vat, 'STAGE-3 …und KEINE zweite Steuerkorrektur');
-  ok(s3.lot === s2.lot && s3.qty === s2.qty, 'STAGE-3 …und kein zweites Mal Ware');
-  ok(s3.cogs === s2.cogs, 'STAGE-3 …und kein zweiter Wareneinsatz-Storno');
+  ok(s3.cn === s1.cn + 1, 'STAGE-3 die Erstattung genehmigt intern: GENAU eine Gutschrift');
+  ok(s3.vat < s1.vat, 'STAGE-3 …mit EINER Steuerkorrektur');
+  ok(s3.lot === s1.lot && s3.qty === s1.qty, 'STAGE-3 …und kein zweites Mal Ware');
+  ok(s3.cogs === s1.cogs, 'STAGE-3 …und kein zweiter Wareneinsatz-Storno');
   ok(before.cash - s3.cash < total * 2 - 0.005,
     `STAGE-3 …und ausdruecklich NICHT zweimal (${(before.cash - s3.cash).toFixed(3)}, doppelt waere ${total * 2})`);
 
