@@ -1,4 +1,5 @@
 // B2/B3 SICHERHEIT A — Harness übernommen aus test/r6d/payables-parity.test.ts.
+/* eslint-disable @typescript-eslint/no-unused-vars -- Harness aus test/r6d/payables-parity übernommen (nicht jeder Helfer wird hier gebraucht). */
 // CENTRAL-UI-PARITY R6D — Verbindlichkeiten (Domäne B): Ausgaben, Daueraufträge, Einkaufszahlungen,
 // Lieferanten-Guthaben und Sammelzahlung. EINE Hausfolge für Primary und PC2.
 // Run: node test/r6d/payables-parity.test.ts

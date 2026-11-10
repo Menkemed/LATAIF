@@ -425,12 +425,16 @@ export function backfillPurchasePayments(branchId: string): BackfillResult {
     // ohne Gegenreversal → AP/Supplier-Credit-Drift). hasLedgerEntries (nur lebendes Original)
     // liefert bei reversierten false und re-postet sie — daher hasAnyLedgerEntries.
     if (hasAnyLedgerEntries('PURCHASE_PAYMENT', id)) { res.skipped++; continue; }
+    // B2/B3 SICHERHEIT B — eine Verrechnungszeile ('offset') bucht nie selbst (ihre Buchung steht an der Rechnungszahlung):
+    // nie nachbuchen. Eine unbekannte oder leere Zahlart wird NICHT mehr als Bank nachgebucht — die Buchung lehnt sie ab
+    // und der Lauf meldet sie als Fehler (vorher `|| 'bank'` + Rückfall auf BANK).
+    if (String(r.method ?? '') === 'offset') { res.skipped++; continue; }
     safeStep(res, `pay ${id.slice(0, 8)}`, () => {
       postPurchasePayment(
         {
           id, purchaseId: r.purchase_id as string,
           amount: Number(r.amount || 0),
-          method: (r.method as 'cash' | 'bank' | 'credit') || 'bank',
+          method: String(r.method ?? '') as 'cash' | 'bank' | 'benefit' | 'credit',
           paidAt: r.paid_at as string,
           reference: (r.reference as string | null) || undefined,
           note: (r.note as string | null) || undefined,

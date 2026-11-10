@@ -116,6 +116,19 @@ export function transferDirectionFor(from: BankAccount, to: BankAccount): BankTr
   return null;
 }
 
+/**
+ * B2/B3 SICHERHEIT B — das Geldkonto einer EINKAUFS-Zahlung, ausdrücklich: nur cash/bank/benefit. Eine unbekannte Zahlart
+ * fällt nicht mehr still auf die Bank; sie zeigt das Konto, auf dem ihre LEBENDE Buchung steht (Altbestand), sonst gar nicht.
+ * Keine Geldbewegung ('credit' Lieferantenguthaben, 'offset' Verrechnung) steht hier nie — die Abfrage schließt sie aus.
+ */
+export function purchasePaymentBankAccount(method: string | null | undefined, bookedAccount?: string | null): BankAccount | null {
+  const m = String(method ?? '').toLowerCase();
+  if (m === 'cash' || m === 'bank' || m === 'benefit') return m;
+  if (m === 'credit' || m === 'offset') return null;
+  const b = String(bookedAccount ?? '').toUpperCase();
+  return b === 'CASH' ? 'cash' : b === 'BANK' ? 'bank' : b === 'BENEFIT' ? 'benefit' : null;
+}
+
 function accountFor(method: string | null | undefined): BankAccount {
   if (!method) return 'bank';
   const m = String(method).toLowerCase();
@@ -278,7 +291,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
                  AND e.created_at = p.created_at
                  AND e.status != 'CANCELLED') AS card_fee
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
-     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit', 'debt_offset')`,
+     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit', 'debt_offset', 'purchase_offset')`,
     [branchId]
   );
   // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ('order_deposit') bewegt kein Geld: das Geld steht als
@@ -316,19 +329,29 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   const purchPay = safeQuery('purchase_payments',
     // CONSIGNMENT D3 — eine Verrechnung mit Lieferanten-Guthaben (method='credit') bewegt kein Geld: nicht in die Liste
     // (vorher als Bank-Abgang gezeigt; die Salden kamen schon immer aus dem Hauptbuch).
-    `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.purchase_id, p.purchase_number, pp.created_at AS created_at
+    // B2/B3 — ebenso die Verrechnung mit einer Kundenrechnung ('offset'): kein Geld. `booked_account` = Konto der lebenden
+    // Buchung (nur für Altzeilen mit unbekannter Zahlart, siehe purchasePaymentBankAccount).
+    `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.purchase_id, p.purchase_number, pp.created_at AS created_at,
+            (SELECT le.account FROM ledger_entries le WHERE le.source_module = 'PURCHASE_PAYMENT' AND le.source_id = pp.id
+               AND le.direction = 'CREDIT' AND le.reverses_entry_id IS NULL
+               AND NOT EXISTS (SELECT 1 FROM ledger_entries r WHERE r.reverses_entry_id = le.id) LIMIT 1) AS booked_account
      FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-     WHERE p.branch_id = ? AND pp.voided_at IS NULL AND COALESCE(pp.method, '') != 'credit'`,
+     WHERE p.branch_id = ? AND pp.voided_at IS NULL AND COALESCE(pp.method, '') NOT IN ('credit', 'offset')`,
     [branchId]
   );
   for (const p of purchPay) {
+    const account = purchasePaymentBankAccount(p.method as string, p.booked_account as string | null);
+    if (!account) {
+      console.warn('[banking] purchase payment with an unknown method and no live money booking is not shown as money:', p.id, p.method);
+      continue;
+    }
     const date = (p.paid_at as string) || '';
     txs.push({
       id: `ppay-${p.id}`,
       date,
       createdAt: (p.created_at as string) || date,
       type: 'PURCHASE_OUT',
-      account: accountFor(p.method as string),
+      account,
       amount: (p.amount as number) || 0,
       flow: 'out',
       relatedModule: 'purchase',

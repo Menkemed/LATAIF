@@ -1561,13 +1561,21 @@ export function getPurchaseLineInputSplit(purchaseLineId: string): { net: number
 // 'credit'-Methode konsumiert vorhandenes Supplier-Credit-Guthaben:
 //   AP runter ← SUPPLIER_CREDIT runter (beide DEBIT-natur, also CREDIT auf Credit).
 
-function purchaseCashAccountFor(method: PurchasePayment['method']): LedgerAccount {
+// B2/B3 SICHERHEIT B — vorher fiel jede unbekannte Zahlart (auch eine leere) still auf BANK: das Hauptbuch zeigte
+// Geld auf der Bank, das nie dort war. Jetzt nur die vier echten Wege; alles andere bucht NICHTS und sagt warum.
+// Eine Verrechnungszeile ('offset', B2/B3) bucht nie selbst — ihre Buchung steht an der Rechnungszahlung.
+export const PURCHASE_PAYMENT_METHOD_UNKNOWN = 'PURCHASE_PAYMENT_METHOD_UNKNOWN';
+function purchaseCashAccountFor(method: PurchasePayment['method'] | string): LedgerAccount {
   switch (method) {
     case 'cash':    return 'CASH';
     case 'bank':    return 'BANK';
     case 'benefit': return 'BENEFIT';
     case 'credit':  return 'SUPPLIER_CREDIT';
-    default:        return 'BANK';
+    default: {
+      const e = new Error(`postPurchasePayment: unknown purchase payment method "${String(method ?? '')}" — nothing was booked (never silently Bank)`);
+      (e as Error & { code?: string }).code = PURCHASE_PAYMENT_METHOD_UNKNOWN;
+      throw e;
+    }
   }
 }
 

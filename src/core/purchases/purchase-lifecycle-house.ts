@@ -247,7 +247,8 @@ function refundAccountFor(method: string | null): 'CASH' | 'BANK' | 'BENEFIT' | 
     // Hauptbuch zeigte es auf der Bank.
     case 'benefit': return 'BENEFIT';
     case 'credit': return 'SUPPLIER_CREDIT';
-    default: return 'BANK';
+    // B2/B3 SICHERHEIT B — vorher still BANK (auch ohne gewählten Weg): eine Erstattung ohne bekannten Weg bucht nichts.
+    default: throw nein('PURCHASE_RETURN_METHOD_INVALID', `the supplier refund needs a refund method (cash, bank, benefit or credit) — got ${String(method ?? 'none')}; nothing was changed`);
   }
 }
 
