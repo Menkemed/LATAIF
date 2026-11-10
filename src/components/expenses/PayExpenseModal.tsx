@@ -21,6 +21,7 @@ import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { PAYABLES_OP } from '@/core/payables/payables-house';
 import { saveExpensePayment } from '@/core/payables/payables-save';
+import { usePermission } from '@/hooks/usePermission';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -35,6 +36,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const expenses = useExpenseStore(s => s.expenses);
   const loadExpenses = useExpenseStore(s => s.loadExpenses);
   const zahlen = useSharedWrite<Record<string, unknown>>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
+  const perm = usePermission();
   const [fehler, setFehler] = useState('');
 
   const [amount, setAmount] = useState<number>(0);
@@ -153,10 +155,16 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
             })}
           </div>
         </div>
+        {/* B2/B3 Sicherheitsabschluss — Geld für eine Ausgabe: dasselbe Recht wie jede Zahlung (payments.* oder Admin). */}
+        {!perm.canRecordPayments && (
+          <div style={{ fontSize: 12, color: '#92400E', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, padding: '8px 10px' }} data-expense-pay-no-right>
+            Your role may not record payments. A manager, accountant or the owner records this payment.
+          </div>
+        )}
         <WriteError text={fehler} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose} disabled={zahlen.busy}>Cancel</Button>
-          <Button variant="primary" onClick={() => void handleSubmit()} disabled={amount <= 0 || zahlen.busy} data-expense-pay-save>
+          <Button variant="primary" onClick={() => void handleSubmit()} disabled={amount <= 0 || zahlen.busy || !perm.canRecordPayments} data-expense-pay-save>
             {zahlen.busy ? 'Saving…' : 'Record Payment'}
           </Button>
         </div>

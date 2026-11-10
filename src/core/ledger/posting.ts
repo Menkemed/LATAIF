@@ -614,6 +614,20 @@ function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
 // (LATAIFs Schuld gegenüber dem Kunden sinkt), kein Geldkonto. Die Rückzahlungszeile am Darlehen bucht nicht selbst.
 // B2/B3 — 'purchase_offset' = die Verrechnung mit einem offenen Einkauf derselben Person: Soll ACCOUNTS_PAYABLE mit
 // Gegenpartei LIEFERANT (postInvoicePayment setzt sie), kein Geldkonto. Die Zeile am Einkauf ('offset') bucht nicht selbst.
+//
+// B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — die bekannten Wege einer Rechnungszahlung. Eine NEUE Zahlung (`recordPayment`)
+// mit einem anderen Wert wird abgewiesen, statt still auf BANK zu fallen. Bewusst NICHT hier im Buchungsweg: Umbuchungen und
+// Nachbuchungen bestehender Zeilen (Altdaten) laufen unverändert weiter. 'other' bleibt wie bisher BANK (Owner-Frage).
+export const INVOICE_PAYMENT_METHODS_KNOWN = [
+  'cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset',
+] as const;
+export const INVOICE_PAYMENT_METHOD_UNKNOWN = 'INVOICE_PAYMENT_METHOD_UNKNOWN';
+export function assertKnownInvoicePaymentMethod(method: unknown): void {
+  if ((INVOICE_PAYMENT_METHODS_KNOWN as readonly unknown[]).includes(method)) return;
+  const e = new Error(`unknown payment method "${String(method ?? '')}" — nothing was booked (never silently Bank)`);
+  (e as Error & { code?: string }).code = INVOICE_PAYMENT_METHOD_UNKNOWN;
+  throw e;
+}
 function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit' | 'debt_offset' | 'purchase_offset'): LedgerAccount {
   switch (method) {
     case 'order_deposit': return 'CUSTOMER_DEPOSITS';
@@ -1692,12 +1706,20 @@ export function postExpense(expense: Expense): PostingResult {
 //   DEBIT  ACCOUNTS_PAYABLE  by amount
 //   CREDIT CASH/BANK         by amount
 
-function expenseCashAccountFor(method: ExpensePayment['method']): LedgerAccount {
+// B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — wie bei Einkäufen (Sicherheit B): eine Ausgabe kennt nur Bar, Bank und Benefit
+// (jede Schreibstelle prüft `PAY_METHODS`; 'credit' hat seinen eigenen Poster). Vorher fiel jeder andere Wert still auf
+// BANK. Jetzt bucht ein unbekannter Weg NICHTS und sagt warum.
+export const EXPENSE_PAYMENT_METHOD_UNKNOWN = 'EXPENSE_PAYMENT_METHOD_UNKNOWN';
+function expenseCashAccountFor(method: ExpensePayment['method'] | string): LedgerAccount {
   switch (method) {
     case 'cash':    return 'CASH';
     case 'bank':    return 'BANK';
     case 'benefit': return 'BENEFIT';
-    default:        return 'BANK';
+    default: {
+      const e = new Error(`postExpensePayment: unknown expense payment method "${String(method ?? '')}" — nothing was booked (never silently Bank)`);
+      (e as Error & { code?: string }).code = EXPENSE_PAYMENT_METHOD_UNKNOWN;
+      throw e;
+    }
   }
 }
 

@@ -1,5 +1,6 @@
 // Plan §Expenses + §Pay-Later — List + create modal mit Pay-Now/Later/Partial + Record-Payment
 import { useEffect, useMemo, useState } from 'react';
+import { usePermission } from '@/hooks/usePermission';
 import { useSearchParams } from 'react-router-dom';
 import { Wallet, Trash2, CreditCard, Repeat, Pause, Play, ChevronDown, ChevronUp } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -97,7 +98,10 @@ export function ExpenseList() {
     paymentMethod: 'bank',
     expenseDate: new Date().toISOString().split('T')[0],
   });
-  const [payTiming, setPayTiming] = useState<PayTiming>('now');
+  const [payTimingWahl, setPayTiming] = useState<PayTiming>('now');
+  // B2/B3 Sicherheitsabschluss — ohne Zahlungsrecht nur „Pay later" (die Ausgabe entsteht offen; zahlen darf, wer payments.* hat).
+  const perm = usePermission();
+  const payTiming: PayTiming = perm.canRecordPayments ? payTimingWahl : 'later';
   const [partialAmount, setPartialAmount] = useState<number>(0);
 
   // Recurring-Form-State.
@@ -588,6 +592,8 @@ export function ExpenseList() {
                 const label = t === 'now' ? 'Pay now (full)' : t === 'later' ? 'Pay later' : 'Partial payment';
                 return (
                   <button key={t} onClick={() => setPayTiming(t)}
+                    disabled={t !== 'later' && !perm.canRecordPayments}
+                    title={t !== 'later' && !perm.canRecordPayments ? 'Your role may not record payments — save as Pay later' : undefined}
                     data-expense-timing={t}
                     className="cursor-pointer rounded"
                     style={{

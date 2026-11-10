@@ -476,6 +476,12 @@ function bildDesEinkaufs(db: Db, purId: string) {
     buchungen: buchungen(db),
   };
 }
+// B2/B3 Sicherheitsabschluss — „Save Purchase" mit Anzahlung verlangt das Zahlungsrecht der angemeldeten Sitzung (am Primary
+// ist immer jemand angemeldet; ohne Rolle wird abgewiesen). Der Primary-Weg läuft hier als Owner.
+{
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
+}
 {
   let db = freshDb();
   const p = await primary(() => purchaseHouse.createPurchaseOnPrimary(EINKAUF));

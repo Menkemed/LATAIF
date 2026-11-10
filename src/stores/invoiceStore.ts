@@ -64,6 +64,7 @@ import {
   hasReversalFor,
   activeSourceDates,
   computePaymentSplit,
+  assertKnownInvoicePaymentMethod,
 } from '@/core/ledger/posting';
 import { logAudit } from '@/core/audit/audit-log';
 import { runAtOuterCommit, isPendingAtOuterCommit } from '@/core/db/transaction-context';
@@ -1564,6 +1565,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be a positive number.');
     }
+    // B2/B3 SICHERHEITSABSCHLUSS — eine neue Zahlung nur mit einem bekannten Weg (sonst fiele sie in der Buchung still auf BANK).
+    assertKnownInvoicePaymentMethod(method);
     const db = getDatabase();
     // WICHTIG: dasselbe `now` wird fuer den payments-Insert UND die Auto-CardFees-
     // Expense verwendet. bankingStore matcht die Fee ueber created_at = payment.created_at

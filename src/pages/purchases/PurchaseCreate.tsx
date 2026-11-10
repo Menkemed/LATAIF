@@ -1,6 +1,7 @@
 // Plan §Purchases — Full-Page New Purchase (wie Invoice/Order).
 // Sections: Supplier / Items / Pricing / Initial Payment / Notes / Summary / Actions.
 import { useEffect, useMemo, useState } from 'react';
+import { usePermission } from '@/hooks/usePermission';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Save, X, Edit3, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
@@ -94,6 +95,7 @@ const ZAHLWEG_LABEL: Record<PurchasePayMethod, string> = { cash: 'Cash', bank: '
 
 export function PurchaseCreate() {
   const navigate = useNavigate();
+  const perm = usePermission();
   const goBack = useGoBack('/purchases');
   const [searchParams] = useSearchParams();
   // CENTRAL-UI-PARITY R5E — „Save Purchase" hat zwei Anschluesse: am Primary die Hausfolge in EINER
@@ -793,6 +795,12 @@ export function PurchaseCreate() {
         <div style={{ marginTop: 16 }}>
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>4 · PAYMENTS (optional)</span>
+            {/* B2/B3 Sicherheitsabschluss — eine Anzahlung ist eine Einkaufszahlung: dasselbe Recht wie „Add Payment". */}
+            {!perm.canRecordPayments ? (
+              <p style={{ marginTop: 8, fontSize: 12, color: '#92400E' }} data-purchase-pay-no-right>
+                Your role may not record payments — the purchase is saved as unpaid; a manager, accountant or the owner records the payment.
+              </p>
+            ) : (<>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }} data-purchase-pay-rows>
               {payRows.map((r, idx) => (
                 <div key={r.key} data-purchase-pay-row={idx}
@@ -857,6 +865,7 @@ export function PurchaseCreate() {
                 Paid ({fmt(paid)}) exceeds the total ({fmt(total)}) — reduce a payment.
               </p>
             )}
+            </>)}
           </Card>
         </div>
 

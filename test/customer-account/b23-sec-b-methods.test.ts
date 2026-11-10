@@ -357,6 +357,74 @@ marker('B23_SEC_B_BANKING_PROVED');
 }
 marker('B23_SEC_B_RETURN_PROVED');
 
+// ════════════════════════════════════════════════════════════════════════════
+// B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — Ausgaben- und Rechnungszahlungen: ein unbekannter Weg fällt nicht mehr still auf
+// BANK. Ausgabe: die Buchung selbst lehnt ab. Rechnung: eine NEUE Zahlung (`recordPayment`) wird abgewiesen; Altzeilen
+// (Umbuchung, Nachbuchung) laufen unverändert, 'other' bleibt wie bisher BANK.
+// ════════════════════════════════════════════════════════════════════════════
+const expAcc = (db: Db, id: string): string[] => rows(db, `SELECT account FROM ledger_entries WHERE source_module = 'EXPENSE_PAYMENT' AND source_id = ?
+  AND direction = 'CREDIT' ORDER BY account`, [id]).map((r) => String(r.account));
+// ── §5 Ausgaben ────────────────────────────────────────────────────────────────
+{
+  const db = freshDb();
+  insert(db, 'expenses', { id: 'E1', branch_id: 'branch-main', expense_number: 'EXP-1', category: 'Rent', amount: 500, paid_amount: 0,
+    payment_method: 'cash', expense_date: '2026-09-02', supplier_id: 'sup-1', status: 'UNPAID', created_at: NOW, updated_at: NOW });
+  const ep = (id: string, method: string) => ({ id, expenseId: 'E1', amount: 10, method, paidAt: '2026-09-05', createdAt: NOW }) as never;
+  for (const [m, acc] of [['cash', 'CASH'], ['bank', 'BANK'], ['benefit', 'BENEFIT']] as const) {
+    const r = primary(() => posting.postExpensePayment(ep('ep-' + m, m), 'sup-1'));
+    ok(r.ok && S(expAcc(db, 'ep-' + m)) === S([acc]), `B5 Ausgabe ${m} → ${acc} (unverändert)`);
+  }
+  for (const m of ['card', 'bank_transfer', '', 'transfer', 'BANK', 'offset']) {
+    const vorher = n(db, 'SELECT COUNT(*) FROM ledger_entries');
+    const code = codeVon(() => posting.postExpensePayment(ep('ex-' + m, m), 'sup-1'));
+    ok(code === 'EXPENSE_PAYMENT_METHOD_UNKNOWN' && n(db, 'SELECT COUNT(*) FROM ledger_entries') === vorher,
+      `B5 Ausgabe „${m}" → EXPENSE_PAYMENT_METHOD_UNKNOWN, keine Buchung (vorher still BANK) (${code})`);
+  }
+  ok(/must use postExpenseSupplierCreditPayment/.test(codeVon(() => posting.postExpensePayment(ep('ex-credit', 'credit'), 'sup-1'))),
+    'B5 Ausgabe „credit" bleibt beim eigenen Guthaben-Poster (unverändert)');
+  for (const m of ['card', '']) {
+    const r = primary(() => house.recordExpensePaymentInHouse('E1', 5, m, CTX));
+    ok(!r.ok && r.code === 'PAYMENT_METHOD_INVALID', `B5 „Record Payment" an der Ausgabe „${m}" → PAYMENT_METHOD_INVALID, schon vor der Buchung (${r.code})`);
+  }
+  // Nachbuchung: eine Altzeile mit unbekanntem Weg wird gemeldet, nicht als Bank gebucht.
+  const vorBank = n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'BANK'");
+  insert(db, 'expense_payments', { id: 'eb-card', expense_id: 'E1', amount: 7, method: 'card', paid_at: '2026-09-06', created_at: NOW });
+  insert(db, 'expense_payments', { id: 'eb-cash', expense_id: 'E1', amount: 8, method: 'cash', paid_at: '2026-09-06', created_at: NOW });
+  const b = backfill.backfillExpensePayments('branch-main');
+  ok(expAcc(db, 'eb-card').length === 0 && S(expAcc(db, 'eb-cash')) === S(['CASH']) && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'BANK'") === vorBank,
+    `B5 Nachbuchung: Altzeile „card" nicht gebucht (vorher still BANK), „cash" → CASH (${S(b).slice(0, 160)})`);
+  ok(b.errors.some((e) => /never silently Bank/.test(e)), 'B5 Nachbuchung meldet den Grund');
+  ok(unbalanced(db) === 0, 'B5 Hauptbuch ausgeglichen');
+}
+marker('B23_SEC_B_EXPENSE_PROVED');
+
+// ── §6 Rechnungen: eine neue Zahlung nur mit einem bekannten Weg ────────────────
+{
+  const db = freshDb();
+  const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
+  insert(db, 'invoices', { id: 'I1', branch_id: 'branch-main', invoice_number: 'INV-1', customer_id: 'c1', status: 'PARTIAL', gross_amount: 100,
+    net_amount: 100, vat_amount: 0, paid_amount: 0, created_at: NOW, updated_at: NOW });
+  useInvoiceStore.getState().loadInvoices();
+  const zust = () => S([n(db, 'SELECT COUNT(*) FROM payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, "SELECT paid_amount FROM invoices WHERE id = 'I1'")]);
+  for (const m of ['bank', 'xyz', '', 'BANK', 'offset', 'mixed']) {
+    const vorher = zust();
+    const r = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, m));
+    ok(!r.ok && r.code === 'INVOICE_PAYMENT_METHOD_UNKNOWN' && zust() === vorher, `B6 neue Rechnungszahlung „${m}" → INVOICE_PAYMENT_METHOD_UNKNOWN, nichts geschrieben (${r.code})`);
+  }
+  const bankDr = () => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'BANK' AND direction = 'DEBIT' AND source_module = 'PAYMENT'");
+  const cashDr = () => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'CASH' AND direction = 'DEBIT' AND source_module = 'PAYMENT'");
+  const o = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'other'));
+  ok(o.ok && bankDr() === 1, `B6 „other" bleibt wie bisher BANK (Owner-Frage, unverändert) (${o.code || 'ok'})`);
+  const c = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'cash'));
+  const t = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'bank_transfer'));
+  const be = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'benefit'));
+  ok(c.ok && t.ok && be.ok && cashDr() === 1 && bankDr() === 2, `B6 cash / bank_transfer / benefit wie bisher (${[c, t, be].map((x) => x.code || 'ok').join(',')})`);
+  ok(S([...posting.INVOICE_PAYMENT_METHODS_KNOWN]) === S(['cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset']),
+    'B6 die bekannten Wege: Geld (cash, card, bank_transfer, benefit, other) und ohne Geld (credit, order_deposit, debt_offset, purchase_offset)');
+  ok(unbalanced(db) === 0, 'B6 Hauptbuch ausgeglichen');
+}
+marker('B23_SEC_B_INVOICE_PROVED');
+
 console.log(`\nb23 security B: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('B23_SECURITY_B_NO_SILENT_BANK_PROVED');

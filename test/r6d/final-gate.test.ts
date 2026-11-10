@@ -124,8 +124,10 @@ const MODULES: Record<string, number> = { 'money-commands': 6, 'payables-command
   for (const op of R6D_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, unknown>)[op];
     const soll = op === 'orders.add_cost' || op === 'orders.remove_cost';
-    // B2/B3 SICHERHEIT A — Einkaufs-/Lieferantenzahlung seither wie die Rechnungszahlung (payments.* oder Admin; test/customer-account/b23-sec-a).
-    const zahlung = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit'].includes(op);
+    // B2/B3 SICHERHEIT A — Einkaufs-/Lieferantenzahlung seither wie die Rechnungszahlung (payments.* oder Admin; test/customer-account/b23-sec-a);
+    // Sicherheitsabschluss 10.11.2026: ebenso Ausgabenzahlung und Rückzahlung eines Lieferantenguthabens.
+    const zahlung = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit',
+      'expenses.record_payment', 'suppliers.refund_credit'].includes(op);
     ok(op in perms.OPERATION_PERMISSIONS && (soll ? (rule as { kind?: string })?.kind === 'isAdmin' : zahlung ? (rule as { kind?: string; permission?: string })?.kind === 'permissionOrAdmin' && (rule as { permission?: string }).permission === 'payments.*' : rule === null),
       `RECHT ${op}: ${soll ? 'perm.canManageOrders wie am Primary' : zahlung ? 'payments.* oder Admin (perm.canRecordPayments)' : 'kein Tor (der Primary hat keins)'}`);
   }

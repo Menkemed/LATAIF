@@ -14,7 +14,7 @@ import { runExclusive, businessWriteScheduler } from './command-scheduler';
 import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './durability-state';
 import { TRANSACTION_UNHEALTHY, TransactionUnhealthyError, assertTransactionHealthy } from '../db/transaction-health';
 import { CommandNotEvaluated, CommandRejected } from './mutation-engine';
-import { permissionForOp, requiredPermissionLabel, roleMayRunOp } from './command-permissions';
+import { paymentOpForPayload, permissionForOp, requiredPermissionLabel, roleMayRunOp } from './command-permissions';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -258,6 +258,19 @@ export async function executeCommand(op: string, payload: unknown, actor?: Comma
       code: 'PERMISSION_DENIED',
       message: `this account may not run ${op} — it needs ${requiredPermissionLabel(op)}`,
     };
+  }
+  // B2/B3 SICHERHEITSABSCHLUSS — Anlegen mit Zahlung (Einkauf mit Anzahlung, Ausgabe „Pay now"/„Partial", Dauerauftrag mit
+  // Sofortzahlung): der Zahlungsteil verlangt das Recht der Zahlungsoperation. Dieselbe Stelle, dieselbe Wirkung eines Neins.
+  if (spec.kind === 'mutation') {
+    const zahlOp = paymentOpForPayload(op, (payload as { input?: unknown } | null)?.input ?? payload);
+    if (zahlOp && !roleMayRunOp(actor?.role, zahlOp)) {
+      console.warn('[bridge] refusing a payment this account may not record:', op, zahlOp);
+      return {
+        kind: 'business_error',
+        code: 'PERMISSION_DENIED',
+        message: `this account may not record a payment with ${op} — it needs ${requiredPermissionLabel(zahlOp)} (save it without a payment)`,
+      };
+    }
   }
   try {
     let value: CommandResult;

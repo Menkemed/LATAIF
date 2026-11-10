@@ -401,6 +401,10 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   await run(db, 20, { supplierId: 'sup-1', purchaseDate: '2026-09-20', taxScheme: 'VAT_10', lines: [ZEILE('Mit VAT', 1, 1100)], payments: [{ amount: 1100, method: 'bank' }] });
   const vat = Math.round(zahl(db, "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account LIKE '%VAT%'") * 1000) / 1000;
   ok(s(db, "SELECT status FROM purchases LIMIT 1") === 'PAID' && vat === 100 && unbalanced(db) === 0, `VAT bestehende Vorsteuer 100 unverändert, voll bezahlt, ausgeglichen (${vat})`);
+  // B2/B3 Sicherheitsabschluss — eine Anzahlung beim Anlegen verlangt das Zahlungsrecht der angemeldeten Sitzung (am Primary
+  // ist immer jemand angemeldet; ohne Rolle wird abgewiesen). Der Rechner-Weg läuft hier als Owner.
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
   const desk = await primary(() => purchaseHouse.createPurchaseOnPrimary({
     supplierId: 'sup-1', purchaseDate: '2026-09-20', taxScheme: 'ZERO', lines: [{ mode: 'existing', productId: 'p2', brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: 10 }],
     paymentAmount: 4, paymentMethod: 'cash', notes: '', staffId: '',

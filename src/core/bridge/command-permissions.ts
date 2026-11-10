@@ -55,6 +55,36 @@ const EDIT_INVOICES = admin('InvoiceDetail: perm.canEditInvoices');
  * „Pay Supplier — Bulk"), und die lokale Speicherfolge (`payables-save`) prüft dieselbe Regel. Keine neue Rolle.
  */
 const PURCHASE_PAYMENTS = permOrAdmin('payments.*', 'PurchaseDetail Add Payment / SupplierDetail Pay Supplier: perm.canRecordPayments');
+/**
+ * B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — Geld für Ausgaben (Record Payment, „Pay now"/„Partial" beim Anlegen, ein
+ * Dauerauftrag, der jeden Monat sofort zahlt) verlangt dasselbe Recht wie jede andere Zahlung. Vorher ohne Tor (jede Rolle,
+ * lokal und PC2). Das Anlegen OHNE Zahlung bleibt frei. Keine neue Rolle: dieselbe Ableitung `perm.canRecordPayments`.
+ */
+const EXPENSE_PAYMENTS = permOrAdmin('payments.*', 'PayExpenseModal / ExpenseList Pay now: perm.canRecordPayments');
+
+/**
+ * B2/B3 SICHERHEITSABSCHLUSS — Operationen, die mit UND ohne Zahlung vorkommen: das Anlegen bleibt frei, der ZAHLUNGSTEIL
+ * verlangt das Recht der Zahlungsoperation. Gibt die Operation zurück, deren Recht gilt — oder `null` (keine Zahlung dabei).
+ * Geprüft an derselben Stelle wie das feste Tor (`executeCommand`) und von der lokalen Speicherfolge.
+ */
+export function paymentOpForPayload(op: string, body: unknown): string | null {
+  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
+  const pos = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  switch (op) {
+    case 'purchases.create': {
+      const init = b.initialPayment && typeof b.initialPayment === 'object' ? (b.initialPayment as Record<string, unknown>).amount : undefined;
+      const viele = Array.isArray(b.payments) && b.payments.some((p) => p && typeof p === 'object' && pos((p as Record<string, unknown>).amount));
+      return pos(b.paymentAmount) || pos(init) || viele ? 'purchases.record_payment' : null;
+    }
+    case 'expenses.create':
+      return b.timing === 'now' || b.timing === 'partial' ? 'expenses.record_payment' : null;
+    case 'expenses.template_create':
+    case 'expenses.template_update':
+      return b.payNowDefault === true ? 'expenses.record_payment' : null;
+    default:
+      return null;
+  }
+}
 
 /**
  * Die Zuordnung für alle vierzig verändernden Operationen. `null` heißt ausdrücklich: der Primary
@@ -168,14 +198,14 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'debts.record_payment': null,
   'expenses.create': null,
   'expenses.update': null,
-  'expenses.record_payment': null,
+  'expenses.record_payment': EXPENSE_PAYMENTS,
   'expenses.template_create': null,
   'expenses.template_update': null,
   'purchases.record_payment': PURCHASE_PAYMENTS,
   'purchases.apply_credit': PURCHASE_PAYMENTS,
   'suppliers.pay': PURCHASE_PAYMENTS,
   'suppliers.apply_credit': PURCHASE_PAYMENTS,
-  'suppliers.refund_credit': null,
+  'suppliers.refund_credit': PURCHASE_PAYMENTS,
   // Eine Gold-Verbindlichkeit ist am Primary über `SupplierDetail` ohne Tor abrechenbar — dass
   // `OrderDetail` dieselben Knöpfe hinter `perm.canManageOrders` stellt, macht die Handlung nicht
   // strenger: PC2 darf nicht weniger als derselbe Benutzer am Primary.

@@ -897,7 +897,7 @@ export function ConsignmentDetail() {
                     </span>
                     <span className="flex items-center gap-3">
                       <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={r.amount}/> BHD</span>
-                      {r.mode === 'pending' && r.creditId && r.open > 0.0005 && perm.canManageConsignments && (
+                      {r.mode === 'pending' && r.creditId && r.open > 0.0005 && perm.canManageConsignments && perm.canRecordPayments && (
                         <Button variant="secondary" data-consignor-repayment-record={r.creditId}
                           onClick={() => { w.clear(); setRepayFehler(''); setRepayRow({ creditId: r.creditId!, open: r.open, from: r.date, returnNumber: r.returnNumber });
                             setRepayAmount(r.open.toFixed(3)); setRepayMethod('cash'); setRepayDate(new Date().toISOString().split('T')[0]); setRepayRef(''); }}>

@@ -22,6 +22,8 @@ import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { localHouseCtx, recordPurchasePaymentInHouse, PayablesRejected } from '@/core/payables/payables-house';
 import { useCustomerStore } from '@/stores/customerStore';
+import { useAuthStore } from '@/stores/authStore';
+import { paymentOpForPayload, requiredPermissionLabel, roleMayRunOp } from '@/core/bridge/command-permissions';
 import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { adoptInboxPhotosToProduct } from './inbox-media';
@@ -155,6 +157,16 @@ export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branch
 
 /** „Save Purchase" am Primary. */
 export async function createPurchaseOnPrimary(input: PurchaseCreateInput): Promise<Purchase> {
+  // B2/B3 SICHERHEITSABSCHLUSS — eine Anzahlung beim Anlegen ist eine Einkaufszahlung: dasselbe Recht wie „Add Payment"
+  // (`payments.*` oder Admin), wie der Fernweg (`executeCommand`). Ohne Zahlung bleibt das Anlegen frei.
+  const zahlOp = paymentOpForPayload('purchases.create', input);
+  if (zahlOp) {
+    let role: string | undefined;
+    try { role = useAuthStore.getState().role(); } catch { role = undefined; }
+    if (!roleMayRunOp(role, zahlOp)) {
+      throw new PayablesRejected('PERMISSION_DENIED', `this account may not record a payment with purchases.create — it needs ${requiredPermissionLabel(zahlOp)} (save it without a payment)`);
+    }
+  }
   // POST-PARITY R7B PP-12 — die Fotos eines neuen Artikels durch den EINEN Normalisierer, wie fern —
   // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
   const lines: PurchaseCreateInput['lines'] = [];

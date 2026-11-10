@@ -268,8 +268,9 @@ const OPS = ['expenses.create', 'expenses.update', 'expenses.record_payment', 'e
   ok(OPS.every((op) => registry.knownCommands().includes(op)), 'SCOPE und registriert (payables-commands.ts)');
   ok(S([...cmds.PAYABLES_OPS].sort()) === S([...OPS].sort()), 'SCOPE genau diese zehn, keine elfte');
   // B2/B3 SICHERHEIT A — die vier Einkaufs-/Lieferantenzahlungen verlangen seither payments.* oder Admin (eigenes Gate: test/customer-account/b23-sec-a-permissions).
-  const ZAHLUNG = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit'];
-  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && (ZAHLUNG.includes(op) ? perms.OPERATION_PERMISSIONS[op]?.kind === 'permissionOrAdmin' : perms.OPERATION_PERMISSIONS[op] === null)), 'SCOPE Ausgaben ohne Tor (wie die Masken), Einkaufs-/Lieferantenzahlung wie die Rechnungszahlung');
+  // Sicherheitsabschluss 10.11.2026: ebenso Ausgabenzahlung und Rückzahlung eines Lieferantenguthabens (Anlegen mit Zahlung: Rumpfregel).
+  const ZAHLUNG = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'expenses.record_payment', 'suppliers.refund_credit'];
+  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && (ZAHLUNG.includes(op) ? perms.OPERATION_PERMISSIONS[op]?.kind === 'permissionOrAdmin' : perms.OPERATION_PERMISSIONS[op] === null)), 'SCOPE Anlegen/Ändern ohne festes Tor; jede Zahlung (Einkauf, Lieferant, Ausgabe, Rückzahlung) wie die Rechnungszahlung');
   ok(registry.knownCommands().includes('suppliers.credits.get'), 'SCOPE die Auskunft suppliers.credits.get ist angemeldet');
 }
 marker('CENTRAL_UI_R6D_PAYABLES_SCOPE_PROVED');
@@ -858,6 +859,12 @@ marker('CENTRAL_UI_R6D_PAYABLES_SUPPLIER_CREDIT_PROVED');
 marker('CENTRAL_UI_R6D_PAYABLES_CREDITS_READ_PROVED');
 
 // ══ §13 — die Primary-Maske: runOnPrimary ═══════════════════════════════════
+// B2/B3 Sicherheitsabschluss — eine Zahlung in der Maske verlangt das Zahlungsrecht der angemeldeten Sitzung (an beiden
+// Rechnern ist immer jemand angemeldet; ohne Rolle wird abgewiesen). Die Masken laufen hier als Owner.
+{
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
+}
 {
   const db = freshDb();
   const local = { remote: false, save: <T,>(a: never) => runSharedWrite<T>(false, a, null) };

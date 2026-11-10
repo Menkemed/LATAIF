@@ -810,7 +810,10 @@ export function SupplierDetail() {
                       {c.kind === 'standalone' ? (c.method ?? 'Unavailable') : '—'}
                     </span>
                     <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
-                      {c.kind === 'repayment_claim' ? (
+                      {/* B2/B3 Sicherheitsabschluss — Geld vom Lieferanten zurück: dasselbe Recht wie jede Zahlung. */}
+                      {!perm.canRecordPayments ? (
+                        <span style={{ fontSize: 11, color: '#9CA3AF' }}>{'—'}</span>
+                      ) : c.kind === 'repayment_claim' ? (
                         <button
                           onClick={() => { setRefundFehler(''); setRepayAmount(c.remaining.toFixed(3)); setRepayDate(''); setRepayCredit(c); }}
                           data-supplier-repay-open={c.id}

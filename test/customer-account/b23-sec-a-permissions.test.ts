@@ -64,6 +64,7 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
+await import('../../src/core/bridge/commercial-commands.ts');
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const house = await import('../../src/core/payables/payables-house.ts');
 const cmds = await import('../../src/core/bridge/payables-commands.ts');
@@ -94,6 +95,7 @@ interface Db {
 }
 const one = (db: Db, sql: string, p: unknown[] = []): unknown => db.exec(sql, p)[0]?.values?.[0]?.[0];
 const n = (db: Db, sql: string, p: unknown[] = []): number => Number(one(db, sql, p) ?? 0);
+const s = (db: Db, sql: string, p: unknown[] = []): string => String(one(db, sql, p) ?? '');
 const rows = (db: Db, sql: string, p: unknown[] = []): Array<Record<string, unknown>> => {
   const r = db.exec(sql, p)[0];
   return r ? r.values.map((v) => Object.fromEntries(r.columns.map((c, i) => [c, v[i]]))) : [];
@@ -273,8 +275,9 @@ const als = (role: string) => useAuthStore.setState({ session: { userId: 'user-t
     ok(['SALES', 'ACCOUNTANT', 'MANAGER', 'ADMIN', 'viewer'].every((r2) => perms.roleMayRunOp(r2, op) === perms.roleMayRunOp(r2, 'invoices.record_payment')),
       `A1 ${op}: für jede Rolle genau wie die Rechnungszahlung`);
   }
-  ok(perms.permissionForOp('suppliers.refund_credit') === null && perms.permissionForOp('expenses.record_payment') === null,
-    'A1 unverändert ohne Tor: Rückzahlung eines Lieferantenguthabens und Ausgabenzahlung (nicht Teil dieser Korrektur)');
+  // B2/B3 Sicherheitsabschluss (10.11.2026): beide seither mit demselben Tor — siehe §4/§5.
+  ok(['suppliers.refund_credit', 'expenses.record_payment'].every((op) => (perms.permissionForOp(op) as { permission?: string } | null)?.permission === 'payments.*'),
+    'A1 Rückzahlung eines Lieferantenguthabens und Ausgabenzahlung: payments.* oder Admin (Sicherheitsabschluss)');
   const ps = codeOf(src('src/pages/purchases/PurchaseDetail.tsx'));
   const sd = codeOf(src('src/pages/suppliers/SupplierDetail.tsx'));
   ok(/const canPay = !!purchase && perm\.canRecordPayments &&/.test(ps), 'A1 Primary-Knopf „Add Payment" nur mit perm.canRecordPayments');
@@ -340,6 +343,121 @@ marker('B23_SEC_A_REMOTE_PROVED');
   als('ADMIN');
 }
 marker('B23_SEC_A_LOCAL_PROVED');
+
+// ════════════════════════════════════════════════════════════════════════════
+// B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — Rückzahlung von Lieferantenguthaben, Ausgabenzahlung, „Pay now"/„Partial" beim
+// Anlegen einer Ausgabe, Dauerauftrag mit Sofortzahlung, Anzahlung beim Anlegen eines Einkaufs: dasselbe Recht wie jede
+// Zahlung (payments.* oder Admin). Anlegen OHNE Zahlung bleibt frei. Fern und lokal; ein Nein hat null Wirkung.
+// ════════════════════════════════════════════════════════════════════════════
+const ZUSTAND2 = (db: Db) => S({ z: zustand(db), x: EXPENSES(db), xp: EXPENSE_PAYMENTS(db), t: TEMPLATES(db), c: CREDITS(db), seq: expSeq(db) });
+// ── §4 Tabelle und Rumpfregel ─────────────────────────────────────────────────
+{
+  const p = perms.paymentOpForPayload;
+  ok(p('purchases.create', { paymentAmount: 10 }) === 'purchases.record_payment' && p('purchases.create', { initialPayment: { amount: 5, method: 'cash' } }) === 'purchases.record_payment'
+    && p('purchases.create', { payments: [{ amount: 0 }, { amount: 3 }] }) === 'purchases.record_payment', 'A4 Einkauf mit Anzahlung (alle drei Rumpfformen) → Recht der Einkaufszahlung');
+  ok(p('purchases.create', { paymentAmount: 0 }) === null && p('purchases.create', { payments: [{ amount: 0 }] }) === null && p('purchases.create', {}) === null,
+    'A4 Einkauf ohne Zahlung → kein Tor');
+  ok(p('expenses.create', { timing: 'now' }) === 'expenses.record_payment' && p('expenses.create', { timing: 'partial' }) === 'expenses.record_payment'
+    && p('expenses.create', { timing: 'later' }) === null, 'A4 Ausgabe: Pay now / Partial → Recht der Ausgabenzahlung; Pay later frei');
+  ok(p('expenses.template_create', { payNowDefault: true }) === 'expenses.record_payment' && p('expenses.template_create', { payNowDefault: false }) === null
+    && p('expenses.template_update', { payNowDefault: true }) === 'expenses.record_payment' && p('expenses.template_update', { amount: 5 }) === null,
+    'A4 Dauerauftrag mit Sofortzahlung → Recht der Ausgabenzahlung; ohne frei');
+  ok(p('customers.create', { paymentAmount: 10 }) === null, 'A4 andere Operationen unberührt');
+  for (const op of ['suppliers.refund_credit', 'expenses.record_payment']) {
+    ok(['SALES', 'ACCOUNTANT', 'MANAGER', 'ADMIN', 'viewer'].every((r2) => perms.roleMayRunOp(r2, op) === perms.roleMayRunOp(r2, 'invoices.record_payment')),
+      `A4 ${op}: für jede Rolle genau wie die Rechnungszahlung`);
+  }
+}
+marker('B23_SEC_CLOSE_TABLE_PROVED');
+
+// ── §5 Fernweg ────────────────────────────────────────────────────────────────
+{
+  const db = nimm(freshDb());
+  seedCredit(db, 'C1', 30);
+  insert(db, 'supplier_credits', { id: 'C2', branch_id: 'branch-main', supplier_id: 'sup-1', source_purchase_id: 'pur-src', amount: 25, used_amount: 0,
+    status: 'OPEN', note: 'standalone', created_at: NOW });
+  let k = 500;
+  const nein = async (op: string, input: Record<string, unknown>, role: string | undefined, was: string) => {
+    const vorher = ZUSTAND2(db);
+    const r = await executeCommand(op, { input }, ACT(role, ++k) as never);
+    ok(r.kind === 'business_error' && (r as { code: string }).code === 'PERMISSION_DENIED', `A5 fern ${was} als ${role ?? 'ohne Rolle'}: PERMISSION_DENIED (${S(r).slice(0, 110)})`);
+    ok(ZUSTAND2(db) === vorher, `A5 fern ${was} als ${role ?? 'ohne Rolle'}: nichts geschrieben, kein Nachweis`);
+  };
+  const ausgabe = (timing: string) => ({ category: 'Rent', amount: 50, paymentMethod: 'cash', expenseDate: '2026-09-02', timing });
+  const vorlage = (payNowDefault: boolean) => ({ category: 'Rent', amount: 40, paymentMethod: 'bank', payNowDefault, dayOfMonth: 2, startDate: '2026-09-02' });
+  for (const role of ['SALES', 'viewer', undefined]) {
+    await nein('expenses.create', ausgabe('now'), role, 'Ausgabe „Pay now"');
+    await nein('expenses.create', { ...ausgabe('partial'), partialAmount: 10 }, role, 'Ausgabe „Partial"');
+    await nein('expenses.template_create', vorlage(true), role, 'Dauerauftrag mit Sofortzahlung');
+    await nein('suppliers.refund_credit', { creditId: 'C2' }, role, 'Refund Credit');
+    await nein('purchases.create', { supplierId: 'sup-1', purchaseDate: '2026-09-02', lines: [], paymentAmount: 10, paymentMethod: 'cash' }, role, 'Einkauf mit Anzahlung');
+    await nein('purchases.create', { supplierId: 'sup-1', purchaseDate: '2026-09-02', lines: [], payments: [{ amount: 10, method: 'cash', paidDate: '2026-09-02' }] }, role, 'Einkauf mit Zahlungen');
+  }
+  // Ohne Zahlung bleibt das Anlegen frei: der Verkäufer legt die Ausgabe offen an.
+  const offen = await executeCommand('expenses.create', { input: ausgabe('later') }, ACT('SALES', ++k) as never);
+  ok(offen.kind === 'ok' && n(db, 'SELECT COUNT(*) FROM expenses WHERE paid_amount = 0') === 1 && n(db, 'SELECT COUNT(*) FROM expense_payments') === 0,
+    `A5 fern Verkäufer: Ausgabe „Pay later" wird angelegt, ohne Zahlung (${S(offen).slice(0, 100)})`);
+  const ohneZahlung = await executeCommand('purchases.create', { input: { supplierId: 'sup-1', purchaseDate: '2026-09-02', lines: [] } }, ACT('SALES', ++k) as never);
+  ok(!(ohneZahlung.kind === 'business_error' && (ohneZahlung as { code: string }).code === 'PERMISSION_DENIED'),
+    `A5 fern Verkäufer: Einkauf ohne Zahlung trifft kein Rechte-Tor (${S(ohneZahlung).slice(0, 100)})`);
+  const eid = s(db, 'SELECT id FROM expenses LIMIT 1');
+  const erev = n(db, 'SELECT revision FROM expenses WHERE id = ?', [eid]);
+  for (const role of ['SALES', 'viewer', undefined]) await nein('expenses.record_payment', { expenseId: eid, expectedRevision: erev, amount: 50, method: 'cash' }, role, 'Ausgabenzahlung');
+  const bezahlt = await executeCommand('expenses.record_payment', { input: { expenseId: eid, expectedRevision: erev, amount: 50, method: 'cash' } }, ACT('ACCOUNTANT', ++k) as never);
+  ok(bezahlt.kind === 'ok' && n(db, 'SELECT COUNT(*) FROM expense_payments') === 1, `A5 fern Buchhaltung: Ausgabenzahlung wirkt (${S(bezahlt).slice(0, 100)})`);
+  const sofort = await executeCommand('expenses.create', { input: ausgabe('now') }, ACT('MANAGER', ++k) as never);
+  ok(sofort.kind === 'ok' && n(db, 'SELECT COUNT(*) FROM expense_payments') === 2, `A5 fern Manager: „Pay now" wirkt (${S(sofort).slice(0, 100)})`);
+  const refund = await executeCommand('suppliers.refund_credit', { input: { creditId: 'C2' } }, ACT('ADMIN', ++k) as never);
+  ok(refund.kind !== 'business_error' || (refund as { code: string }).code !== 'PERMISSION_DENIED', `A5 fern Owner: Refund Credit trifft kein Rechte-Tor (${S(refund).slice(0, 100)})`);
+  ok(unbalanced(db) === 0, 'A5 Hauptbuch ausgeglichen');
+}
+marker('B23_SEC_CLOSE_REMOTE_PROVED');
+
+// ── §6 Primary-Masken: dieselbe Regel vor jeder Wirkung ─────────────────────────
+{
+  const db = nimm(freshDb());
+  seedCredit(db, 'C1', 30);
+  const local = { remote: false, save: <T,>(a: never) => runSharedWrite<T>(false, a, null) };
+  const ph = await import('../../src/core/purchases/purchase-house.ts');
+  als('ACCOUNTANT');
+  const angelegt = await save.saveExpenseCreate(local as never, { category: 'Rent', amount: 50, paymentMethod: 'cash', expenseDate: '2026-09-02', timing: 'later' } as never);
+  const eid = s(db, 'SELECT id FROM expenses LIMIT 1');
+  const expense = { id: eid, revision: n(db, 'SELECT revision FROM expenses WHERE id = ?', [eid]) } as never;
+  for (const role of ['SALES', 'viewer']) {
+    als(role);
+    const vorher = ZUSTAND2(db);
+    const a = await save.saveExpensePayment(local as never, expense, 10, 'cash');
+    const b = await save.saveExpenseCreate(local as never, { category: 'Rent', amount: 20, paymentMethod: 'cash', expenseDate: '2026-09-02', timing: 'now' } as never);
+    const c = await save.saveTemplateCreate(local as never, { category: 'Rent', amount: 40, paymentMethod: 'bank', payNowDefault: true, dayOfMonth: 2, startDate: '2026-09-02' });
+    const d = await save.saveSupplierRefund(local as never, 'C1');
+    const e = await save.saveSupplierCreditRepayment(local as never, { creditId: 'C1', amount: 5, method: 'cash' });
+    let f = '';
+    try { await ph.createPurchaseOnPrimary({ supplierId: 'sup-1', purchaseDate: '2026-09-02', lines: [], paymentAmount: 10, paymentMethod: 'cash' } as never); f = 'gebucht'; }
+    catch (x) { f = String((x as { code?: string }).code ?? (x as Error).message); }
+    ok([a, b, c, d, e].every((x) => x.kind === 'business_error' && (x as { code: string }).code === 'PERMISSION_DENIED') && f === 'PERMISSION_DENIED',
+      `A6 lokal als ${role}: Ausgabenzahlung, „Pay now", Dauerauftrag mit Sofortzahlung, Refund, Rückzahlung, Einkauf mit Anzahlung → PERMISSION_DENIED (${[a, b, c, d, e].map((x) => (x as { code?: string }).code).join(',')},${f})`);
+    ok(ZUSTAND2(db) === vorher, `A6 lokal als ${role}: nichts geschrieben`);
+    const spaeter = await save.saveExpenseCreate(local as never, { category: 'Rent', amount: 20, paymentMethod: 'cash', expenseDate: '2026-09-02', timing: 'later' } as never);
+    ok(spaeter.kind === 'ok', `A6 lokal als ${role}: „Pay later" bleibt erlaubt (${S(spaeter).slice(0, 80)})`);
+  }
+  als('ACCOUNTANT');
+  const zahlt = await save.saveExpensePayment(local as never, expense, 10, 'cash');
+  ok(angelegt.kind === 'ok' && zahlt.kind === 'ok' && n(db, 'SELECT COUNT(*) FROM expense_payments') === 1, `A6 lokal als Buchhaltung: Ausgabenzahlung wirkt (${S(zahlt).slice(0, 80)})`);
+  als('ADMIN');
+  // Die Masken bieten nichts an, was danach abgewiesen würde.
+  const pem = codeOf(src('src/components/expenses/PayExpenseModal.tsx'));
+  const el = codeOf(src('src/pages/expenses/ExpenseList.tsx'));
+  const pc = codeOf(src('src/pages/purchases/PurchaseCreate.tsx'));
+  const sd = codeOf(src('src/pages/suppliers/SupplierDetail.tsx'));
+  const cd = codeOf(src('src/pages/consignments/ConsignmentDetail.tsx'));
+  ok(/disabled=\{amount <= 0 \|\| zahlen\.busy \|\| !perm\.canRecordPayments\}/.test(pem) && /data-expense-pay-no-right/.test(pem), 'A6 Maske: „Record Payment" der Ausgabe nur mit perm.canRecordPayments');
+  ok(/disabled=\{t !== 'later' && !perm\.canRecordPayments\}/.test(el) && /const payTiming: PayTiming = perm\.canRecordPayments \? payTimingWahl : 'later';/.test(el),
+    'A6 Maske: „Pay now"/„Partial" nur mit perm.canRecordPayments, sonst „Pay later"');
+  ok(/\{!perm\.canRecordPayments \? \(\s*<p[^>]*data-purchase-pay-no-right/.test(pc), 'A6 Maske: Zahlungen beim Anlegen eines Einkaufs nur mit perm.canRecordPayments');
+  ok(/\{!perm\.canRecordPayments \? \(\s*<span/.test(sd) && /perm\.canManageConsignments && perm\.canRecordPayments &&/.test(cd),
+    'A6 Maske: „Refund Credit"/„Record Repayment" (Lieferant, Kommission) nur mit perm.canRecordPayments');
+}
+marker('B23_SEC_CLOSE_LOCAL_PROVED');
 
 console.log(`\nb23 security A: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }

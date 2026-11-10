@@ -19,7 +19,7 @@ import { runExclusive } from '@/core/bridge/command-scheduler';
 import { saveDatabaseDurably } from '@/core/db/database';
 import type { SharedWrites, WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { useAuthStore } from '@/stores/authStore';
-import { requiredPermissionLabel, roleMayRunOp } from '@/core/bridge/command-permissions';
+import { paymentOpForPayload, requiredPermissionLabel, roleMayRunOp } from '@/core/bridge/command-permissions';
 import { useExpenseStore, reloadLinkedExpenseViews } from '@/stores/expenseStore';
 import { useRecurringExpenseStore } from '@/stores/recurringExpenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -58,6 +58,14 @@ function rechtFehlt<T>(op: string): WriteOutcome<T> | null {
   try { role = useAuthStore.getState().role(); } catch { role = undefined; }
   if (roleMayRunOp(role, op)) return null;
   return { kind: 'business_error', code: 'PERMISSION_DENIED', message: `this account may not run ${op} — it needs ${requiredPermissionLabel(op)}` };
+}
+
+/** B2/B3 SICHERHEITSABSCHLUSS — Anlegen mit Zahlung: der Zahlungsteil verlangt das Recht der Zahlungsoperation (wie PC2). */
+function zahlungsRechtFehlt<T>(op: string, body: unknown): WriteOutcome<T> | null {
+  const zahlOp = paymentOpForPayload(op, body);
+  if (!zahlOp) return null;
+  const nein = rechtFehlt<T>(zahlOp);
+  return nein ? { ...nein, message: `this account may not record a payment with ${op} — it needs ${requiredPermissionLabel(zahlOp)} (save it without a payment)` } as WriteOutcome<T> : null;
 }
 
 function absage<T>(e: unknown): WriteOutcome<T> {
@@ -140,6 +148,8 @@ export async function saveExpenseCreate(write: PayablesWrite<Result>, form: Expe
       employeeId: form.employeeId,
     });
   } catch (e) { return absage(e); }
+  const zahlNein = zahlungsRechtFehlt<Result>(PAYABLES_OP.EXPENSES_CREATE, intent);
+  if (zahlNein) return zahlNein;
   return speichern(write, {
     local: () => runOnPrimary(() => createExpenseFromIntent(intent, localHouseCtx()) as unknown as Result, expensesHier),
     remote: () => ({ ...intent }),
@@ -171,6 +181,8 @@ export async function saveExpenseUpdate(write: PayablesWrite<Result>, base: Expe
 export async function saveExpensePayment(
   write: PayablesWrite<Result>, expense: Expense, amount: number, method: string,
 ): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
+  if (nein) return nein;
   if (!(F(amount) > 0)) return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'Payment amount must be positive.' });
   const rev = seenRevision(expense);
   if (write.remote && rev === undefined) return ohneFassung();
@@ -189,6 +201,8 @@ export async function saveExpensePayment(
 export async function saveTemplateCreate(write: PayablesWrite<Result>, form: Record<string, unknown>): Promise<WriteOutcome<Result>> {
   let intent: TemplateCreateIntent;
   try { intent = templateCreateIntent(form); } catch (e) { return absage(e); }
+  const zahlNein = zahlungsRechtFehlt<Result>(PAYABLES_OP.EXPENSES_TEMPLATE_CREATE, intent);
+  if (zahlNein) return zahlNein;
   return speichern(write, {
     local: () => runOnPrimary(() => createTemplateInHouse(intent, localHouseCtx()) as unknown as Result, templatesHier),
     remote: () => ({ ...intent }),
@@ -211,6 +225,8 @@ export async function saveTemplateUpdate(
   if (Object.keys(diff).length === 0) return unveraendert({ templateId: base.id, changed: [] });
   let fields: ReturnType<typeof templateEditFields>;
   try { fields = templateEditFields(diff); } catch (e) { return absage(e); }
+  const zahlNein = zahlungsRechtFehlt<Result>(PAYABLES_OP.EXPENSES_TEMPLATE_UPDATE, diff);
+  if (zahlNein) return zahlNein;
   const rev = seenRevision(base);
   if (write.remote && rev === undefined) return ohneFassung();
   return speichern(write, {
@@ -275,6 +291,8 @@ export async function savePurchaseCredit(write: PayablesWrite<Result>, purchase:
 export function saveSupplierCreditRepayment(
   write: PayablesWrite<Result>, input: { creditId: string; amount: number; method: string; receivedDate?: string; reference?: string; note?: string },
 ): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.SUPPLIERS_REFUND_CREDIT);
+  if (nein) return Promise.resolve(nein);
   const body: Record<string, unknown> = { creditId: input.creditId, amount: input.amount, method: input.method };
   if (input.receivedDate) body.receivedDate = input.receivedDate;
   if (input.reference) body.reference = input.reference;
@@ -287,6 +305,8 @@ export function saveSupplierCreditRepayment(
 
 /** „Refund Credit": ein unbenutztes Standalone-Guthaben zurueck auf das Ursprungskonto. */
 export function saveSupplierRefund(write: PayablesWrite<Result>, creditId: string): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.SUPPLIERS_REFUND_CREDIT);
+  if (nein) return Promise.resolve(nein);
   return speichern(write, {
     local: () => runOnPrimary(() => refundStandaloneCreditInHouse(creditId, localHouseCtx()) as unknown as Result, supplierHier),
     remote: () => ({ creditId }),
