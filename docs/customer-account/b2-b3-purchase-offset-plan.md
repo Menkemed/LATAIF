@@ -1,6 +1,12 @@
 # B2/B3 — gemeinsame Einkaufsverrechnung (normaler Einkauf und Kommissions-Einkauf)
 
-Stand 10.11.2026. **Nur Plan — nichts davon ist gebaut.** Die Buchung „Soll ACCOUNTS_PAYABLE / Haben ACCOUNTS_RECEIVABLE"
+> **Umgesetzt (Owner-Freigabe 10.11.2026), Teil von v0.8.100:** `15ac1543` (Einkaufsverrechnung, ein Dialog für Rechnung,
+> Einkauf und Kundenkonto), `3b297a93` („Change amount" je Zuordnung, Einkaufs-Einstieg, Ankaufbeleg), `c3340a31` / `78b6b8d5` /
+> `2f2473a9` (Zahlungsrechte, keine stille Bank-Zahlart). Buchung wie unten: Rechnungszahlung `purchase_offset` (Soll
+> ACCOUNTS_PAYABLE mit Gegenpartei Lieferant / Haben AR Kunde), Einkaufszeile `offset` ohne eigene Buchung, keine VAT-/NBR-Änderung.
+> Der Text darunter ist der ursprüngliche Plan (Stand vor der Umsetzung).
+
+Stand 10.11.2026 (Plan). **Nur Plan — nichts davon ist gebaut.** Die Buchung „Soll ACCOUNTS_PAYABLE / Haben ACCOUNTS_RECEIVABLE"
 ist ein **Vorschlag** und braucht die Bestätigung des Buchhalters (Abschnitt 9). Die Umsetzung braucht eine eigene Freigabe.
 
 ## 1. Ziel
