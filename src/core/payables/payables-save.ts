@@ -18,6 +18,8 @@ import { runOnPrimary } from '@/core/data/primary-action';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { saveDatabaseDurably } from '@/core/db/database';
 import type { SharedWrites, WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
+import { useAuthStore } from '@/stores/authStore';
+import { requiredPermissionLabel, roleMayRunOp } from '@/core/bridge/command-permissions';
 import { useExpenseStore, reloadLinkedExpenseViews } from '@/stores/expenseStore';
 import { useRecurringExpenseStore } from '@/stores/recurringExpenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -30,6 +32,7 @@ import {
   recordPurchasePaymentInHouse, applyCreditToPurchaseInHouse,
   refundStandaloneCreditInHouse, paySupplierInHouse, applySupplierCreditToExpensesInHouse,
   recordSupplierCreditRefundInHouse,
+  PAYABLES_OP,
   type ExpenseCreateIntent, type PayTiming, type TemplateCreateIntent,
 } from './payables-house';
 
@@ -45,6 +48,17 @@ export function viaWrites<T>(w: SharedWrites, op: string): PayablesWrite<T> {
 }
 
 type Result = Record<string, unknown>;
+
+/**
+ * B2/B3 SICHERHEIT A — dieselbe Regel wie der Fernweg (`executeCommand` → `roleMayRunOp`): eine Einkaufs- oder
+ * Lieferantenzahlung verlangt `payments.*` oder Admin. Geprüft vor jeder Wirkung, lokal wie vor dem Fernauftrag.
+ */
+function rechtFehlt<T>(op: string): WriteOutcome<T> | null {
+  let role: string | undefined;
+  try { role = useAuthStore.getState().role(); } catch { role = undefined; }
+  if (roleMayRunOp(role, op)) return null;
+  return { kind: 'business_error', code: 'PERMISSION_DENIED', message: `this account may not run ${op} — it needs ${requiredPermissionLabel(op)}` };
+}
 
 function absage<T>(e: unknown): WriteOutcome<T> {
   const code = (e as { code?: unknown })?.code;
@@ -224,6 +238,8 @@ export function runDueGeneratorOnPrimary(now?: string): Promise<{ created: numbe
 export async function savePurchasePayment(
   write: PayablesWrite<Result>, purchase: Purchase, amount: number, method: string, reference?: string,
 ): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.PURCHASES_RECORD_PAYMENT);
+  if (nein) return nein;
   if (!(F(amount) > 0)) return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'Payment amount must be positive.' });
   const rev = seenRevision(purchase);
   if (write.remote && rev === undefined) return ohneFassung();
@@ -239,6 +255,8 @@ export async function savePurchasePayment(
 
 /** „Add Payment → Credit": das Haus waehlt die Guthabenzeilen (FIFO, dieser Lieferant, diese Filiale). */
 export async function savePurchaseCredit(write: PayablesWrite<Result>, purchase: Purchase, amount: number): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.PURCHASES_APPLY_CREDIT);
+  if (nein) return nein;
   if (!(F(amount) > 0)) return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'the credit amount must be positive' });
   const rev = seenRevision(purchase);
   if (write.remote && rev === undefined) return ohneFassung();
@@ -289,6 +307,8 @@ export interface SupplierPayForm {
 
 /** „Pay Supplier — Bulk": EINE Buchung ueber alle Posten; FIFO rechnet der Primary. */
 export function saveSupplierPay(write: PayablesWrite<Result>, form: SupplierPayForm): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.SUPPLIERS_PAY);
+  if (nein) return Promise.resolve(nein);
   if (!(F(form.amount) > 0)) return Promise.resolve(absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'the payment amount must be positive' }));
   const allocations = form.mode === 'manual' ? (form.allocations ?? []).filter((a) => F(a.amount) > 0) : undefined;
   const req = {
@@ -304,6 +324,8 @@ export function saveSupplierPay(write: PayablesWrite<Result>, form: SupplierPayF
 
 /** „Pay Supplier → Credit": Guthaben gegen offene Ausgaben, der atomare Schreiber des Hauses. */
 export function saveSupplierCredit(write: PayablesWrite<Result>, supplierId: string, amount: number): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.SUPPLIERS_APPLY_CREDIT);
+  if (nein) return Promise.resolve(nein);
   if (!(F(amount) > 0)) return Promise.resolve(absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'Requested amount must be greater than zero.' }));
   return speichern(write, {
     local: () => runOnPrimary(() => applySupplierCreditToExpensesInHouse(supplierId, amount, localHouseCtx()) as unknown as Result, supplierHier),

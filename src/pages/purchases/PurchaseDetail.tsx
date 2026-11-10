@@ -125,7 +125,7 @@ export function PurchaseDetail() {
   const linkedReturns = useMemo(() => returns.filter(r => r.purchaseId === id), [returns, id]);
 
 
-  const canPay = !!purchase && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID' && purchase.remainingAmount > 0;
+  const canPay = !!purchase && perm.canRecordPayments && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID' && purchase.remainingAmount > 0;
   const canCancel = !!purchase && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID';
   const canReturn = !!purchase && purchase.status !== 'CANCELLED' && linkedReturns.filter(r => r.status !== 'CANCELLED').length === 0;
 

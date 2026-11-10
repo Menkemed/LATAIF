@@ -267,7 +267,9 @@ const OPS = ['expenses.create', 'expenses.update', 'expenses.record_payment', 'e
   ok(OPS.every((op) => registry.ALLOWED_MUTATIONS.includes(op)), 'SCOPE die zehn Verbindlichkeits-Buchungen sind namentlich freigegeben');
   ok(OPS.every((op) => registry.knownCommands().includes(op)), 'SCOPE und registriert (payables-commands.ts)');
   ok(S([...cmds.PAYABLES_OPS].sort()) === S([...OPS].sort()), 'SCOPE genau diese zehn, keine elfte');
-  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && perms.OPERATION_PERMISSIONS[op] === null), 'SCOPE kein erfundenes Recht (die Masken haben kein Tor)');
+  // B2/B3 SICHERHEIT A — die vier Einkaufs-/Lieferantenzahlungen verlangen seither payments.* oder Admin (eigenes Gate: test/customer-account/b23-sec-a-permissions).
+  const ZAHLUNG = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit'];
+  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && (ZAHLUNG.includes(op) ? perms.OPERATION_PERMISSIONS[op]?.kind === 'permissionOrAdmin' : perms.OPERATION_PERMISSIONS[op] === null)), 'SCOPE Ausgaben ohne Tor (wie die Masken), Einkaufs-/Lieferantenzahlung wie die Rechnungszahlung');
   ok(registry.knownCommands().includes('suppliers.credits.get'), 'SCOPE die Auskunft suppliers.credits.get ist angemeldet');
 }
 marker('CENTRAL_UI_R6D_PAYABLES_SCOPE_PROVED');

@@ -48,6 +48,13 @@ const RECORD_PAYMENTS = permOrAdmin('payments.*', 'InvoiceDetail: perm.canRecord
 const CREATE_INVOICES = perm('invoices.create', 'InvoiceDetail/RepairDetail: perm.canCreateInvoices');
 /** `canEditInvoices` = `isAdmin` — derselbe Knopf, der am Primary „Edit" zeigt. */
 const EDIT_INVOICES = admin('InvoiceDetail: perm.canEditInvoices');
+/**
+ * B2/B3 SICHERHEIT A — Einkaufs- und Lieferantenzahlungen (Geld an den Lieferanten, Lieferantenguthaben auf einen Einkauf)
+ * verlangen dasselbe Recht wie eine Rechnungszahlung. Vorher ohne Tor: PC2 konnte mit jeder Rolle bezahlen. Der Primary
+ * zeigt die Knöpfe seither ebenso nur mit `perm.canRecordPayments` (PurchaseDetail „Add Payment", SupplierDetail
+ * „Pay Supplier — Bulk"), und die lokale Speicherfolge (`payables-save`) prüft dieselbe Regel. Keine neue Rolle.
+ */
+const PURCHASE_PAYMENTS = permOrAdmin('payments.*', 'PurchaseDetail Add Payment / SupplierDetail Pay Supplier: perm.canRecordPayments');
 
 /**
  * Die Zuordnung für alle vierzig verändernden Operationen. `null` heißt ausdrücklich: der Primary
@@ -164,10 +171,10 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'expenses.record_payment': null,
   'expenses.template_create': null,
   'expenses.template_update': null,
-  'purchases.record_payment': null,
-  'purchases.apply_credit': null,
-  'suppliers.pay': null,
-  'suppliers.apply_credit': null,
+  'purchases.record_payment': PURCHASE_PAYMENTS,
+  'purchases.apply_credit': PURCHASE_PAYMENTS,
+  'suppliers.pay': PURCHASE_PAYMENTS,
+  'suppliers.apply_credit': PURCHASE_PAYMENTS,
   'suppliers.refund_credit': null,
   // Eine Gold-Verbindlichkeit ist am Primary über `SupplierDetail` ohne Tor abrechenbar — dass
   // `OrderDetail` dieselben Knöpfe hinter `perm.canManageOrders` stellt, macht die Handlung nicht

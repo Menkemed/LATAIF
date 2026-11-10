@@ -526,7 +526,7 @@ export function SupplierDetail() {
             ist (Workshop/Service-Expense, Consignor-Loss-Expense, Purchase).
             Vorher nur workshopExpenses → Consignor-Payouts via Purchase blieben
             aussen vor und brauchten manuelle PurchaseDetail-Klicks. */}
-        {(workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0
+        {perm.canRecordPayments && (workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0
           || supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length > 0) && (
           <div style={{ marginBottom: 32, display: 'flex', justifyContent: 'flex-end' }}>
             <Button variant="primary" onClick={() => setShowPaySupplierModal(true)} data-supplier-pay-open>

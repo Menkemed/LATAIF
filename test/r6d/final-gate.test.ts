@@ -124,8 +124,10 @@ const MODULES: Record<string, number> = { 'money-commands': 6, 'payables-command
   for (const op of R6D_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, unknown>)[op];
     const soll = op === 'orders.add_cost' || op === 'orders.remove_cost';
-    ok(op in perms.OPERATION_PERMISSIONS && (soll ? (rule as { kind?: string })?.kind === 'isAdmin' : rule === null),
-      `RECHT ${op}: ${soll ? 'perm.canManageOrders wie am Primary' : 'kein Tor (der Primary hat keins)'}`);
+    // B2/B3 SICHERHEIT A — Einkaufs-/Lieferantenzahlung seither wie die Rechnungszahlung (payments.* oder Admin; test/customer-account/b23-sec-a).
+    const zahlung = ['purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit'].includes(op);
+    ok(op in perms.OPERATION_PERMISSIONS && (soll ? (rule as { kind?: string })?.kind === 'isAdmin' : zahlung ? (rule as { kind?: string; permission?: string })?.kind === 'permissionOrAdmin' && (rule as { permission?: string }).permission === 'payments.*' : rule === null),
+      `RECHT ${op}: ${soll ? 'perm.canManageOrders wie am Primary' : zahlung ? 'payments.* oder Admin (perm.canRecordPayments)' : 'kein Tor (der Primary hat keins)'}`);
   }
   for (const op of R6D_READ) ok(op in perms.READ_PERMISSIONS && perms.READ_PERMISSIONS[op] === null, `RECHT ${op}: Auskunft ohne Tor, begrenzt durch die Filiale`);
   const r = await registry.executeCommand('expenses.delete', {}, { commandId: '00000001-0000-4000-8000-000000000000', tenantId: 't', branchId: 'branch-main', userId: 'u', role: 'ADMIN', op: 'expenses.delete', payloadHash: 'h' } as never);
