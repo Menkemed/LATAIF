@@ -932,7 +932,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // CUSTOMER ACCOUNT B1 — eine Verrechnung verbindet DIESEN Kunden mit seinem Darlehen: der Kunde bleibt, solange sie wirkt.
     if (customerId && customerId !== inv0.customerId && invoiceHasActiveOffsets(id)) {
       throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
-        'This invoice is settled by an offset with a loan of this client — remove the offset first, then change the client.');
+        'This invoice is settled by an offset with this client (loan, store credit or purchase) — remove the offset first, then change the client.');
     }
     const customerPlan = planCustomerChange(id, inv0.customerId, customerId,
       { confirmed: input.confirmCustomerChange === true, newPayment: deltaAmount > 0 });
@@ -1450,7 +1450,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // Guthaben oder eine Auszahlung. Erst die Verrechnung aufheben (das Darlehen öffnet wieder), dann ändern.
       if (overpayPlan.additionalCredit > 0.005 && invoiceHasActiveOffsets(id)) {
         throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
-          'This invoice is settled by an offset with a loan — lowering it below the settled amount would pay that out. Remove the offset first, then edit.');
+          'This invoice is settled by an offset (loan, store credit or purchase) — lowering it below the settled amount would pay that out. Remove the offset first, then edit.');
       }
       if (overpayPlan.additionalCredit > 0.005) {
         // MIXED-INVOICE P1c — Pflichtwahl: Kundenguthaben oder Rückzahlung. Beide sind DIESELBE Zeile und DIESELBE
@@ -1870,7 +1870,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // sichere Weg wieder („Remove offset" bzw. Storno, je EINE Transaktion) — nie dieser Löschpfad.
     if (invoiceHasActiveOffsets(id)) {
       throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
-        'This invoice is settled by an offset with a loan — remove the offset first (the loan opens again), then delete.');
+        'This invoice is settled by an offset (loan, store credit or purchase) — remove the offset first (the counter item opens again), then delete.');
     }
     // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,
     // eine Retoure/Gutschrift hat Ware schon zurueckgebucht — der Lot-Restore unten gaebe dasselbe

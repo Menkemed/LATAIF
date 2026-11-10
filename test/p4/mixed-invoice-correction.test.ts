@@ -276,6 +276,9 @@ type KorrIn = import('../../src/core/invoices/mixed-invoice-correction.ts').Mixe
 
 const { creditNoteReceivableCancel } = await import('../../src/core/invoices/edit-lines.ts');
 const ctxH = { branchId: 'branch-main', userId: 'user-test', now: NOW };
+// v0.8.100 — eine Rückzahlung wird gegen die Rückforderung geprüft, die die Korrektur mit der ECHTEN Uhr stempelt (`new Date()`).
+// Mit der festen Uhr (NOW) lag „heute“ vor der Forderung, sobald der Lauftag nach NOW lag (PAYMENT_DATE_BEFORE_CLAIM) — wie D3: echte Uhr.
+const jetztH = () => ({ ...ctxH, now: new Date().toISOString() });
 const konsProdukte = (db: Db, inv: string): string[] => (db.exec('SELECT product_id FROM consignments WHERE invoice_id = ?', [inv])[0]?.values ?? []).map((r) => String(r[0]));
 /** Die eigenen Zeilen so, wie die Maske des Primary sie beim Ändern schickt (Zeilen-ID, Los, Einstand). */
 function eigeneEdit(db: Db, inv: string, preis: Record<string, number> = {}): KorrIn['ownLines'] {
@@ -528,7 +531,7 @@ for (const wahl of ['credit', 'refund'] as const) {
   ok(abgleich4(w.db).length === 0, `§3 ${wahl}: Abgleich ohne Abweichung (${abgleich4(w.db).join('; ')})`);
   if (wahl === 'refund') {
     setTestDatabase(w.db as never);
-    const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: String(kredit[0]), amount: 880, method: 'cash' }, ctxH)));
+    const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: String(kredit[0]), amount: 880, method: 'cash' }, jetztH())));
     ok(rp.ok && s(w.db, 'SELECT status FROM supplier_credits WHERE id = ?', [kredit[0]]) === 'REFUNDED' && abgleich4(w.db).length === 0,
       `§3 Rückforderung: „Record Repayment" zahlt sie ganz zurück ⇒ REFUNDED, Abgleich ok (${rp.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
   }
@@ -571,7 +574,7 @@ for (const wahl of ['credit', 'refund'] as const) {
   if (wahl === 'refund') {
     setTestDatabase(w.db as never);
     const cid = s(w.db, 'SELECT id FROM supplier_credits WHERE source_purchase_id = ?', [ali]);
-    const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: cid, amount: 100, method: 'bank' }, ctxH)));
+    const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: cid, amount: 100, method: 'bank' }, jetztH())));
     ok(rp.ok && s(w.db, 'SELECT status FROM supplier_credits WHERE id = ?', [cid]) === 'REFUND_DUE' && n(w.db, 'SELECT ROUND(used_amount,3) FROM supplier_credits WHERE id = ?', [cid]) === 100
       && abgleich4(w.db).length === 0, `§4 Rückforderung teilweise zurückgezahlt (100 von 160), offen bleibt 60 (${rp.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
     // Die Kommissionsansicht zeigt die Rückforderung mit ihrem Guthaben (für „Record Repayment"), am PC2 über denselben Lesebefehl.
@@ -666,7 +669,7 @@ for (const wahl of ['credit', 'refund'] as const) {
   const zeileK3 = useConsignmentStore.getState().consignments.find((c) => c.id === w.k3)?.consignorSide?.refunds.find((x) => x.creditId === claim);
   ok(!!zeileK3 && zeileK3.mode === 'pending' && Math.abs(zeileK3.open - 30) < 0.001, `§5 die Rückforderung steht an der Kommission (offen 30) (${S(zeileK3)})`);
   setTestDatabase(w.db as never);
-  const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: claim, amount: 30, method: 'cash' }, ctxH)));
+  const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: claim, amount: 30, method: 'cash' }, jetztH())));
   ok(rp.ok && s(w.db, 'SELECT status FROM supplier_credits WHERE id = ?', [claim]) === 'REFUNDED' && abgleich4(w.db).length === 0,
     `§5 „Record Repayment" ⇒ REFUNDED, Abgleich ok (${rp.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
   // Danach wieder ein Verlust (Preis 900): die alte Ausgabe bleibt storniert, ihre zurückgezahlte Rückforderung unberührt — der

@@ -459,6 +459,27 @@ marker('B23_SEC_CLOSE_REMOTE_PROVED');
 }
 marker('B23_SEC_CLOSE_LOCAL_PROVED');
 
+// ── §7 v0.8.100 Owner-Entscheidung: SALES erfasst keine Zahlungen, legt aber weiter Rechnung, Einkauf und Ausgabe OHNE Zahlung an ──
+{
+  await import('../../src/core/bridge/invoice-command.ts');
+  const db = nimm(freshDb());
+  let k = 900;
+  const keinTor = (r: { kind: string; code?: string }) => !(r.kind === 'business_error' && r.code === 'PERMISSION_DENIED');
+  const rechnung = await executeCommand('invoices.create', { input: { customerId: 'c-x', lines: [] } }, ACT('SALES', ++k) as never);
+  ok(keinTor(rechnung as never), `A7 SALES: Rechnung anlegen (ohne Zahlung) trifft kein Rechte-Tor (${S(rechnung).slice(0, 100)})`);
+  const einkauf = await executeCommand('purchases.create', { input: { supplierId: 'sup-1', purchaseDate: '2026-09-02', lines: [] } }, ACT('SALES', ++k) as never);
+  ok(keinTor(einkauf as never), `A7 SALES: Einkauf anlegen (ohne Zahlung) trifft kein Rechte-Tor (${S(einkauf).slice(0, 100)})`);
+  const ausgabe = await executeCommand('expenses.create', { input: { category: 'Rent', amount: 5, paymentMethod: 'cash', expenseDate: '2026-09-02', timing: 'later' } }, ACT('SALES', ++k) as never);
+  ok(ausgabe.kind === 'ok' && n(db, 'SELECT COUNT(*) FROM expense_payments') === 0, `A7 SALES: Ausgabe „Pay later" wird angelegt, ohne Zahlung (${S(ausgabe).slice(0, 80)})`);
+  // Jede Zahlung, die dieser Release bewacht, verweigert SALES; Manager, Buchhaltung und Admin (= Owner) dürfen sie.
+  const BEWACHT = ['invoices.record_payment', 'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment', 'returns.refund',
+    'returns.record_refund_payment', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.record_payment', 'purchases.apply_credit',
+    'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit', 'expenses.record_payment'];
+  ok(BEWACHT.every((op) => !perms.roleMayRunOp('SALES', op) && ['MANAGER', 'ACCOUNTANT', 'ADMIN', 'owner'].every((r2) => perms.roleMayRunOp(r2, op))),
+    'A7 alle bewachten Zahlungswege: SALES nein; Manager, Buchhaltung, Admin/Owner ja');
+}
+marker('RELEASE_0100_SALES_RULE_PROVED');
+
 console.log(`\nb23 security A: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('B23_SECURITY_A_PURCHASE_PAYMENT_PERMISSION_PROVED');

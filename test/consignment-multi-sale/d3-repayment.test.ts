@@ -527,6 +527,28 @@ marker('CONSIGNMENT_D3_REPAYMENT_OFFSET_REPEAT_PROVED');
 }
 marker('CONSIGNMENT_D3_REPAYMENT_GUARDS_PROVED');
 
+// ══ §3b — v0.8.100: „nicht in der Zukunft" nach der EINEN Geschäftsdatums-Regel (UTC-Tag + ein Tag Spielraum) ═════
+{
+  const { latestBusinessDate } = await import('../../src/core/utils/business-date.ts');
+  // Der späteste Tag, den die Maske „Record Repayment" anbietet (ConsignmentDetail: max = latestBusinessDate()) — vorher vom
+  // Haus als „Zukunft" abgewiesen (in Bahrain: der lokale heutige Tag zwischen 00:00 und 03:00 Ortszeit).
+  const { db, creditId } = await offeneRueckforderung();
+  const spaet = latestBusinessDate();
+  const r = await zahleZurueck('primary', db, { creditId, amount: 100, method: 'cash', receivedDate: spaet });
+  ok(r.ok && n(db, 'SELECT used_amount FROM supplier_credits WHERE id = ?', [creditId]) === 100, `P11 der späteste Tag der Maske (${spaet}) wird angenommen (${r.code || 'ok'})`);
+  // Bahrain 01:30 Ortszeit = 22:30 UTC des Vortags: der lokale heutige Tag ist UTC „morgen" — angenommen; übermorgen nicht.
+  const jetzt = Date.parse(heute() + 'T22:30:00.000Z');
+  const lokalHeute = new Date(jetzt + 86400000).toISOString().slice(0, 10);
+  const lokalUebermorgen = new Date(jetzt + 2 * 86400000).toISOString().slice(0, 10);
+  nimm(db);
+  const ctx = { ...payables.localHouseCtx(), now: new Date(jetzt).toISOString() };
+  const a = await primary(() => imHaus(() => payables.recordSupplierCreditRefundInHouse({ creditId, amount: 10, method: 'cash', receivedDate: lokalHeute } as never, ctx)));
+  const b = await primary(() => imHaus(() => payables.recordSupplierCreditRefundInHouse({ creditId, amount: 10, method: 'cash', receivedDate: lokalUebermorgen } as never, ctx)));
+  ok(a.ok && !b.ok && b.code === 'PAYMENT_DATE_INVALID', `P12 Bahrain 01:30: lokaler heutiger Tag angenommen, übermorgen abgewiesen (${a.code || 'ok'} / ${b.code})`);
+  ok(abgleich(db).length === 0, `P12 Abgleich ohne Abweichung (${abgleich(db).join(' | ')})`);
+}
+marker('CONSIGNMENT_D3_REPAYMENT_BUSINESS_DATE_PROVED');
+
 console.log(fails.length === 0
   ? `PASS — consignment D3 repayment: ${PASS} passed, 0 failed\nCONSIGNMENT_D3_REPAYMENT_PROVED`
   : `FAIL — consignment D3 repayment: ${PASS} passed, ${fails.length} failed`);

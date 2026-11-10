@@ -11,6 +11,7 @@ import {
   postInvoiceIssued,
   postInvoiceCogsBackfill,
   postInvoicePayment,
+  INVOICE_PAYMENT_METHODS_KNOWN,
   postInvoiceCancelled,
   postCreditNote,
   postPurchaseReceived,
@@ -275,12 +276,21 @@ export function backfillInvoicePayments(branchId: string): BackfillResult {
     const r = rows[i];
     const d = plan[i];
     if (d.skipped) { res.skipped++; continue; }
+    // v0.8.100 — eine Altzeile mit leerer oder unbekannter Zahlart wird nicht still nachgebucht (vorher: leer → Kasse,
+    // unbekannt → Bank; die alte Live-Buchung nahm für beides Bank). Gemeldet, nicht gebucht — wie bei Einkäufen und
+    // Ausgaben. Gebuchte Zeilen bleiben unberührt (oben übersprungen); 'other' bleibt wie bisher Bank.
+    const rawMethod = String(r.method ?? '');
+    if (!(INVOICE_PAYMENT_METHODS_KNOWN as readonly string[]).includes(rawMethod)) {
+      res.failed++;
+      res.errors.push(`payment ${d.id.slice(0, 8)}: unknown payment method "${rawMethod}" — nothing was booked (never silently Cash or Bank)`);
+      continue;
+    }
     const customerId = r.customer_id as string;
     const payment: Payment = {
       id: d.id,
       invoiceId: d.invoiceId,
       amount: Number(r.amount || 0),
-      method: (r.method as PaymentMethod) || 'cash',
+      method: rawMethod as PaymentMethod,
       receivedAt: r.received_at as string,
       createdAt: r.created_at as string,
     };
@@ -511,7 +521,10 @@ export function backfillExpensePayments(branchId: string): BackfillResult {
         {
           id, expenseId: r.expense_id as string,
           amount: Number(r.amount || 0),
-          method: (r.method as 'cash' | 'bank') || 'cash',
+          // v0.8.100 — eine Altzeile OHNE Zahlart wird nicht mehr still als Kasse nachgebucht (die alte Live-Buchung nahm
+          // dafür Bank, die Umbuchung Bank — der Weg ist unbekannt). Sie wird gemeldet (EXPENSE_PAYMENT_METHOD_UNKNOWN),
+          // wie bei Einkäufen (B2/B3 Sicherheit B). Gebuchte Zeilen bleiben unberührt (oben übersprungen).
+          method: String(r.method ?? '') as 'cash' | 'bank',
           paidAt: r.paid_at as string,
           note: (r.note as string | null) || undefined,
           createdAt: r.created_at as string,

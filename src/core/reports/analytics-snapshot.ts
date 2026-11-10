@@ -353,6 +353,8 @@ export function financeFor(ctx: BusinessReadContext) {
       if (m === 'debt_offset') continue;
       // B2/B3 — ebenso die Verrechnung mit einem Einkauf (kein Geld).
       if (m === 'purchase_offset') continue;
+      // v0.8.100 — ebenso die Anrechnung von Store Credit (Soll CUSTOMER_CREDIT, kein Geld; das Geld kam bei der Überzahlung/Retoure).
+      if (m === 'credit') continue;
       if (m === 'cash') cashReceived += amt;
       else if (m === 'bank_transfer') bankReceived += amt;
       else if (m === 'card') cardReceived += amt;

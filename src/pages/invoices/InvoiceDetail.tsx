@@ -1,4 +1,4 @@
-import { paymentMethodLabel } from '@/core/utils/payment-method-label';
+import { paymentMethodDisplay, paymentMethodLabel } from '@/core/utils/payment-method-label';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown, ArrowLeftRight } from 'lucide-react';
@@ -864,7 +864,7 @@ export function InvoiceDetail() {
                           border: '1px solid #E5E9EE',
                         }}>
                           {payList.map(p => {
-                            const methodLabel = paymentMethodLabel(p.method);
+                            const methodLabel = paymentMethodDisplay(p.method);
                             return (
                               <div key={p.id} className="flex justify-between items-center" data-invoice-payment-method={p.method}
                                 style={{ padding: '6px 0', borderBottom: '1px solid #EEF0F2' }}>

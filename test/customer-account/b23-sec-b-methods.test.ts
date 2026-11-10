@@ -425,6 +425,79 @@ marker('B23_SEC_B_EXPENSE_PROVED');
 }
 marker('B23_SEC_B_INVOICE_PROVED');
 
+// ════════════════════════════════════════════════════════════════════════════
+// v0.8.100 RELEASE READINESS — Zahlarten absichern: „Other" (Bank, unverändert), Altzeilen ohne Zahlart, Verrechnungen nie Geld.
+// ════════════════════════════════════════════════════════════════════════════
+const GELD = ['CASH', 'BANK', 'BENEFIT', 'CARD_CLEARING'];
+const legs = (db: Db, src: string, id: string): string[] => rows(db, `SELECT account || ':' || direction AS l FROM ledger_entries
+  WHERE source_module = ? AND source_id = ? AND reverses_entry_id IS NULL ORDER BY account, direction`, [src, id]).map((r) => String(r.l));
+// ── §7 Nachbuchung Rechnungszahlungen: jede Zahlart auf ihr Konto; leer/unbekannt gemeldet; Verrechnung nie Geld ──
+{
+  const db = freshDb();
+  insert(db, 'customers', { id: 'c1', branch_id: 'branch-main', first_name: 'A', last_name: 'B', created_at: NOW, updated_at: NOW });
+  insert(db, 'invoices', { id: 'I7', branch_id: 'branch-main', invoice_number: 'INV-7', customer_id: 'c1', status: 'PARTIAL', gross_amount: 1000,
+    net_amount: 1000, vat_amount: 0, paid_amount: 0, created_at: NOW, updated_at: NOW });
+  const art: Array<[string, string]> = [['p-cash', 'cash'], ['p-other', 'other'], ['p-leer', ''], ['p-xyz', 'xyz'], ['p-credit', 'credit'],
+    ['p-debt', 'debt_offset'], ['p-dep', 'order_deposit'], ['p-po', 'purchase_offset']];
+  for (const [id, m] of art) insert(db, 'payments', { id, branch_id: 'branch-main', invoice_id: 'I7', amount: 10, method: m, received_at: '2026-09-05', created_at: NOW });
+  const r = backfill.backfillInvoicePayments('branch-main');
+  ok(S(legs(db, 'PAYMENT', 'p-cash')) === S(['ACCOUNTS_RECEIVABLE:CREDIT', 'CASH:DEBIT']) && S(legs(db, 'PAYMENT', 'p-other')) === S(['ACCOUNTS_RECEIVABLE:CREDIT', 'BANK:DEBIT']),
+    `B7 Nachbuchung: cash → Kasse, „Other" → Bank (wie live, unverändert) (${S(legs(db, 'PAYMENT', 'p-other'))})`);
+  ok(legs(db, 'PAYMENT', 'p-leer').length === 0 && legs(db, 'PAYMENT', 'p-xyz').length === 0 && r.errors.filter((e) => /never silently/.test(e)).length === 2,
+    `B7 Nachbuchung: leer und unbekannt → gemeldet, nichts gebucht (vorher leer → Kasse, unbekannt → Bank) (${S(r).slice(0, 200)})`);
+  ok(S(legs(db, 'PAYMENT', 'p-credit')) === S(['ACCOUNTS_RECEIVABLE:CREDIT', 'CUSTOMER_CREDIT:DEBIT'])
+    && S(legs(db, 'PAYMENT', 'p-debt')) === S(['ACCOUNTS_RECEIVABLE:CREDIT', 'LOAN_PAYABLE:DEBIT'])
+    && S(legs(db, 'PAYMENT', 'p-dep')) === S(['ACCOUNTS_RECEIVABLE:CREDIT', 'CUSTOMER_DEPOSITS:DEBIT']),
+    'B7 Nachbuchung: Store Credit / Debt Offset / Order-Anrechnung auf ihre Verbindlichkeit, nie auf Kasse oder Bank');
+  ok(legs(db, 'PAYMENT', 'p-po').length === 0, 'B7 Nachbuchung: Purchase Offset ohne Lieferant bucht nicht (nie Geld; live bucht ihn nur „Settle Balance")');
+  ok(['p-credit', 'p-debt', 'p-dep', 'p-po'].every((id) => !legs(db, 'PAYMENT', id).some((l) => GELD.includes(l.split(':')[0]))),
+    'B7 keine Verrechnung hat ein Bein auf Kasse, Bank, Benefit oder Karte');
+  const again = backfill.backfillInvoicePayments('branch-main');
+  ok(again.posted === 0, `B7 Wiederholung bucht nichts doppelt (${S(again).slice(0, 120)})`);
+  ok(unbalanced(db) === 0, 'B7 Hauptbuch ausgeglichen');
+  // Banking und Auswertung: „Other" unter Bank (wie das Hauptbuch); Verrechnungen gar nicht; Store Credit nie als Eingang.
+  const tx = banking.bankTransactionsFor(RCTX as never, []);
+  const ein = Object.fromEntries(tx.filter((t) => t.type === 'SALES_IN').map((t) => [t.id, t.account]));
+  ok(ein['pay-p-cash'] === 'cash' && ein['pay-p-other'] === 'bank', `B7 Banking: cash unter Kasse, „Other" unter Bank (= Hauptbuch) (${S(ein)})`);
+  ok(!['pay-p-credit', 'pay-p-debt', 'pay-p-dep', 'pay-p-po'].some((k) => k in ein), 'B7 Banking: Store Credit, Debt Offset, Order-Anrechnung, Purchase Offset erscheinen nie als Geld');
+  const analytics = await import('../../src/core/reports/analytics-snapshot.ts');
+  const fin = analytics.financeFor(RCTX as never) as Record<string, number>;
+  ok(Math.round(fin.otherReceived * 1000) === 10000 + 10000 + 10000 && Math.round(fin.cashReceived * 1000) === 10000,
+    `B7 Auswertung: Store Credit, Debt/Purchase Offset und Order-Anrechnung zählen nicht als Eingang (other = Other + leer + unbekannt) (${fin.otherReceived} / ${fin.cashReceived})`);
+  const { paymentMethodDisplay, paymentMethodLabel } = await import('../../src/core/utils/payment-method-label.ts');
+  ok(paymentMethodDisplay('other') === 'Other · booked to Bank' && paymentMethodLabel('other') === 'Other' && paymentMethodDisplay('cash') === 'Cash',
+    'B7 Rechnungsansicht nennt bei „Other" das Konto (Bank); der NBR-Export behält „Other"');
+  ok(/const methodLabel = paymentMethodDisplay\(p\.method\);/.test(codeOf(src('src/pages/invoices/InvoiceDetail.tsx'))), 'B7 InvoiceDetail benutzt die Anzeige mit Konto');
+}
+marker('RELEASE_0100_INVOICE_METHODS_PROVED');
+
+// ── §8 Ausgaben ohne Zahlart: Umbuchung behält das Geldkonto der lebenden Buchung ────────────────
+{
+  const db = freshDb();
+  const { expensePaymentRehomeMethod } = await import('../../src/stores/repairStore.ts');
+  insert(db, 'expenses', { id: 'E8', branch_id: 'branch-main', expense_number: 'EXP-8', category: 'RepairCosts', amount: 500, paid_amount: 0,
+    payment_method: 'cash', expense_date: '2026-09-02', status: 'UNPAID', created_at: NOW, updated_at: NOW });
+  const ep = (id: string, method: string) => ({ id, expenseId: 'E8', amount: 10, method, paidAt: '2026-09-05', createdAt: NOW }) as never;
+  primary(() => posting.postExpensePayment(ep('r-cash', 'cash')));
+  primary(() => posting.postExpensePayment(ep('r-bank', 'bank')));
+  ok(expensePaymentRehomeMethod('r-cash', '') === 'cash' && expensePaymentRehomeMethod('r-cash', 'bank') === 'cash',
+    'B8 Umbuchung: Konto der lebenden Buchung (Kasse) zählt — auch wenn die Zeile leer/anders ist (vorher still Bank)');
+  ok(expensePaymentRehomeMethod('r-bank', '') === 'bank', 'B8 Umbuchung: lebende Bank-Buchung bleibt Bank');
+  ok(expensePaymentRehomeMethod('r-none', 'benefit') === 'benefit' && expensePaymentRehomeMethod('r-none', '') === undefined
+    && expensePaymentRehomeMethod('r-none', 'card') === undefined, 'B8 ohne Buchung: bekannter Weg der Zeile, sonst nichts (gemeldet, nicht gebucht)');
+  primary(() => posting.reverseSource('EXPENSE_PAYMENT', 'r-cash', NOW));
+  ok(expensePaymentRehomeMethod('r-cash', '') === undefined, 'B8 storniert und Zeile ohne Weg: nichts');
+  const rs = codeOf(src('src/stores/repairStore.ts'));
+  ok(/const cashMethod = expensePaymentRehomeMethod\(payId, payMethod\);\s*if \(!cashMethod\) \{/.test(rs) && !/: 'bank';\s*safePost\(`reconcileRepairSupplier:payment/.test(rs),
+    'B8 reconcileRepairSupplier benutzt die Kontowahl VOR jeder Stornierung (kein Storno ohne Neubuchung)');
+  const bfAll = codeOf(src('src/core/ledger/backfill.ts'));
+  const bf = bfAll.slice(bfAll.indexOf('export function backfillExpensePayments'), bfAll.indexOf('export function', bfAll.indexOf('export function backfillExpensePayments') + 10));
+  ok(/method: String\(r\.method \?\? ''\) as 'cash' \| 'bank'/.test(bf) && !/\|\| 'cash'/.test(bf),
+    'B8 Nachbuchung Ausgabenzahlungen: leer nie mehr still Kasse');
+  ok(unbalanced(db) === 0, 'B8 Hauptbuch ausgeglichen');
+}
+marker('RELEASE_0100_EXPENSE_REHOME_PROVED');
+
 console.log(`\nb23 security B: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('B23_SECURITY_B_NO_SILENT_BANK_PROVED');

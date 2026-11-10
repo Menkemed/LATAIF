@@ -53,7 +53,7 @@ import { isClientMode } from '@/core/bridge/client-mode';
 import { isAutoCardFee, postCardFeeEntries } from '@/core/finance/card-fee-booking';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
-import { businessTimestamp } from '@/core/utils/business-date';
+import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
 import { isOrderCostClaim, ORDER_COST_CLAIM_OPEN, ORDER_COST_CLAIM_DONE } from './order-cost-claim';
 
@@ -1193,7 +1193,12 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   const today = dayOf(ctx.now);
   const tag = input.receivedDate === undefined || input.receivedDate === '' ? today
     : isoDateOf(input.receivedDate, 'PAYMENT_DATE_INVALID', 'the date the money came');
-  if (tag > today) throw nein('PAYMENT_DATE_INVALID', 'the date the money came cannot be in the future');
+  // v0.8.100 — „nicht in der Zukunft" nach der EINEN Geschäftsdatums-Regel (`business-date`: UTC-Tag, ein Tag Spielraum für die
+  // Zeitzone) — dieselbe Grenze, die die Maske als `max` anbietet (`latestBusinessDate`). Vorher streng gegen den UTC-Tag: in
+  // Bahrain (UTC+3) wurde zwischen 00:00 und 03:00 Ortszeit der heutige Tag als „Zukunft" abgewiesen, obwohl die Maske ihn anbot.
+  if (businessDateIssue(tag, 'the date the money came', Date.parse(ctx.now))) {
+    throw nein('PAYMENT_DATE_INVALID', 'the date the money came cannot be in the future');
+  }
   const ab = orderClaim || consignorOverpayClaim ? dayOf(String(c.created_at ?? '')) : String(c.return_date ?? '').slice(0, 10);
   if (ab && tag < ab) {
     throw nein('PAYMENT_DATE_BEFORE_CLAIM', orderClaim || consignorOverpayClaim

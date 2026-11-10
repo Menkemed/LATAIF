@@ -17,3 +17,12 @@ export function paymentMethodLabel(method: string | null | undefined): string {
   if (!m) return '—';
   return LABELS[m] ?? (m.charAt(0).toUpperCase() + m.slice(1).replace(/_/g, ' '));
 }
+
+/**
+ * v0.8.100 — die Anzeige in der Rechnungsansicht: „Other" wird (unverändert) auf Bank gebucht und steht im Banking unter Bank.
+ * Damit die Rechnung nicht etwas anderes sagt, nennt sie das Konto dazu. Der NBR-Export behält `paymentMethodLabel`.
+ */
+export function paymentMethodDisplay(method: string | null | undefined): string {
+  const l = paymentMethodLabel(method);
+  return String(method ?? '').trim() === 'other' ? `${l} · booked to Bank` : l;
+}

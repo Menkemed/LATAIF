@@ -305,6 +305,22 @@ export function sumOpenRepairLineCosts(repairId: string): number {
 // Limitation: reverseSource laesst nur EINEN Reversal pro Source zu. Mehrfache
 // Supplier-Wechsel nach diesem Reconcile sind nicht abgedeckt — fuer den vom User
 // gemeldeten Fall (NULL -> Supplier) reicht das. Multi-Step waere ein eigener Slice.
+/**
+ * v0.8.100 — das Geldkonto für die Umbuchung einer Ausgabenzahlung: das Konto der LEBENDEN Originalbuchung (eine Umbuchung
+ * ändert nie Kasse/Bank/Benefit); ohne Buchung der bekannte Weg der Zeile; sonst `undefined` (nichts buchen, melden).
+ */
+export function expensePaymentRehomeMethod(paymentId: string, rowMethod: unknown): 'cash' | 'bank' | 'benefit' | undefined {
+  const m = String(rowMethod ?? '');
+  const live = query(
+    `SELECT le.account FROM ledger_entries le WHERE le.source_module = 'EXPENSE_PAYMENT' AND le.source_id = ? AND le.direction = 'CREDIT'
+       AND le.reverses_entry_id IS NULL AND NOT EXISTS (SELECT 1 FROM ledger_entries r WHERE r.reverses_entry_id = le.id) LIMIT 1`,
+    [paymentId],
+  )[0];
+  const ausKonto: Record<string, 'cash' | 'bank' | 'benefit'> = { CASH: 'cash', BANK: 'bank', BENEFIT: 'benefit' };
+  if (live) return ausKonto[String(live.account)];
+  return m === 'cash' || m === 'bank' || m === 'benefit' ? m : undefined;
+}
+
 function reconcileRepairSupplier(repairId: string, supplierId: string): void {
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -377,14 +393,20 @@ function reconcileRepairSupplier(repairId: string, supplierId: string): void {
     const payId = pRow.id as string;
     const payAmt = Number(pRow.amount || 0);
     if (payAmt <= 0) continue;
-    const payMethod = (pRow.method as string) || 'bank';
+    const payMethod = String(pRow.method ?? '');
     // Credit-Einloesungen werden NIE auf einen anderen Supplier umgehaengt: eine AKTIVE
     // Credit-Einloesung wurde oben bereits per Block abgefangen; eine reversierte/inaktive
     // Credit-Row darf nicht ueber den Cash-Poster neu gebucht werden (postExpensePayment
     // wirft bei method='credit'). Cash/Bank/Benefit-Re-Home bleibt unveraendert.
     if (payMethod === 'credit') continue;
-    const cashMethod: 'cash' | 'bank' | 'benefit' =
-      payMethod === 'cash' || payMethod === 'benefit' ? payMethod : 'bank';
+    // v0.8.100 — eine Umbuchung ändert nie das Geldkonto: es zählt das Konto der LEBENDEN Originalbuchung (vorher wurde eine
+    // Zeile ohne/mit unbekannter Zahlart still auf Bank umgebucht, auch wenn sie als Kasse nachgebucht war). Ohne Buchung der
+    // bekannte Weg der Zeile; ist keiner bekannt, wird nichts gebucht (gemeldet).
+    const cashMethod = expensePaymentRehomeMethod(payId, payMethod);
+    if (!cashMethod) {
+      console.warn(`[reconcileRepairSupplier] payment ${payId}: money account unknown ("${payMethod}") — not moved, nothing was booked`);
+      continue;
+    }
     safePost(`reconcileRepairSupplier:payment(${payId})`, () => {
       if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) {
         reverseSource('EXPENSE_PAYMENT', payId, now);
