@@ -26,6 +26,39 @@ export class ReturnActionRejected extends Error {
 export const RETURN_REFUND_METHODS = ['cash', 'bank', 'card', 'benefit', 'credit', 'other'] as const;
 export type ReturnRefundMethod = typeof RETURN_REFUND_METHODS[number];
 
+/** Die bisherige Voreinstellung der Maske — unverändert, wenn kein Store-Guthaben die Rechnung bezahlt hat. */
+export const RETURN_DEFAULT_REFUND_METHOD: ReturnRefundMethod = 'bank';
+
+export interface ReturnRefundSuggestion {
+  /** Die vorgeschlagene Erstattungsart (nur Vorbelegung — der Benutzer darf jede zulässige Art wählen). */
+  method: ReturnRefundMethod;
+  /** all_store_credit: ganz mit Store-Guthaben bezahlt; mixed_store_credit: auch mit anderem Geld/Verrechnung; none. */
+  basis: 'all_store_credit' | 'mixed_store_credit' | 'none';
+  /** Bezahlt mit Store-Guthaben (Zahlart 'credit') bzw. mit allem anderen (Geld, Darlehen, Anzahlung), BHD. */
+  storeCredit: number;
+  other: number;
+}
+
+/**
+ * Owner 10.11.2026 (Variante C) — welche Erstattungsart die Rückgabemaske VORSCHLÄGT. Eine reine Vorbelegung: Buchung,
+ * Erstattungsbetrag (`computeRefundSplit`) und die wählbaren Arten bleiben, wie sie sind.
+ *   • ganz mit Store-Guthaben bezahlt (nur Zahlart 'credit') → „Store Credit";
+ *   • gemischt (Store-Guthaben UND Geld oder Verrechnung) → keine Vorbelegung: eine Rückgabe hat EINE Erstattungsart, und
+ *     welcher Teil der Zahlung erstattet wird, ist nicht eindeutig — die Maske nennt die Anteile, der Benutzer wählt;
+ *   • sonst die bisherige Voreinstellung.
+ * Dieselbe Funktion am Primary und auf PC2 (die Zahlungen kommen aus derselben Auskunft `page.invoice_print.get`).
+ */
+export function suggestReturnRefund(payments: ReadonlyArray<{ method: string; amount: number }>): ReturnRefundSuggestion {
+  const f = (v: number): number => Math.round((Number(v) || 0) * 1000);
+  const creditF = payments.filter((p) => p.method === 'credit').reduce((s, p) => s + f(p.amount), 0);
+  const otherF = payments.filter((p) => p.method !== 'credit').reduce((s, p) => s + f(p.amount), 0);
+  const basis = creditF > 5 ? (otherF > 5 ? 'mixed_store_credit' : 'all_store_credit') : 'none';
+  return {
+    method: basis === 'all_store_credit' ? 'credit' : RETURN_DEFAULT_REFUND_METHOD,
+    basis, storeCredit: creditF / 1000, other: otherF / 1000,
+  };
+}
+
 /** Die Warenfolgen der Maske; die letzten beiden bietet sie nur an, wenn Kommissionsware zurückkommt. */
 export const RETURN_DISPOSITIONS: readonly ProductDisposition[] = ['IN_STOCK', 'UNDER_REPAIR', 'WRITE_OFF', 'RETURN_TO_OWNER', 'KEEP_AS_OWN'];
 export const CONSIGNMENT_DISPOSITIONS: readonly ProductDisposition[] = ['RETURN_TO_OWNER', 'KEEP_AS_OWN'];

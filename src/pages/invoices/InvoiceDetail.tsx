@@ -38,7 +38,7 @@ import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { grossUnitPrice } from '@/core/returns/return-lines';
-import { returnCreateBody, returnCreateInput } from '@/core/returns/return-create';
+import { returnCreateBody, returnCreateInput, suggestReturnRefund } from '@/core/returns/return-create';
 import { createReturnOnPrimary } from '@/core/returns/return-house';
 import { INVOICE_CANCEL_REFUND_METHODS, invoiceCancelBlocker, invoiceCancelBody } from '@/core/invoices/invoice-cancel';
 import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
@@ -329,7 +329,8 @@ export function InvoiceDetail() {
     }
     setReturnLines(init);
     setReturnDisposition('IN_STOCK');
-    setReturnRefundMethod('bank');
+    // Owner 10.11.2026 (Variante C) — ganz mit Store-Guthaben bezahlt → „Store Credit" vorgeschlagen (nur Vorbelegung).
+    setReturnRefundMethod(suggestReturnRefund(zahlungen).method);
     setReturnNotes('');
     setReturnReason('');
     setReturnRefundNow(true);
@@ -1846,7 +1847,7 @@ export function InvoiceDetail() {
                   const active = returnRefundMethod === m;
                   const label = m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank Transfer' : m === 'card' ? 'Card' : m === 'benefit' ? 'Benefit' : m === 'credit' ? 'Store Credit' : 'Other';
                   return (
-                    <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded"
+                    <button key={m} onClick={() => setReturnRefundMethod(m)} className="cursor-pointer rounded" data-return-refund-method={m} data-return-refund-active={active ? '1' : '0'}
                       style={{ padding: '7px 14px', fontSize: 12,
                         border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
@@ -1855,6 +1856,18 @@ export function InvoiceDetail() {
                   );
                 })}
               </div>
+              {(() => {
+                // Variante C — woher die Zahlung kam, sagt die Maske; die Wahl bleibt beim Benutzer.
+                const v = suggestReturnRefund(zahlungen);
+                if (v.basis === 'none') return null;
+                return (
+                  <p data-return-refund-suggestion={v.basis} style={{ fontSize: 11, color: '#6B7280', margin: '6px 0 0' }}>
+                    {v.basis === 'all_store_credit'
+                      ? 'This invoice was paid with store credit — Store Credit is suggested. A money refund can still be chosen.'
+                      : `Paid partly with store credit (${v.storeCredit.toFixed(3)} BHD) and partly otherwise (${v.other.toFixed(3)} BHD). A return has one refund method — choose it; Store Credit is not preselected because the refund cannot be assigned to the store-credit part.`}
+                  </p>
+                );
+              })()}
             </div>
 
             <div>
