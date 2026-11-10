@@ -61,7 +61,8 @@ import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
 import { Bhd } from '@/components/ui/Bhd';
-import { InvoiceOffsetList, SettleBalanceDialog } from '@/components/invoices/SettleBalance';
+import { InvoiceOffsetList } from '@/components/invoices/SettleBalance';
+import { SettleBalanceLauncher } from '@/components/parties/SettleBalanceLauncher';
 import { reverseDebtOffsetOnPrimary } from '@/core/offsets/party-offsets';
 import { NO_DEBT_OFFSET, type OffsetRef } from '@/core/offsets/party-offset-reads';
 import { movesPieceStock } from '@/core/lots/stock-contract';
@@ -185,7 +186,7 @@ export function InvoiceDetail() {
   );
   const zahlungen = seitenAuskunft?.payments ?? [];
   // CUSTOMER ACCOUNT B1 — aus derselben Auskunft: Verrechnungen dieser Rechnung und die möglichen Darlehen (am PC2 vom Primary).
-  const offsetView = { debtOffset: seitenAuskunft?.debtOffset ?? NO_DEBT_OFFSET, offsets: seitenAuskunft?.offsets ?? [] };
+  const offsetView = { debtOffset: seitenAuskunft?.debtOffset ?? NO_DEBT_OFFSET, offsets: seitenAuskunft?.offsets ?? [], settleSources: seitenAuskunft?.settleSources ?? 0 };
 
   // Plan §Sales — Save & Print: Detail-Page lädt, dann der A5-Beleg in den Druckdialog. Gedruckt wird
   // mit dem Stand beim Auslösen (Artikel und Kunde geladen), nicht mit dem des ersten Zeichnens.
@@ -667,7 +668,8 @@ export function InvoiceDetail() {
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
-                {canRecordPayment && perm.canRecordPayments && offsetView.debtOffset.candidates.length > 0 && (
+                {/* B2/B3 — derselbe Dialog wie im Kundenkonto: Store Credit, We Borrowed und offene Einkäufe (normal/Kommission). */}
+                {canRecordPayment && perm.canRecordPayments && offsetView.settleSources > 0 && (
                   <Button variant="secondary" data-settle-balance onClick={() => { w.clear(); setSettleOpen(true); }}><ArrowLeftRight size={14} /> Settle Balance</Button>
                 )}
                 {canMarkRepairPickedUp && (
@@ -1996,17 +1998,14 @@ export function InvoiceDetail() {
         </div>
       </Modal>
 
-      <SettleBalanceDialog
-        open={settleOpen}
-        invoice={{
-          id: invoice.id, label: formatInvoiceDisplayShort(invoice), status: invoice.status, revision: invoice.revision,
-          invoiceNumber: invoice.invoiceNumber, numberFinalizedAt: invoice.numberFinalizedAt ?? null,
-          issuedAt: invoice.issuedAt, createdAt: invoice.createdAt,
-        }}
-        choice={offsetView.debtOffset}
-        onClose={() => setSettleOpen(false)}
-        onDone={() => { setSettleOpen(false); loadInvoices(); }}
-      />
+      {settleOpen && invoice.customerId && (
+        <SettleBalanceLauncher
+          customerId={invoice.customerId}
+          focus={{ invoiceId: invoice.id }}
+          onClose={() => setSettleOpen(false)}
+          onDone={() => { setSettleOpen(false); loadInvoices(); }}
+        />
+      )}
 
       <NumberTypeDialog
         open={!!pendingFinalPayment}

@@ -31,7 +31,7 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
             COALESCE(SUM(p.remaining_amount), 0) AS offen,
             COALESCE(SUM(p.paid_amount), 0) AS bar,
             COALESCE(SUM((SELECT COALESCE(SUM(pp.amount), 0) FROM purchase_payments pp
-                           WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL)), 0) AS guthaben
+                           WHERE pp.purchase_id = p.id AND pp.method IN ('credit', 'offset') AND pp.voided_at IS NULL)), 0) AS guthaben
        FROM purchases p
       WHERE p.branch_id = ? AND p.source_consignment_id IS NOT NULL AND p.status != 'CANCELLED'
       GROUP BY p.source_consignment_id`,
@@ -48,7 +48,7 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
   for (const p of query(
     `SELECT p.id, COALESCE(p.paid_amount, 0) AS bar, COALESCE(p.remaining_amount, 0) AS offen,
             (SELECT COALESCE(SUM(pp.amount), 0) FROM purchase_payments pp
-              WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL) AS guthaben
+              WHERE pp.purchase_id = p.id AND pp.method IN ('credit', 'offset') AND pp.voided_at IS NULL) AS guthaben
        FROM purchases p
       WHERE p.branch_id = ? AND p.source_consignment_id IS NULL AND p.status != 'CANCELLED'
         AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL)`,

@@ -28,6 +28,7 @@ import { isClientMode } from '@/core/bridge/client-mode';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { currentBranchId } from '@/core/db/helpers';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { PURCHASE_HAS_OFFSET, purchaseHasActiveOffsets, purchaseHasOffsetMessage } from '@/core/purchases/purchase-settled';
 import { trackUpdate } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
 import {
@@ -250,9 +251,11 @@ function verlustAnlegen(con: Record<string, unknown>, supplierId: string, amount
 function einkaufPlanOf(purchaseId: string, branchId: string): EinkaufPlan {
   const row = query('SELECT * FROM purchases WHERE id = ? AND branch_id = ?', [purchaseId, branchId])[0];
   if (!row) nein('PURCHASE_NOT_FOUND', 'a purchase of this sale is not in this branch');
+  // B2/B3 — eine wirksame Verrechnung des Einkaufs mit einer Kundenrechnung zuerst aufheben (die Korrektur änderte ihn).
+  if (purchaseHasActiveOffsets(purchaseId)) nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage(`Correcting this sale (purchase ${s(row!.purchase_number)})`));
   const lines = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position, id', [purchaseId]);
   const creditF = F(query(
-    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method IN ('credit', 'offset') AND voided_at IS NULL`,
     [purchaseId],
   )[0]?.t);
   const cashF = F(row!.paid_amount);

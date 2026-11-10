@@ -63,6 +63,7 @@ function partnerUrteil<T>(fn: () => T): T {
   }
 }
 import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { PURCHASE_HAS_OFFSET, purchaseHasActiveOffsets, purchaseHasOffsetMessage } from './purchase-settled';
 import type { HouseCtx } from '@/core/payables/payables-house';
 import { purchaseCancelBlocker } from '@/core/purchases/purchase-consumption';
 import { herkunftUnklar, statusOhneBestand } from '@/core/purchases/purchase-undo';
@@ -142,7 +143,7 @@ function statusOf(totalF: number, settledF: number): PurchaseStatus {
 }
 
 const creditPaidF = (purchaseId: string): number =>
-  F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`, [purchaseId])[0]?.t);
+  F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method IN ('credit', 'offset') AND voided_at IS NULL`, [purchaseId])[0]?.t);
 
 /** Das Nein der Overpay-Helfer (Slice 4b) wird ein Nein DIESES Hauses — mit demselben Code. */
 function liveOrRedeemed<T>(fn: () => T): T {
@@ -325,6 +326,7 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   if (String(ret.status) !== 'DRAFT') throw nein('PURCHASE_RETURN_NOT_DRAFT', 'this supplier return is already confirmed');
   const purchaseId = String(ret.purchase_id ?? '');
   const p = livePurchase(purchaseId, ctx.branchId);
+  if (purchaseHasActiveOffsets(purchaseId)) throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage('A supplier return'));
   const supplierId = String(p.supplier_id ?? '');
   const returnNumber = String(ret.return_number ?? '');
   const method = (ret.refund_method as string | null) || null;
@@ -502,6 +504,7 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   const p = livePurchase(req.purchaseId, ctx.branchId);
   assertSeen(req.purchaseId, expectedRevision);
   if (String(p.status) === 'CANCELLED') throw nein('PURCHASE_CANCELLED', 'A cancelled purchase cannot be returned to the supplier.');
+  if (purchaseHasActiveOffsets(req.purchaseId)) throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage('A supplier return'));
   if (query(`SELECT id FROM purchase_returns WHERE purchase_id = ? AND status != 'CANCELLED' LIMIT 1`, [req.purchaseId])[0]) {
     throw nein('PURCHASE_RETURN_EXISTS', 'This purchase already has a supplier return.');
   }
@@ -725,6 +728,8 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
   assertSeen(purchaseId, opts.expectedRevision);
   const previousStatus = String(p.status ?? '');
   if (previousStatus === 'CANCELLED') throw nein('PURCHASE_ALREADY_CANCELLED', 'This purchase is already cancelled.');
+  // B2/B3 — eine wirksame Verrechnung mit einer Kundenrechnung zuerst aufheben (sonst würde sie zu Geld oder zerrisse).
+  if (purchaseHasActiveOffsets(purchaseId)) throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage('Cancelling this purchase'));
   if (opts.blockPaid && previousStatus === 'PAID') {
     throw nein('PURCHASE_PAID_NOT_CANCELLABLE', 'A fully paid purchase cannot be cancelled.');
   }

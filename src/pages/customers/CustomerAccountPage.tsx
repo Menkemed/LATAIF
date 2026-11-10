@@ -27,9 +27,11 @@ import { reverseSettlementOnPrimary, settlementReverseBody, type SettlementBooke
 
 /** Warum ein offener Posten, den LATAIF schuldet, in „Settle Balance" NICHT angeboten wird (Owner 09.11.2026: nur Store Credit + We Borrowed). */
 const NICHT_ANGEBOTEN: Partial<Record<AccountDoc['kind'], string>> = {
-  PURCHASE: 'purchases are not offset yet (waits for the accountant)',
-  SUPPLIER_EXPENSE: 'supplier expenses are not offset yet (waits for the accountant)',
-  CONSIGNMENT_PAYOUT: 'consignment payouts are not offset yet (waits for the accountant)',
+  // B2/B3 (Owner 10.11.2026) — Einkäufe (normal und Kommission) der verknüpften Rolle SIND angeboten; hier steht nur, wer
+  // trotzdem nicht passt (z. B. ohne Einkaufsbuchung oder nicht über die Verknüpfung, sondern nur über die Kommission gefunden).
+  PURCHASE: 'this purchase cannot be offset here (supplier role not linked, or no accounting entry)',
+  SUPPLIER_EXPENSE: 'supplier expenses (e.g. consignor loss) are not offset',
+  CONSIGNMENT_PAYOUT: 'this consignment purchase cannot be offset here (supplier role not linked, or no accounting entry)',
   PARTNER_PAYABLE: 'partner amounts are settled in the partner account',
   ORDER_DEPOSIT: 'bound to its order — applied with that order’s invoice',
   OPENING_ADVANCE: 'opening balance — waits for the accountant',
@@ -268,7 +270,9 @@ export function CustomerAccountPage() {
   const kannVerrechnen = !!settle && settle.invoices.length > 0 && settle.sources.length > 0;
   const nichtAngeboten = useMemo<NotOfferedItem[]>(() => (acc?.docs ?? [])
     .filter((d) => d.side === 'WE_OWE' && d.open > 0.0045 && NICHT_ANGEBOTEN[d.kind])
-    .map((d) => ({ key: d.key, number: d.number, label: d.kindLabel, open: d.open, why: NICHT_ANGEBOTEN[d.kind] as string })), [acc]);
+    // B2/B3 — ein angebotener Einkauf steht rechts in der Gruppe „Purchases", nicht hier.
+    .filter((d) => !(d.key.startsWith('purchase:') && (settle?.sources ?? []).some((x) => x.kind === 'PURCHASE' && `purchase:${x.id}` === d.key)))
+    .map((d) => ({ key: d.key, number: d.number, label: d.kindLabel, open: d.open, why: NICHT_ANGEBOTEN[d.kind] as string })), [acc, settle]);
   async function verrechnungAufheben(st: SettlementView) {
     setAktionFehler('');
     setGebucht(null);

@@ -35,6 +35,7 @@ import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED } from '@/core/finance/open-items-stamp';
 import { roleMayRunOp } from '@/core/bridge/command-permissions';
 import { createDebtOffsetInHouse } from './party-offsets';
+import { createPurchaseOffsetInHouse } from './purchase-offsets';
 import { OFFSET_PAYABLE_STORE_CREDIT, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 export { OFFSET_HAS_LATER_RETURN, assertOffsetUndoSafe } from './party-offset-restore';
 import {
@@ -180,6 +181,13 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
         },
         actor: { userId: userId || undefined, branchId: ctx.branchId },
       });
+    } else if (p.sourceKind === 'PURCHASE') {
+      // B2/B3 — die Einkaufsverrechnung (normal und Kommission) — mit der gemeinsamen Nummer.
+      const r = createPurchaseOffsetInHouse(
+        { invoiceId: p.invoiceId, purchaseId: p.sourceId, amount: B(p.amountF), offsetDate: tag, specialMarkOnFinal: special(p.invoiceId) },
+        { branchId: ctx.branchId, userId }, { settlementNumber, line },
+      );
+      paymentId = r.paymentId;
     } else {
       // Die B1-Hausfolge — mit der gemeinsamen Nummer.
       const r = createDebtOffsetInHouse(

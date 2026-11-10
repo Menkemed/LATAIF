@@ -4,7 +4,8 @@ import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, 
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { restoreOrderDepositForPayment } from '@/core/orders/order-deposit-restore';
-import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment, restoreStoreCreditOffsetForPayment } from '@/core/offsets/party-offset-restore';
+import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment, restorePurchaseOffsetForPayment, restoreStoreCreditOffsetForPayment } from '@/core/offsets/party-offset-restore';
+import { INVOICE_PURCHASE_OFFSET_METHOD } from '@/core/purchases/purchase-settled';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
@@ -194,6 +195,8 @@ export interface RecordPaymentTimes {
   receivedAt?: string;
   /** Technischer Erfassungszeitpunkt (created_at, Verknüpfung der Kartengebühr). Ohne Angabe: jetzt. */
   createdAt?: string;
+  /** B2/B3 — nur für 'purchase_offset': der Lieferant des Einkaufs (Gegenpartei der Soll-Zeile ACCOUNTS_PAYABLE). */
+  apSupplierId?: string;
 }
 
 interface InvoiceStore {
@@ -1725,7 +1728,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             createdAt: now,
           },
           invForLedger.customerId,
-          openRemainder
+          openRemainder,
+          opts?.apSupplierId ? { apSupplierId: opts.apSupplierId } : {},
         );
       };
       // Slice 2 — innerhalb einer Ambient-Ledger-Tx (editInvoice / applyCreditToInvoice)
@@ -2082,6 +2086,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (newMethod === DEBT_OFFSET_METHOD || oldMethod === DEBT_OFFSET_METHOD) {
       throw new Error('This payment is an offset with a loan — remove the offset (the loan opens again) instead of editing it.');
     }
+    // B2/B3 — ebenso die Verrechnung mit einem Einkauf: nur als Ganzes aufheben (der Einkauf ist danach wieder offen).
+    if (newMethod === INVOICE_PURCHASE_OFFSET_METHOD || oldMethod === INVOICE_PURCHASE_OFFSET_METHOD) {
+      throw new Error('This payment is an offset with a purchase — remove the offset (the purchase opens again) instead of editing it.');
+    }
     if (newMethod === 'credit' || oldMethod === 'credit') {
       throw new Error('Credit-Zahlungen koennen hier nicht bearbeitet werden.');
     }
@@ -2358,6 +2366,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen: das Darlehen wieder öffnen (Gegenzeile), die Verrechnung
     // auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht der ganze Vorgang zurück.
     if (delMethod === DEBT_OFFSET_METHOD) restoreDebtOffsetForPayment(paymentId, { reason: opts?.offsetReason });
+    // B2/B3 — eine Verrechnung mit einem Einkauf: die Einkaufszeile wird storniert (voided_at), Rest/Status des Einkaufs neu,
+    // die Verrechnung auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht der ganze Vorgang zurück.
+    if (delMethod === INVOICE_PURCHASE_OFFSET_METHOD) restorePurchaseOffsetForPayment(paymentId, { reason: opts?.offsetReason });
 
     // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
     // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei

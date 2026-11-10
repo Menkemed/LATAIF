@@ -104,14 +104,16 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
 
   // PURCHASE-EDIT D14 — eine stornierte Zahlung steht nicht auf dem Beleg (sie zählt nicht; der Verlauf bleibt in der App).
   const livePayments = purchase.payments.filter(p => !p.voidedAt);
+  // B2/B3 — eine Verrechnung mit einer Kundenrechnung ist kein Geld: eigene Zeile „Settled by offset STL-… — invoice …".
+  const offsetF = livePayments.filter(p => p.method === 'offset').reduce((a, p) => a + Math.round(p.amount * 1000), 0);
   const paymentsHtml = livePayments.length === 0 ? '' : `
     <div style="margin-top:18px">
       <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Payments</div>
       <table style="width:100%;border-collapse:collapse;font-size:11px">
         ${livePayments.map(p => `<tr style="border-bottom:1px solid #eee">
           <td style="padding:6px 4px;color:#333">${escapeHtml(p.paidAt)}</td>
-          <td style="padding:6px 4px;color:#666;text-transform:uppercase;font-size:10px">${escapeHtml(p.method)}</td>
-          <td style="padding:6px 4px;color:#666">${p.reference ? `Ref: ${escapeHtml(p.reference)}` : ''}</td>
+          <td style="padding:6px 4px;color:#666;text-transform:uppercase;font-size:10px">${p.method === 'offset' ? 'Offset · no cash' : escapeHtml(p.method)}</td>
+          <td style="padding:6px 4px;color:#666">${p.method === 'offset' ? `Settled by offset ${escapeHtml(p.reference ?? '')}${p.note ? ` — ${escapeHtml(p.note.replace(/^Offset \S+ · /, '').replace(/ · no cash$/, ''))}` : ''}` : p.reference ? `Ref: ${escapeHtml(p.reference)}` : ''}</td>
           <td style="padding:6px 4px;color:#16A34A;text-align:right;font-family:monospace">${fmtBhd(p.amount)} BHD</td>
         </tr>`).join('')}
       </table>
@@ -200,6 +202,7 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
   <div class="totals">
     <div class="row"><span>Total</span><span style="font-family:monospace">${fmtBhd(purchase.totalAmount)} BHD</span></div>
     <div class="row" style="color:#16A34A"><span>Paid</span><span style="font-family:monospace">${fmtBhd(purchase.paidAmount)} BHD</span></div>
+    ${offsetF > 0 ? `<div class="row" style="color:#6D28D9"><span>Settled by offset (no cash)</span><span style="font-family:monospace">${fmtBhd(offsetF / 1000)} BHD</span></div>` : ''}
     <div class="row ${purchase.remainingAmount > 0 ? 'outstanding' : ''} grand">
       <span>${purchase.remainingAmount > 0 ? 'Outstanding (Payable)' : 'Settled'}</span>
       <span style="font-family:monospace">${fmtBhd(purchase.remainingAmount)} BHD</span>

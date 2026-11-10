@@ -36,8 +36,10 @@ const fmtDate = (d: string): string => {
 
 export interface NotOfferedItem { key: string; number: string; label: string; open: number; why: string }
 
-export function SettleBalanceModal({ customerName, data, totals, notOffered, notice, onClose, onDone, onStale }: {
+export function SettleBalanceModal({ customerName, data, focus, totals, notOffered, notice, onClose, onDone, onStale }: {
   customerName: string;
+  /** B2/B3 — Einstieg von der Rechnung (nur sie vorgewählt) bzw. vom Einkauf (nur er vorgewählt); ohne: alles (Kundenkonto). */
+  focus?: { invoiceId?: string; sourceId?: string };
   /** Ein Hinweis von außen (z. B. „der Stand hat sich geändert, neu vorgeschlagen"). */
   notice?: string | null;
   data: SettleBalanceRead;
@@ -50,8 +52,8 @@ export function SettleBalanceModal({ customerName, data, totals, notOffered, not
   onStale: () => void;
 }) {
   const w = useSharedWrites();
-  const [invSel, setInvSel] = useState<Set<string>>(() => new Set(data.invoices.map((i) => i.id)));
-  const [srcSel, setSrcSel] = useState<Set<string>>(() => new Set(data.sources.map((s) => s.id)));
+  const [invSel, setInvSel] = useState<Set<string>>(() => new Set(focus?.invoiceId ? data.invoices.filter((i) => i.id === focus.invoiceId).map((i) => i.id) : data.invoices.map((i) => i.id)));
+  const [srcSel, setSrcSel] = useState<Set<string>>(() => new Set(focus?.sourceId ? data.sources.filter((s) => s.id === focus.sourceId).map((s) => s.id) : data.sources.map((s) => s.id)));
   const [date, setDate] = useState(today());
   const [step, setStep] = useState<'select' | 'numbers'>('select');
   const [choice, setChoice] = useState<Record<string, 'normal' | 'special'>>({});
@@ -193,12 +195,21 @@ export function SettleBalanceModal({ customerName, data, totals, notOffered, not
                 <div key={s.id}>
                   {kopf}
                   <label data-settle-source={s.number} data-settle-source-kind={s.kind} data-settle-on={on ? '1' : '0'} className="flex cursor-pointer"
+                    {...(s.kind === 'PURCHASE' ? { 'data-settle-source-purchase': s.consignment ? 'consignment' : 'normal' } : {})}
                     style={{ gap: 8, padding: '7px 8px', borderBottom: `1px solid ${LINE}`, background: on ? '#FAFBFC' : '#FFF', alignItems: 'flex-start' }}>
                     <input type="checkbox" checked={on} onChange={() => toggle(srcSel, s.id, setSrcSel)} style={{ marginTop: 3 }} />
                     <span style={{ flex: 1, minWidth: 0 }}>
-                      <b>{s.number}</b> <span style={{ color: GREY }}>· {s.label} · {fmtDate(s.date)}</span>
+                      <b>{s.number}</b>{' '}
+                      {s.kind === 'PURCHASE' && (
+                        <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 999, marginRight: 4,
+                          background: s.consignment ? 'rgba(124,58,237,0.10)' : 'rgba(15,15,16,0.06)', color: s.consignment ? '#6D28D9' : INK }}>
+                          {s.consignment ? 'Consignment purchase' : 'Purchase'}
+                        </span>
+                      )}
+                      <span style={{ color: GREY }}>· {s.kind === 'PURCHASE' ? `total ${fmt(F(s.total))}` : s.label} · {fmtDate(s.date)}</span>
                       <div style={{ fontSize: 11, color: GREY }}>
                         {!on ? 'excluded' : used === 0 ? 'not needed' : `uses ${fmt(used)} → open after ${fmt(F(s.open) - used)}`}
+                        {on && used > 0 && s.kind === 'PURCHASE' && (F(s.open) - used <= 5 ? ' · purchase → Paid' : ' · purchase → Partially paid')}
                       </div>
                     </span>
                     <span className="font-mono" style={{ whiteSpace: 'nowrap' }}><Bhd v={s.open} /></span>
@@ -244,7 +255,7 @@ export function SettleBalanceModal({ customerName, data, totals, notOffered, not
                     offenNach.set(p.invoiceId, vor - p.amountF);
                     return (
                       <tr key={k} data-settle-pair={`${s?.number}>${invNo(p.invoiceId)}`}>
-                        <td style={zelle}><b>{s?.number}</b> <span style={{ color: GREY }}>· {s ? SETTLE_SOURCE_LABEL[s.kind] : ''}</span></td>
+                        <td style={zelle}><b>{s?.number}</b> <span style={{ color: GREY }}>· {s ? (s.kind === 'PURCHASE' ? (s.consignment ? 'consignment purchase' : 'purchase') : SETTLE_SOURCE_LABEL[s.kind]) : ''}</span></td>
                         <td style={zelle}>→</td>
                         <td style={zelle}><b>{invNo(p.invoiceId)}</b></td>
                         <td style={zahl}>{fmt(vor)} → {fmt(vor - p.amountF)}</td>

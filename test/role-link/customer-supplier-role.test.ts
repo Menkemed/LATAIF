@@ -349,7 +349,12 @@ const gegenparteien = (db: Db): string => all(db,
     'core/parties/customer-account.ts',
     // CUSTOMER ACCOUNT A2 (P1) — die GLEICHNAMIGE Spalte des Partners (`partners.linked_customer_id`): Verknüpfen/Lösen im
     // Partner-Dialog und im Partner-Speicher. Keine Lieferanten-Verknüpfung, kein Ledger-, Rechnungs- oder Einkaufscode.
-    'components/partners/PartnerClientLink.tsx', 'stores/partnerStore.ts'];
+    'components/partners/PartnerClientLink.tsx', 'stores/partnerStore.ts',
+    // B2/B3 (Owner 10.11.2026) — die Einkaufsverrechnung bietet NUR Einkäufe der ausdrücklich verknüpften Lieferantenrolle an
+    // und prüft die Verknüpfung in der Buchung (kein Abgleich über Name/Telefon). Sonst liest weiter kein Code die Verknüpfung.
+    'core/offsets/party-settlement-reads.ts', 'core/offsets/purchase-offsets.ts',
+    // B2/B3 — der Einkauf öffnet „Settle Balance" nur für den AUSDRÜCKLICH verknüpften Kunden seines Lieferanten.
+    'pages/purchases/PurchaseDetail.tsx'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');

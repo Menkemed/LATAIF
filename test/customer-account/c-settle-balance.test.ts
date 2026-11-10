@@ -314,10 +314,11 @@ reload();
 {
   const r = lese(cA);
   ok(S(r.invoices.map((i) => i.id)) === S([I1, I2, I3]), 'P-1 links die offenen Rechnungen, älteste zuerst (die Guthaben-Rechnungen sind bezahlt)');
-  ok(S(r.sources.map((x) => x.id)) === S([SC1, SC2, L1, L2]) && S(r.sources.map((x) => x.kind)) === S(['STORE_CREDIT', 'STORE_CREDIT', 'LOAN_BORROWED', 'LOAN_BORROWED']),
-    `P-2 rechts Store Credit vor We Borrowed, je älteste zuerst; We Lent und Einkauf fehlen (${S(r.sources.map((x) => x.number + ':' + x.open))})`);
-  ok(konto(cA).docs.some((d) => d.key === `purchase:${purA}` && d.open > 0) && !r.sources.some((x) => x.id === purA),
-    'P-3 der Einkauf der Lieferantenrolle steht im Konto, wird aber nicht angeboten (B3 wartet auf den Buchhalter)');
+  // B2/B3 (Owner 10.11.2026) — seither ist der offene Einkauf der verknüpften Rolle die dritte Gruppe (Test: b23-purchase-offset).
+  ok(S(r.sources.map((x) => x.id)) === S([SC1, SC2, L1, L2, purA]) && S(r.sources.map((x) => x.kind)) === S(['STORE_CREDIT', 'STORE_CREDIT', 'LOAN_BORROWED', 'LOAN_BORROWED', 'PURCHASE']),
+    `P-2 rechts Store Credit vor We Borrowed vor Purchases, je älteste zuerst; We Lent fehlt (${S(r.sources.map((x) => x.number + ':' + x.open))})`);
+  ok(konto(cA).docs.some((d) => d.key === `purchase:${purA}` && d.open > 0) && r.sources.some((x) => x.id === purA && x.kind === 'PURCHASE'),
+    'P-3 der Einkauf der verknüpften Lieferantenrolle steht im Konto und wird seit B2/B3 als dritte Gruppe angeboten');
   const pairs = sr.planSettlement(r.invoices, r.sources, { invoiceIds: [I1, I2, I3], sourceIds: [SC1, SC2, L1, L2] });
   ok(S(pairs.map((p) => [p.invoiceId === I1 ? 'I1' : p.invoiceId === I2 ? 'I2' : 'I3', ({ [SC1]: 'SC1', [SC2]: 'SC2', [L1]: 'L1', [L2]: 'L2' } as Record<string, string>)[p.sourceId], p.amountF / 1000]))
     === S([['I1', 'SC1', 200], ['I1', 'SC2', 100], ['I1', 'L1', 200], ['I2', 'L1', 400], ['I2', 'L2', 400], ['I3', 'L2', 300]]),
@@ -560,7 +561,7 @@ reload();
   const reg = src('src/core/bridge/command-registry.ts');
   ok(reg.includes("'customers.settle_balance', 'customers.settlement_reverse',") && src('src-tauri/src/bridge.rs').includes('OP_CUSTOMERS_SETTLE_BALANCE,'),
     'Q-2 beide Befehle namentlich freigegeben (TS und Rust)');
-  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED']), 'Q-3 nur Store Credit und We Borrowed (Einkauf, Kommission, Partner, Anzahlung, Eröffnung, Gold nicht)');
+  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE']), 'Q-3 Store Credit, We Borrowed, seit B2/B3 Einkäufe (Partner, Anzahlung, Eröffnung, Gold nicht)');
 }
 
 void [loadDebtPaymentsFor, payS, banking, analytics, backfill, executeCommand, lc, fc, money, po, geld, stand, sale, gap, TODAY, invRev, HCTX, readFileSync, existsSync, zeilen, wirft, n];

@@ -282,7 +282,9 @@ const unbeteiligt = () => createHash('sha256').update(S([
   dbQ(BIZ_DB, 'SELECT id, amount, status, customer_id, direction FROM debts WHERE id IN (?, ?) ORDER BY id', [L3, LEND]),
   dbQ(BIZ_DB, 'SELECT id, first_name, last_name FROM customers ORDER BY id'),
 ])).digest('hex');
-const dialogZeilen = (c) => c.ev("return JSON.stringify([...document.querySelectorAll('[data-settle-loan]')].map(e=>e.getAttribute('data-settle-loan')));").then((x) => JSON.parse(x || '[]'));
+// B2/B3 — „Settle Balance" auf der Rechnung ist seither der gemeinsame Dialog (Store Credit, We Borrowed, Einkäufe; eine STL).
+const dialogZeilen = (c) => c.ev("return JSON.stringify([...document.querySelectorAll('[data-settle-source]')].map(e=>e.getAttribute('data-settle-source')));").then((x) => JSON.parse(x || '[]'));
+const summe = (c) => c.ev("return document.querySelector('[data-settle-total]')?.getAttribute('data-settle-total') ?? null;");
 const wert = (c, sel) => c.ev(`return document.querySelector(${S(sel)})?.value ?? null;`);
 const text = (c, sel) => c.ev(`return (document.querySelector(${S(sel)})?.textContent || '').replace(/\\s+/g, ' ').trim();`);
 
@@ -367,20 +369,23 @@ try {
   let stlA = '';
   {
     await gehFrisch(primary, `/invoices/${INV_A}`);
-    await waitFor(primary, '[data-settle-balance]', 45000);
-    ok(await mausKlick(primary, '[data-settle-balance]') === 'OK', 'A Maus auf „Settle Balance" (Rechnung A, Primary)');
-    await waitFor(primary, '[data-settle-dialog]', 20000);
+    await waitFor(primary, 'button[data-settle-balance]', 45000);
+    ok(await mausKlick(primary, 'button[data-settle-balance]') === 'OK', 'A Maus auf „Settle Balance" (Rechnung A, Primary)');
+    await waitFor(primary, 'div[data-settle-balance]', 30000);
     const zeilen = await dialogZeilen(primary);
     ok(S(zeilen) === S(['LOA-2026-000951', 'LOA-2026-000952']), `A angeboten nur L1, L2 (älteste zuerst) — nicht fremder Kunde, nicht We Lent (${S(zeilen)})`);
-    ok(await wert(primary, '[data-settle-amount]') === '600.000', 'A Vorschlag 600.000 (kleinerer Rest)');
-    const vor = await text(primary, '[data-settle-preview]');
-    ok(/Partially Paid · open 400\.000/.test(vor) && /Repaid · open 0\.000/.test(vor) && /no cash/.test(vor),
-      `A Vorschau vor dem Bestätigen: Rechnung Partially Paid 400, Darlehen Repaid, „no cash" (${vor.slice(0, 170)})`);
+    // Teilverrechnung nur mit L1: L2 mit der Maus abwählen ⇒ Vorschlag 600 (kleinerer Rest).
+    ok(await mausKlick(primary, '[data-settle-source="LOA-2026-000952"] input[type="checkbox"]') === 'OK', 'A Maus: L2 abgewählt');
+    await warteBis(primary, "document.querySelector('[data-settle-pairs=\"1\"]')", 5000);
+    ok(await summe(primary) === '600.000', 'A Vorschlag 600.000 (kleinerer Rest)');
+    const vor = await text(primary, 'div[data-settle-balance]');
+    ok(/600\.000 stays open|400\.000 stays open/.test(vor) && /open after 0\.000/.test(vor) && /no cash/.test(vor),
+      `A Vorschau vor dem Bestätigen: Rechnung bleibt 400 offen, Darlehen danach 0, „no cash" (${vor.slice(0, 170)})`);
     await foto(primary, 'b1-a-primary-dialog');
-    ok(await mausKlick(primary, '[data-settle-confirm]') === 'OK', 'A Maus auf „Confirm offset"');
+    ok(await mausKlick(primary, '[data-settle-confirm]') === 'OK', 'A Maus auf „Confirm settlement"');
     const da = await warteBis(primary, "document.querySelector('[data-invoice-offset]')", 30000);
     if (!da) {
-      console.log('      (A) Dialog sagt: ' + String(await primary.ev("return (document.querySelector('[data-settle-dialog]')?.innerText || '(kein Dialog)').slice(-400);")).replace(/\s+/g, ' '));
+      console.log('      (A) Dialog sagt: ' + String(await primary.ev("return (document.querySelector('div[data-settle-balance]')?.innerText || '(kein Dialog)').slice(-400);")).replace(/\s+/g, ' '));
       await foto(primary, 'b1-a-primary-after-confirm');
     }
     await dateiBis(() => dbQ(BIZ_DB, 'SELECT id FROM party_offsets WHERE receivable_id = ?', [INV_A]).length > 0);
@@ -406,23 +411,25 @@ try {
   {
     await syncRuhe();
     client = await lade(client, `/invoices/${INV_B}`);
-    await waitFor(client, '[data-settle-balance]', 45000);
-    ok(await mausKlick(client, '[data-settle-balance]') === 'OK', 'B PC2: Maus auf „Settle Balance" (Rechnung B)');
-    await waitFor(client, '[data-settle-dialog]', 20000);
+    await waitFor(client, 'button[data-settle-balance]', 45000);
+    ok(await mausKlick(client, 'button[data-settle-balance]') === 'OK', 'B PC2: Maus auf „Settle Balance" (Rechnung B)');
+    await waitFor(client, 'div[data-settle-balance]', 30000);
     const zeilen = await dialogZeilen(client);
     ok(S(zeilen) === S(['LOA-2026-000952']), `B PC2 (vom Primary): nur L2 — L1 ist getilgt (${S(zeilen)})`);
-    ok(await wert(client, '[data-settle-amount]') === '300.000', 'B Vorschlag 300.000');
-    ok(/^Paid · open 0\.000/.test(await text(client, '[data-settle-preview-invoice]')), 'B Vorschau: Rechnung wird bezahlt');
-    ok(await mausKlick(client, '[data-settle-confirm]') === 'OK', 'B Maus auf „Confirm offset"');
-    await waitFor(client, '[data-final-number-confirm]', 15000);
+    ok(await summe(client) === '300.000', 'B Vorschlag 300.000');
+    ok(/Fully paid: PINV-2026-000952/.test(await text(client, '[data-settle-summary]')), 'B Vorschau: Rechnung wird bezahlt');
+    ok(await mausKlick(client, '[data-settle-confirm]') === 'OK', 'B Maus auf „Confirm settlement"');
+    await waitFor(client, '[data-settle-numbers]', 15000);
     await foto(client, 'b1-b-pc2-final-number');
-    ok(await mausKlick(client, '[data-final-number-confirm]') === 'OK', 'B schließt die Rechnung → „Final Number Type" gefragt, Maus auf „Confirm" (normal)');
+    ok(await mausKlick(client, '[data-settle-numbers-confirm]') === 'OK', 'B schließt die Rechnung → Endnummer gefragt, Maus auf „Confirm settlement" (Normal)');
     const da = await warteBis(client, "document.querySelector('[data-invoice-offset]')", 45000);
     await dateiBis(() => rechnung(INV_B).status === 'FINAL');
-    const c = (await kommandos(client)).filter((x) => x.op === 'invoices.record_payment');
+    // B2/B3 — der gemeinsame Dialog bucht über customers.settle_balance (dieselbe B1-Hausfolge je Darlehen, eine STL).
+    const c = (await kommandos(client)).filter((x) => x.op === 'customers.settle_balance');
     const p0 = c[0]?.payload || {};
-    ok(c.length === 1 && p0.method === 'debt_offset' && p0.debtId === L2 && p0.amount === 300 && !('customerId' in p0) && !('invoiceNumber' in p0),
-      `B PC2 schickt EINEN Auftrag invoices.record_payment (debt_offset, Darlehen; Kunde/Nummer entscheidet der Primary) (${S(c.map((x) => x.payload))})`);
+    ok(c.length === 1 && S(p0.sourceIds) === S([L2]) && S(p0.invoiceIds) === S([INV_B]) && p0.expectedTotal === 300 && !('invoiceNumber' in p0),
+      `B PC2 schickt EINEN Auftrag customers.settle_balance (Darlehen, Rechnung, Summe; Nummer entscheidet der Primary) (${S(c.map((x) => x.payload))})`);
+    ok(dbQ(BIZ_DB, "SELECT method FROM payments WHERE invoice_id = ?", [INV_B]).every((r) => r.method === 'debt_offset'), 'B Rechnungszahlung „debt_offset" (B1-Hausfolge)');
     const rb = rechnung(INV_B);
     ok(da && rb.status === 'FINAL' && Number(rb.paid_amount) === 300 && !String(rb.invoice_number).startsWith('PINV') && Number(rb.special_mark || 0) === 0,
       `B Primary: Rechnung B FINAL mit Endnummer ${rb.invoice_number}`);

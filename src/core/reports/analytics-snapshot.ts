@@ -351,6 +351,8 @@ export function financeFor(ctx: BusinessReadContext) {
       if (m === 'order_deposit') continue;
       // CUSTOMER ACCOUNT B1 — die Verrechnung mit einem Darlehen ist kein Zahlungseingang (kein Geld).
       if (m === 'debt_offset') continue;
+      // B2/B3 — ebenso die Verrechnung mit einem Einkauf (kein Geld).
+      if (m === 'purchase_offset') continue;
       if (m === 'cash') cashReceived += amt;
       else if (m === 'bank_transfer') bankReceived += amt;
       else if (m === 'card') cardReceived += amt;

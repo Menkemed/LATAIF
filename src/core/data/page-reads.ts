@@ -25,6 +25,7 @@ import { productDisplayName } from '../products/display-name.ts';
 import { INVOICE_COMPANY_KEYS, invoiceCompany, type InvoiceA5Company } from '@/core/pdf/invoice-a5';
 import { purchaseBoundOf } from '@/core/products/purchase-bound';
 import { debtOffsetCandidatesFor, offsetsOfInvoice, type DebtOffsetChoice, type OffsetRef } from '@/core/offsets/party-offset-reads';
+import { settleBalanceFor } from '@/core/offsets/party-settlement-reads';
 
 const s = (v: unknown): string => (v as string) ?? '';
 const n = (v: unknown): number => Number(v ?? 0) || 0;
@@ -44,6 +45,8 @@ export interface InvoicePrintExtras {
   offsets: OffsetRef[];
   /** … und die Darlehen „We Borrowed" desselben Kunden, mit denen sie verrechnet werden kann (vom Primary geprüft). */
   debtOffset: DebtOffsetChoice;
+  /** B2/B3 — wie viele Gegenposten (Store Credit, We Borrowed, Einkäufe) „Settle Balance" für diese offene Rechnung anbietet. */
+  settleSources?: number;
 }
 
 export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): InvoicePrintExtras {
@@ -61,7 +64,16 @@ export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): In
   return {
     company: invoiceCompany((k) => werte.get(k)), paymentMethods: payments.map((p) => p.method), payments,
     offsets: offsetsOfInvoice(invoiceId, ctx.branchId), debtOffset: debtOffsetCandidatesFor(ctx, invoiceId),
+    settleSources: settleSourcesFor(ctx, invoiceId),
   };
+}
+
+/** B2/B3 — die Zahl der Gegenposten, die „Settle Balance" für DIESE offene Rechnung anbietet (0: kein Knopf). */
+function settleSourcesFor(ctx: BusinessReadContext, invoiceId: string): number {
+  const inv = query('SELECT customer_id FROM invoices WHERE id = ? AND branch_id = ?', [invoiceId, ctx.branchId])[0];
+  if (!inv?.customer_id) return 0;
+  const r = settleBalanceFor(ctx, String(inv.customer_id));
+  return r.invoices.some((i) => i.id === invoiceId) ? r.sources.length : 0;
 }
 
 // ── Übersicht: das Monatsziel ─────────────────────────────────────────────

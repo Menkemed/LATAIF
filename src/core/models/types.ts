@@ -1340,7 +1340,8 @@ export interface PurchasePayment {
   id: UUID;
   purchaseId: UUID;
   amount: number;
-  method: 'cash' | 'bank' | 'benefit' | 'credit';
+  /** B2/B3 — 'offset': Verrechnung mit einer Kundenrechnung derselben Person (keine eigene Buchung, kein Geld). */
+  method: 'cash' | 'bank' | 'benefit' | 'credit' | 'offset';
   paidAt: string;
   reference?: string;
   note?: string;

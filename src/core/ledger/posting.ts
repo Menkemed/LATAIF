@@ -612,10 +612,13 @@ function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
 // gegenüber dem Kunden erlischt), kein Geldkonto. Ohne diesen Fall fiele sie still auf BANK (default).
 // CUSTOMER ACCOUNT B1 — 'debt_offset' = die Verrechnung mit einem Darlehen „We Borrowed" desselben Kunden: Soll LOAN_PAYABLE
 // (LATAIFs Schuld gegenüber dem Kunden sinkt), kein Geldkonto. Die Rückzahlungszeile am Darlehen bucht nicht selbst.
-function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit' | 'debt_offset'): LedgerAccount {
+// B2/B3 — 'purchase_offset' = die Verrechnung mit einem offenen Einkauf derselben Person: Soll ACCOUNTS_PAYABLE mit
+// Gegenpartei LIEFERANT (postInvoicePayment setzt sie), kein Geldkonto. Die Zeile am Einkauf ('offset') bucht nicht selbst.
+function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit' | 'debt_offset' | 'purchase_offset'): LedgerAccount {
   switch (method) {
     case 'order_deposit': return 'CUSTOMER_DEPOSITS';
     case 'debt_offset':   return 'LOAN_PAYABLE';
+    case 'purchase_offset': return 'ACCOUNTS_PAYABLE';
     case 'cash':          return 'CASH';
     case 'bank_transfer': return 'BANK';
     case 'card':          return 'CARD_CLEARING';
@@ -948,7 +951,7 @@ export function postInvoicePayment(
   payment: Payment,
   customerId: string,
   openRemainder?: number,
-  opts: { occurredAt?: string } = {}
+  opts: { occurredAt?: string; apSupplierId?: string } = {}
 ): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
@@ -957,14 +960,20 @@ export function postInvoicePayment(
   const cashAcc = cashAccountFor(payment.method);
   const { arCredit, creditCredit } = computePaymentSplit(amount, openRemainder, payment.method);
   const meta = { invoiceId: payment.invoiceId, method: payment.method };
+  // B2/B3 — die Verrechnung mit einem Einkauf mindert die Verbindlichkeit beim LIEFERANTEN des Einkaufs (sonst liefe
+  // „AP je Lieferant" auseinander). Ohne Lieferant bucht sie nichts — nie still mit dem Kunden als Gegenpartei.
+  const purchaseOffset = (payment.method as string) === 'purchase_offset';
+  if (purchaseOffset && !opts.apSupplierId) {
+    throw new Error('postInvoicePayment: a purchase offset needs the supplier of the purchase (apSupplierId) — nothing was booked');
+  }
   const entries: LedgerEntryInput[] = [
     {
       account: cashAcc,
       direction: 'DEBIT',
       amount,
-      counterpartyType: 'CUSTOMER',
-      counterpartyId: customerId,
-      metadata: meta,
+      counterpartyType: purchaseOffset ? 'SUPPLIER' : 'CUSTOMER',
+      counterpartyId: purchaseOffset ? String(opts.apSupplierId) : customerId,
+      metadata: purchaseOffset ? { ...meta, offset: true, noCash: true } : meta,
     },
   ];
   if (arCredit > 0) {

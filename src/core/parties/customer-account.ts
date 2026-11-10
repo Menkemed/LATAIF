@@ -580,7 +580,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   const purchaseRows = query(
     `SELECT p.id, p.purchase_number, p.purchase_date, p.status, p.total_amount, p.paid_amount, p.supplier_id,
             p.source_consignment_id,
-            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid,
+            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method IN ('credit', 'offset') AND pp.voided_at IS NULL), 0) AS credit_paid,
             EXISTS (SELECT 1 FROM consignments cs WHERE cs.consignor_id = ?1 AND (cs.id = p.source_consignment_id
                       OR cs.id IN (SELECT pl.source_consignment_id FROM purchase_lines pl WHERE pl.purchase_id = p.id))) AS from_consignment
        FROM purchases p
@@ -593,12 +593,15 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   const purchasePays = new Map<string, AccountEventRaw[]>();
   if (purchaseRows.length) {
     for (const p of query(
-      `SELECT pp.purchase_id, pp.amount, pp.method, pp.paid_at FROM purchase_payments pp
+      `SELECT pp.purchase_id, pp.amount, pp.method, pp.paid_at, pp.reference FROM purchase_payments pp
         WHERE pp.voided_at IS NULL AND pp.purchase_id IN (${purchaseRows.map(() => '?').join(',')})`,
       purchaseRows.map((r) => txt(r.id)),
     )) {
       const list = purchasePays.get(txt(p.purchase_id)) ?? [];
-      list.push({ date: day(p.paid_at), text: txt(p.method) === 'credit' ? 'Paid with supplier credit' : `Paid · ${payLabel(p.method)}`, amountF: F(p.amount) });
+      // B2/B3 — eine Verrechnung mit einer Rechnung ist kein Geld: Nummer statt Zahlart.
+      const text = txt(p.method) === 'credit' ? 'Paid with supplier credit'
+        : txt(p.method) === 'offset' ? `Settled by offset ${txt(p.reference)} · no cash` : `Paid · ${payLabel(p.method)}`;
+      list.push({ date: day(p.paid_at), text, amountF: F(p.amount) });
       purchasePays.set(txt(p.purchase_id), list);
     }
   }
@@ -719,7 +722,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
       if (!byPhone && !byName) continue;
       const o = query(
         `SELECT COALESCE(SUM(MAX(0, p.total_amount - p.paid_amount
-                  - COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0))), 0) AS o
+                  - COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method IN ('credit', 'offset') AND pp.voided_at IS NULL), 0))), 0) AS o
            FROM purchases p WHERE p.supplier_id = ? AND p.branch_id = ? AND p.status NOT IN ('DRAFT', 'CANCELLED')`,
         [txt(s.id), branchId],
       )[0];

@@ -8,6 +8,8 @@ const LABELS: Readonly<Record<string, string>> = {
   credit: 'Store Credit', order_deposit: 'Order deposit',
   // CUSTOMER ACCOUNT B1 — Verrechnung mit einem Darlehen „We Borrowed" desselben Kunden (kein Geld).
   debt_offset: 'Debt offset',
+  // B2/B3 — Verrechnung mit einem offenen Einkauf derselben Person (kein Geld); am Einkauf heißt die Zeile 'offset'.
+  purchase_offset: 'Purchase offset', offset: 'Offset (no cash)',
 };
 
 export function paymentMethodLabel(method: string | null | undefined): string {

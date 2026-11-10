@@ -42,6 +42,7 @@ import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { trackChange } from '@/core/sync/sync-service';
+import { PURCHASE_HAS_OFFSET, PURCHASE_OFFSET_METHOD, purchaseHasActiveOffsets, purchaseHasOffsetMessage } from './purchase-settled';
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { purgeProductLeftovers, type LeftoverDb } from '@/core/products/product-leftovers';
 import { herkunftUnklar, statusOhneBestand } from './purchase-undo';
@@ -305,7 +306,7 @@ function kontext(purchaseId: string, branchId: string, now: string): Kontext {
   const purchaseDate = String(p.purchase_date ?? '');
   const vat10 = lines.some((l) => String(l.tax_scheme ?? '') === 'VAT_10' || Number(l.vat_amount ?? 0) > EPS);
   const creditPaidF = F(query(
-    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method IN ('credit', 'offset') AND voided_at IS NULL`,
     [purchaseId],
   )[0]?.t);
   const overpayCredit = !!query(
@@ -324,7 +325,7 @@ function kontext(purchaseId: string, branchId: string, now: string): Kontext {
     purchaseQuarter: nbrQuarterOfDate(purchaseDate)?.key ?? '',
     closed: new Set(closedVatQuarters(branchId).keys()),
     creditPaidF, overpayCredit,
-    livePayments: paymentsOf(purchaseId).filter((pp) => String(pp.method) !== 'credit'),
+    livePayments: paymentsOf(purchaseId).filter((pp) => String(pp.method) !== 'credit' && String(pp.method) !== PURCHASE_OFFSET_METHOD),
   };
 }
 
@@ -801,6 +802,11 @@ export function editPurchaseInHouse(
   if (adds.length > MAX_ADD_LINES) throw nein('PURCHASE_EDIT_ADD_TOO_MANY', `at most ${MAX_ADD_LINES} lines are added in one edit`);
   if (adds.length > 0) kinds.push('ADD_LINE');
   if (kinds.length === 0) throw nein('PURCHASE_EDIT_NOTHING', 'Nothing was changed.');
+  // B2/B3 — solange eine Verrechnung mit einer Kundenrechnung wirkt: kein Lieferanten-, Datums-, Preis-, Mengen- oder
+  // Zeilenwechsel (die Verrechnung zerrisse, oder der Einkauf fiele unter das Beglichene). Notiz/Mitarbeiter/Ausweis bleiben.
+  if (kinds.some((x) => !['NOTES', 'STAFF', 'IDENTITY_PHOTO'].includes(x)) && purchaseHasActiveOffsets(purchaseId)) {
+    throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage(`Changing ${kinds.filter((x) => !['NOTES', 'STAFF', 'IDENTITY_PHOTO'].includes(x)).join(', ').toLowerCase()}`));
+  }
 
   // ── 2. Die Regeln — alle VOR dem ersten Schreiben ──
   const check = purchaseEditCheck(purchaseId, ctx.branchId, ctx.now);
@@ -1250,6 +1256,10 @@ export function voidPurchasePaymentInHouse(
   const pay = query('SELECT * FROM purchase_payments WHERE id = ? AND purchase_id = ?', [paymentId, purchaseId])[0];
   if (!pay) throw nein('PAYMENT_NOT_FOUND', 'no such payment on this purchase');
   if (pay.voided_at) throw nein('PAYMENT_ALREADY_VOIDED', 'This payment is already voided.');
+  // B2/B3 — eine Verrechnung ist keine Zahlung: nur über die Rechnung bzw. das Kundenkonto aufheben (eine Buchung, ein Weg).
+  if (String(pay.method) === PURCHASE_OFFSET_METHOD) {
+    throw nein('PAYMENT_IS_OFFSET', 'This line is an offset with a client invoice (no cash) — remove the offset on the invoice or in the client account. Nothing was changed.');
+  }
   const paidAt = String(pay.paid_at ?? '');
   if (paidAt.slice(0, 10) < OPENING_CUTOFF_DATE) {
     throw nein('PURCHASE_EDIT_BEFORE_CUTOVER',
@@ -1269,7 +1279,7 @@ export function voidPurchasePaymentInHouse(
   const cashF = F(p.paid_amount);
   const newCashF = method === 'credit' ? cashF : Math.max(0, cashF - amountF);
   const creditF = F(query(
-    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method IN ('credit', 'offset') AND voided_at IS NULL`,
     [purchaseId],
   )[0]?.t);
   const newCreditF = method === 'credit' ? Math.max(0, creditF - amountF) : creditF;
@@ -1357,6 +1367,9 @@ export function correctPurchasePaymentDateInHouse(
   const pay = query('SELECT * FROM purchase_payments WHERE id = ? AND purchase_id = ?', [paymentId, purchaseId])[0];
   if (!pay) throw nein('PAYMENT_NOT_FOUND', 'no such payment on this purchase');
   if (pay.voided_at) throw nein('PAYMENT_ALREADY_VOIDED', 'This payment is voided — its date is not corrected.');
+  if (String(pay.method) === PURCHASE_OFFSET_METHOD) {
+    throw nein('PAYMENT_IS_OFFSET', 'This line is an offset with a client invoice — its date is the settlement date; remove and settle again instead. Nothing was changed.');
+  }
   const method = String(pay.method ?? '');
   if (method === 'credit') {
     throw nein('PAYMENT_DATE_CREDIT', 'A supplier-credit application carries the day it was applied — it is not re-dated.');

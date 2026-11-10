@@ -42,6 +42,7 @@ import { query, currentUserId } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { watchLedgerPosts, postSalesReturnCogs, hasLedgerEntries, reverseConsignmentPayouts } from '@/core/ledger/posting';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { PURCHASE_HAS_OFFSET, purchaseHasActiveOffsets, purchaseHasOffsetMessage } from '@/core/purchases/purchase-settled';
 import { trackUpdate } from '@/core/sync/track';
 import { trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { eventBus } from '@/core/events/event-bus';
@@ -197,7 +198,7 @@ export interface EinkaufLage { id: string; number: string; bezahltF: number; gut
 export function einkaufLage(purchaseId: string): EinkaufLage {
   const p = query('SELECT purchase_number, paid_amount, remaining_amount FROM purchases WHERE id = ?', [purchaseId])[0];
   const guthabenF = F(query(
-    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method IN ('credit', 'offset') AND voided_at IS NULL`,
     [purchaseId],
   )[0]?.t);
   const ret = query(`SELECT return_number FROM purchase_returns WHERE purchase_id = ? AND status != 'CANCELLED' LIMIT 1`, [purchaseId])[0];
@@ -261,6 +262,10 @@ function pruefeEinlieferer(
   const lagen = purchases.map(einkaufLage);
   let erstattungF = 0;
   for (const l of lagen) {
+    // B2/B3 — eine wirksame Verrechnung des Einkaufs mit einer Kundenrechnung zuerst aufheben (keine doppelte Auszahlung).
+    if (purchaseHasActiveOffsets(l.id)) {
+      throw nein(PURCHASE_HAS_OFFSET, `${nr}: ${purchaseHasOffsetMessage(`the consignor's purchase ${l.number} is settled by an offset — taking the item back`)}`);
+    }
     const zeile = nurZeile ? gemeinsameZeile(l.id, String(con.id), String(con.product_id ?? '')) : null;
     if (zeile) {
       if (zeile.zurueck) {

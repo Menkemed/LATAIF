@@ -155,7 +155,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     for (const p of purchases) {
       if (p.supplierId !== supplierId) continue;
       if (p.status === 'PAID' || p.status === 'CANCELLED') continue;
-      const creditF = (p.payments || []).filter((x) => x.method === 'credit').reduce((s, x) => s + toFils(x.amount), 0);
+      // B2/B3 — dieselbe Regel wie überall (purchase-settled): Guthaben + wirksame Verrechnung, nicht storniert.
+      const creditF = (p.payments || []).filter((x) => (x.method === 'credit' || x.method === 'offset') && !x.voidedAt).reduce((s, x) => s + toFils(x.amount), 0);
       const remainingF = toFils(p.totalAmount || 0) - toFils(p.paidAmount || 0) - creditF;
       if (remainingF <= 0) continue;
       const notes = p.notes || '';

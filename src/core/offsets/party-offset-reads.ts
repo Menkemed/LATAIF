@@ -74,11 +74,15 @@ export function storeCreditLabel(sourceType: unknown): string {
   return src ? `store credit · ${src}` : 'store credit';
 }
 
-const REF_SQL = `SELECT o.*, i.invoice_number AS inv_number, d.loan_number AS loan_number, cc.source_type AS credit_source
+const REF_SQL = `SELECT o.*, i.invoice_number AS inv_number, d.loan_number AS loan_number, cc.source_type AS credit_source,
+                          pu.purchase_number AS purchase_number,
+                          (pu.source_consignment_id IS NOT NULL OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = pu.id
+                             AND pl.source_consignment_id IS NOT NULL)) AS purchase_consignment
                    FROM party_offsets o
                    LEFT JOIN invoices i ON i.id = o.receivable_id
                    LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
-                   LEFT JOIN customer_credits cc ON cc.id = o.payable_id AND o.payable_type = 'STORE_CREDIT'`;
+                   LEFT JOIN customer_credits cc ON cc.id = o.payable_id AND o.payable_type = 'STORE_CREDIT'
+                   LEFT JOIN purchases pu ON pu.id = o.payable_id AND o.payable_type = 'PURCHASE'`;
 
 function ref(o: Record<string, unknown>): OffsetRef {
   return {
@@ -92,7 +96,9 @@ function ref(o: Record<string, unknown>): OffsetRef {
     settlementNumber: (o.settlement_number as string | null) ?? null,
     sourceLabel: String(o.payable_type ?? 'DEBT') === 'STORE_CREDIT'
       ? storeCreditLabel(o.credit_source)
-      : `loan ${String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8)}`,
+      : String(o.payable_type) === 'PURCHASE'
+        ? `${Number(o.purchase_consignment) === 1 ? 'consignment purchase' : 'purchase'} ${String(o.purchase_number ?? '') || String(o.payable_id).slice(0, 8)}`
+        : `loan ${String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8)}`,
   };
 }
 
@@ -104,6 +110,11 @@ export function offsetsOfInvoice(invoiceId: string, branchId: string): OffsetRef
 /** Alle Verrechnungen eines Darlehens dieser Filiale (wirksam und aufgehoben). */
 export function offsetsOfDebt(debtId: string, branchId: string): OffsetRef[] {
   return query(`${REF_SQL} WHERE o.payable_type = 'DEBT' AND o.payable_id = ? AND o.branch_id = ? ORDER BY o.created_at`, [debtId, branchId]).map(ref);
+}
+
+/** B2/B3 — alle Verrechnungen eines Einkaufs dieser Filiale (wirksam und aufgehoben) — für die Anzeige am Einkauf. */
+export function offsetsOfPurchase(purchaseId: string, branchId: string): OffsetRef[] {
+  return query(`${REF_SQL} WHERE o.payable_type = 'PURCHASE' AND o.payable_id = ? AND o.branch_id = ? ORDER BY o.created_at`, [purchaseId, branchId]).map(ref);
 }
 
 /** Die Verrechnung, die an einer Rechnungszahlung hängt (für „Remove offset"). */

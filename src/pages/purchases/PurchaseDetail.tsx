@@ -1,7 +1,7 @@
 // Plan §Purchases + §Purchase Returns — Detail page
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CreditCard, XCircle, RotateCcw, Printer, Edit3 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftRight, CreditCard, XCircle, RotateCcw, Printer, Edit3 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -37,6 +37,7 @@ import { latestBusinessDate } from '@/core/utils/business-date';
 // PURCHASE-EDIT — Bearbeiten (eigene Maske), eine falsch erfasste Zahlung stornieren (D14, nur Owner).
 import { PURCHASE_EDIT_OP } from '@/core/purchases/purchase-edit-house';
 import { usePermission } from '@/hooks/usePermission';
+import { SettleBalanceLauncher } from '@/components/parties/SettleBalanceLauncher';
 import { loadPurchaseIdentityPhoto, purchaseIdentityDataUrl, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 import { productDisplayName } from '@/core/products/display-name';
 
@@ -62,6 +63,8 @@ export function PurchaseDetail() {
   const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   const [showPayment, setShowPayment] = useState(false);
+  // B2/B3 — „Settle Balance" am Einkauf: offene Rechnungen des AUSDRÜCKLICH verknüpften Kunden (derselbe Dialog wie im Konto).
+  const [settleOpen, setSettleOpen] = useState(false);
   const [payAmount, setPayAmount] = useState('');
   const [payMethod, setPayMethod] = useState<'cash' | 'bank' | 'benefit' | 'credit'>('bank');
   const [payRef, setPayRef] = useState('');
@@ -255,6 +258,9 @@ export function PurchaseDetail() {
           </button>
           <div className="flex gap-2">
             {canPay && <Button variant="primary" onClick={() => { setPayFehler(''); setShowPayment(true); }} data-purchase-pay-open><CreditCard size={14} /> Add Payment</Button>}
+            {canPay && supplier?.linkedCustomerId && (
+              <Button variant="secondary" onClick={() => setSettleOpen(true)} data-purchase-settle-open><ArrowLeftRight size={14} /> Settle Balance</Button>
+            )}
             {canReturn && <Button variant="secondary" onClick={openReturnModal} data-purchase-return-open><RotateCcw size={14} /> Return to Supplier</Button>}
             <Button variant="ghost" onClick={async () => printPurchasePdf({
               purchase, supplier, products, categories,
@@ -470,8 +476,13 @@ export function PurchaseDetail() {
                   data-purchase-payment={p.id} {...(p.voidedAt ? { 'data-purchase-payment-voided': '' } : {})}>
                   <div>
                     <span style={{ fontSize: 13, color: '#0F0F10', textDecoration: p.voidedAt ? 'line-through' : 'none' }}>{p.paidAt}</span>
-                    <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 10 }}>{p.method.toUpperCase()}</span>
-                    {p.reference && <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>Ref: {p.reference}</span>}
+                    {p.method === 'offset' ? (
+                      <span style={{ fontSize: 11, color: '#6D28D9', marginLeft: 10 }} data-purchase-payment-offset={p.reference ?? ''}
+                        title={p.note || undefined}>OFFSET {p.reference ?? ''} · no cash{p.note ? ` · ${p.note.replace(/^Offset \S+ · /, '').replace(/ · no cash$/, '')}` : ''}</span>
+                    ) : (
+                      <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 10 }}>{p.method.toUpperCase()}</span>
+                    )}
+                    {p.reference && p.method !== 'offset' && <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>Ref: {p.reference}</span>}
                     {p.voidedAt && (
                       <span style={{ fontSize: 10, marginLeft: 10, padding: '1px 6px', borderRadius: 999, background: 'rgba(220,38,38,0.08)', color: '#B91C1C' }}
                         title={p.voidReason ? `Voided: ${p.voidReason}` : 'Voided'}>
@@ -481,13 +492,14 @@ export function PurchaseDetail() {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="font-mono" style={{ fontSize: 13, color: p.voidedAt ? '#9CA3AF' : '#16A34A', textDecoration: p.voidedAt ? 'line-through' : 'none' }}><Bhd v={p.amount}/> BHD</span>
-                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && p.method !== 'credit' && (
+                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && p.method !== 'credit' && p.method !== 'offset' && (
                       <Button variant="ghost" onClick={() => {
                         setDateFehler(''); setDateReason(''); setNewPayDate(String(p.paidAt).slice(0, 10));
                         setDatePay({ id: p.id, label: `${p.paidAt} · ${p.method.toUpperCase()} · ${fmt(p.amount)} BHD`, paidAt: String(p.paidAt).slice(0, 10) });
                       }} data-purchase-payment-date={p.id}>Edit date</Button>
                     )}
-                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && (
+                    {/* B2/B3 — eine Verrechnung wird auf der Rechnung bzw. im Kundenkonto aufgehoben, nie hier storniert. */}
+                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && p.method !== 'offset' && (
                       <Button variant="ghost" onClick={() => { setVoidFehler(''); setVoidReason(''); setVoidPay({ id: p.id, label: `${p.paidAt} · ${p.method.toUpperCase()} · ${fmt(p.amount)} BHD` }); }}
                         data-purchase-payment-void={p.id}>Void</Button>
                     )}
@@ -571,6 +583,14 @@ export function PurchaseDetail() {
       </div>
 
       {/* Payment Modal */}
+      {settleOpen && supplier?.linkedCustomerId && (
+        <SettleBalanceLauncher
+          customerId={supplier.linkedCustomerId}
+          focus={{ sourceId: purchase.id }}
+          onClose={() => setSettleOpen(false)}
+          onDone={() => { setSettleOpen(false); loadPurchases(); }}
+        />
+      )}
       <Modal open={showPayment} onClose={() => setShowPayment(false)} title="Add Payment" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Input required label={`AMOUNT (max ${fmt(purchase.remainingAmount)} BHD outstanding)`} type="number" step="0.01"

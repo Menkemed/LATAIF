@@ -189,7 +189,7 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
     `SELECT p.id, p.purchase_number, p.supplier_id, s.name AS supplier_name,
             p.total_amount, p.paid_amount, p.purchase_date, p.created_at,
             COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
-                       WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid
+                       WHERE pp.purchase_id = p.id AND pp.method IN ('credit', 'offset') AND pp.voided_at IS NULL), 0) AS credit_paid
      FROM purchases p
      LEFT JOIN suppliers s ON s.id = p.supplier_id
      WHERE p.status IN ('UNPAID', 'PARTIALLY_PAID')

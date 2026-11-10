@@ -21,6 +21,7 @@ import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { PURCHASE_OFFSET_METHOD, refreshPurchaseSettlementRow } from '@/core/purchases/purchase-settled';
 
 export const DEBT_OFFSET_METHOD = 'debt_offset';
 export const DEBT_OFFSET_SOURCE = 'offset';
@@ -47,6 +48,8 @@ const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
  */
 export const OFFSET_PAYABLE_DEBT = 'DEBT';
 export const OFFSET_PAYABLE_STORE_CREDIT = 'STORE_CREDIT';
+/** B2/B3 — ein offener Einkauf derselben Person (normal oder Kommission); Zeile am Einkauf: Zahlart 'offset'. */
+export const OFFSET_PAYABLE_PURCHASE = 'PURCHASE';
 
 /** Hat diese Rechnung eine wirksame Verrechnung? (Sperre für Kundenwechsel, Überzahlung durch Korrektur …) */
 export function invoiceHasActiveOffsets(invoiceId: string): boolean {
@@ -144,6 +147,56 @@ export function restoreStoreCreditOffsetForPayment(paymentId: string, opts: { re
     actor: { userId: userId || undefined, branchId: String(o.branch_id) },
   });
   return { offsetId: String(o.id), offsetNumber: nummer, creditId: String(o.payable_id), amount: amountF / 1000 };
+}
+
+export interface PurchaseOffsetRestored { offsetId: string; offsetNumber: string; purchaseId: string; purchasePaymentId: string; amount: number; purchaseStatus: string }
+
+/**
+ * B2/B3 — die Verrechnung „Einkauf → Rechnung" dieser Rechnungszahlung ('purchase_offset') aufheben, wenn die Zahlung
+ * verschwindet („Remove offset", ganze STL, Rechnungsstorno). Die Gegenbuchung der Zahlung MUSS stehen. Die Zeile am Einkauf
+ * wird storniert (voided_at — nie gelöscht, Verlauf bleibt), Rest und Status des Einkaufs nach der EINEN Regel neu, die
+ * Verrechnung REVERSED mit Zeit, Person und Grund. Ohne wirksame Verrechnung: nichts (idempotent).
+ */
+export function restorePurchaseOffsetForPayment(paymentId: string, opts: { reason?: string; userId?: string; now?: string } = {}): PurchaseOffsetRestored | null {
+  const o = query(
+    `SELECT * FROM party_offsets WHERE receivable_payment_id = ? AND payable_type = '${OFFSET_PAYABLE_PURCHASE}' AND status = 'ACTIVE'`,
+    [paymentId],
+  )[0];
+  if (!o) return null;
+  if (hasLedgerEntries('PAYMENT', paymentId) && !hasReversalFor('PAYMENT', paymentId)) {
+    throw new OffsetRestoreError('OFFSET_REVERSAL_NOT_BOOKED', 'the booking of the offset could not be reversed — nothing was changed');
+  }
+  const now = opts.now ?? new Date().toISOString();
+  let userId = opts.userId ?? '';
+  if (!userId) { try { userId = currentUserId(); } catch { userId = ''; } }
+  const db = getDatabase();
+  const nummer = String(o.offset_number);
+  const amountF = F(o.amount);
+  const purchaseId = String(o.payable_id);
+  const purchasePaymentId = String(o.payable_payment_id);
+  const reason = (opts.reason ?? '').trim() || 'invoice payment removed';
+  db.run(
+    `UPDATE purchase_payments SET voided_at = ?, voided_by = ?, void_reason = ? WHERE id = ? AND purchase_id = ? AND method = ? AND voided_at IS NULL`,
+    [now, userId || null, `Offset ${nummer} reversed — ${reason} · no cash`, purchasePaymentId, purchaseId, PURCHASE_OFFSET_METHOD],
+  );
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) {
+    throw new OffsetRestoreError('OFFSET_PURCHASE_LINE_CHANGED', 'the purchase line of the offset changed meanwhile — nothing was changed');
+  }
+  trackUpdate('purchase_payments', purchasePaymentId, { voidedAt: now, voidReason: `Offset ${nummer} reversed` });
+  const st = refreshPurchaseSettlementRow(purchaseId, now);
+  db.run(
+    `UPDATE party_offsets SET status = 'REVERSED', reversed_at = ?, reversed_by = ?, reverse_reason = ? WHERE id = ? AND status = 'ACTIVE'`,
+    [now, userId || null, reason, String(o.id)],
+  );
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new OffsetRestoreError('OFFSET_CHANGED', 'the offset changed meanwhile — nothing was changed');
+  trackUpdate('party_offsets', String(o.id), { status: 'REVERSED', reversedAt: now });
+  logAuditOrThrow({
+    module: 'Finance', entityType: 'party_offsets', entityId: String(o.id), action: 'STATUS_CHANGE', field: 'status',
+    oldValue: 'ACTIVE', newValue: { status: 'REVERSED', offsetNumber: nummer, amount: amountF / 1000, invoiceId: o.receivable_id, purchaseId, purchasePaymentId,
+      purchaseStatusAfter: st.status, purchaseOpenAfter: st.remainingAmount, reason },
+    actor: { userId: userId || undefined, branchId: String(o.branch_id) },
+  });
+  return { offsetId: String(o.id), offsetNumber: nummer, purchaseId, purchasePaymentId, amount: amountF / 1000, purchaseStatus: st.status };
 }
 
 export const OFFSET_HAS_LATER_RETURN = 'OFFSET_HAS_LATER_RETURN';
