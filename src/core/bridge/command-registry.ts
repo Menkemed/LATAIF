@@ -191,6 +191,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // CUSTOMER ACCOUNT C — „Settle Balance" im Kundenkonto (Rechnungen gegen Store Credit / We Borrowed, ohne Geld, eine
   // STL-Nummer, eine Transaktion) und die Aufhebung einer ganzen STL. Recht wie „Record Payment".
   'customers.settle_balance', 'customers.settlement_reverse',
+  // v0.8.101 (Owner 11.11.2026) — „Cancel return": EINE gebuchte Lieferantenrückgabe zurücknehmen, der Einkauf bleibt (nur Owner;
+  // Geld an den Lieferanten nur bestätigt, sonst Nein mit offenem Betrag).
+  'purchases.cancel_return',
 ];
 
 export interface CommandSpec {

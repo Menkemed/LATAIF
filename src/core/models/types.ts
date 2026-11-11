@@ -1479,6 +1479,10 @@ export interface PurchaseReturn {
   refundAmount: number;
   /** v0.8.101 — getrennt erstattete Zusatzkosten (Reparatur …), nicht Teil von refundAmount/totalAmount. */
   addedCostRefund?: number;
+  /** v0.8.101 — „Cancel return": wann, warum, und die bestätigte Rückzahlung an den Lieferanten (Kasse/Bank/Benefit). */
+  cancelledAt?: string;
+  cancelReason?: string;
+  refundRepaidAmount?: number;
   notes?: string;
   lines: PurchaseReturnLine[];
   createdAt: string;

@@ -36,16 +36,39 @@ Je zurückgegebener Zeile:
   - Erstattung der Zusatzkosten über den aktivierten Zusatzkosten;
   - Gewinn, also Erstattung über dem Buchwert (dafür ist kein Konto festgelegt);
   - Zusatzkosten-Erstattung an einer Zeile ohne Los.
-- **Rückgängig:**
-  - Der Storno des Einkaufs nimmt die Rückgabe vollständig zurück: Verlust, Zusatzkosten-Erstattung, Partnerbuchung, Los und Guthaben.
-  - Der Storno eines Einkaufs mit aktivierten Kosten bleibt gesperrt (bestehender Schutz `PURCHASE_LOT_COST_CHANGED`).
+- **Rückgängig:** über „Cancel return“, siehe nächster Abschnitt. Der Storno des ganzen Einkaufs bleibt unverändert; bei aktivierten Kosten ist er gesperrt (`PURCHASE_LOT_COST_CHANGED`).
 - **Neue Spalten:** `purchase_returns.added_cost_refund` und `purchase_return_lines.added_cost_refund`, additiv mit Vorgabe 0. Bestehende Rückgaben bleiben unverändert.
 - **Auswertungen:** Banking und Kennzahlen zählen die Zusatzkosten-Erstattung als Geldeingang.
+
+## Lieferantenrückgabe stornieren — „Cancel return“ (Owner 11.11.2026)
+
+Eine gebuchte Rückgabe wird einzeln zurückgenommen; der Einkauf bleibt. Der Knopf steht an der Rückgabe im Einkauf und ist nur für den Owner da, am Primary wie am PC2 (`purchases.cancel_return`). Ein Grund ist Pflicht.
+
+- **Rückbuchung:** Es läuft der bestehende Weg des Einkaufs-Stornos (`reverseConfirmedPurchaseReturnInHouse`). Danach stehen alle Konten, Lose, Einkaufssummen und Partneransprüche wie vor der Rückgabe.
+  - Die Rückgabebuchung wird mit heutigem Datum storniert: Lagerwert inklusive Zusatzkosten, Verlust, Vorsteuer, A/P und Erstattung. Die ursprüngliche VAT-Korrektur bleibt an ihrem Tag; heute muss das VAT-Quartal offen sein.
+  - Die Stücke kommen ins Los zurück, zum Einstand, mit dem sie gingen. Er wird seit diesem Stand je Rückgabezeile festgehalten (`unit_cost_at_return`).
+  - Partnerbuchungen der Rückgabe werden gegengebucht; ungenutztes Guthaben der Rückgabe wird entfernt.
+- **Geld:**
+  - Hat der Lieferant per Kasse, Bank oder Benefit erstattet, geht das Geld beim Storno an ihn zurück. Das ist eine echte Zahlung und geht nur mit ausdrücklicher Bestätigung im Dialog. Ohne Bestätigung kommt ein Nein mit Betrag und Weg (`PURCHASE_RETURN_REFUND_NOT_REPAID`).
+  - Die Rückzahlung läuft über denselben Weg wie die Erstattung und wird an der Rückgabe vermerkt (`refund_repaid_amount`, `cancelled_at`).
+  - Banking zeigt den Eingang weiter und die Rückzahlung als eigenen Ausgang.
+  - Lief die Erstattung als Lieferantenguthaben, fließt kein Geld; das ungenutzte Guthaben wird entfernt.
+- **Kontrolliert gesperrt, nichts geschrieben, mit konkretem offenem Ausgleich:**
+  - Guthaben schon verrechnet oder vom Lieferanten ausgezahlt (`PURCHASE_RETURN_CREDIT_USED`, nennt Einkauf oder Ausgabe und Betrag);
+  - Partnerbuchung nach der Rückgabe, etwa Auszahlung oder Verrechnung (`PURCHASE_RETURN_PARTNER_LATER`, nennt Partner, Art und Betrag);
+  - Einstand des Restloses nach der Rückgabe geändert (`PURCHASE_RETURN_COST_CHANGED`, nennt damals und jetzt);
+  - ältere Rückgabe ohne festgehaltenen Einstand, deren Los Zusatzkosten trägt (`PURCHASE_RETURN_COST_UNKNOWN`, Buchhalter);
+  - Rückgabe aus einer Kommission (`PURCHASE_RETURN_CONSIGNMENT`; das gehört zum Kommissionsweg);
+  - heutiges Quartal eingereicht (`VAT_PERIOD_FILED`);
+  - Rückgabe schon storniert (`PURCHASE_RETURN_ALREADY_CANCELLED`).
+- **Historie:** Die Rückgabe bleibt als CANCELLED stehen, mit Nummer, Zeilen und Beträgen. Das Protokoll trennt die Geldbewegung (`moneyRepaid`) von den Gegenbuchungen (Buchwert, Verlust, Zusatzkosten, Partner) und hält den Einkauf vorher und nachher fest. Danach ist eine neue Rückgabe möglich.
+- **Neue Spalten:** `purchase_returns.cancelled_at`, `cancelled_by`, `cancel_reason`, `refund_repaid_amount` und `purchase_return_lines.unit_cost_at_return`. Alle additiv; bestehende Rückgaben bleiben unverändert.
 
 ### Zur Entscheidung vorgelegt (nicht umgesetzt)
 
 1. **Gewinn bei der Rückgabe** (Erstattung über dem Buchwert): Dafür gibt es kein Konto. Heute wird die Rückgabe abgewiesen. Nötig wäre zum Beispiel ein Ertragskonto „Gewinn aus Lieferantenrückgabe“.
-2. **VAT auf getrennt erstattete Zusatzkosten:** Heute ohne VAT, weil die aktivierten Kosten keine Vorsteuer trugen. Weist ein echter Lieferantenbeleg VAT auf die Erstattung aus, braucht es dafür eine Regel. Die NBR-Regeln sind nicht geändert.
+2. **Storno einer falsch erfassten Rückgabe, bei der nie Geld kam:** Heute verlangt der Storno bei Kasse, Bank oder Benefit immer die bestätigte Rückzahlung. Ein eigener Weg „Erfassungsfehler, Geld kam nie“ würde den Eingang ohne Gegenzahlung aus Banking nehmen. Er ist nicht gebaut.
+3. **VAT auf getrennt erstattete Zusatzkosten:** Heute ohne VAT, weil die aktivierten Kosten keine Vorsteuer trugen. Weist ein echter Lieferantenbeleg VAT auf die Erstattung aus, braucht es dafür eine Regel. Die NBR-Regeln sind nicht geändert.
 
 ## Noch offen
 

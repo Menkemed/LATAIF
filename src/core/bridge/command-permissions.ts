@@ -275,6 +275,9 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   // weniger als derselbe Benutzer am Primary.
   'purchases.return_to_supplier': null,
   'purchases.cancel': null,
+  // v0.8.101 (Owner 11.11.2026) — „Cancel return" an einer gebuchten Lieferantenrückgabe: wie „Cancel Return" der
+  // Kundenretoure nur der Owner (Geld geht an den Lieferanten zurück, Verlust und Partneranteil werden gegengebucht).
+  'purchases.cancel_return': owner('PurchaseDetail: perm.isOwner (Cancel return)'),
   'purchases.dismiss_inbox': null,
   // PURCHASE-EDIT D11 — Notiz, Mitarbeiter, Ausweisfoto nach den bestehenden Einkaufsrechten (kein Tor, wie
   // `purchases.create`); die Finanzkorrektur und das Stornieren einer Zahlung nur der Owner (`perm.isOwner`) —

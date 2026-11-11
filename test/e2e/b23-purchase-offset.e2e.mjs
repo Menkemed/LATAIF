@@ -288,7 +288,7 @@ function seed() {
       paid_amount: 1000, remaining_amount: 0, purchase_date: '2026-10-05', created_at: now, updated_at: now });
     insert(db, 'purchase_lines', { id: PL_P, purchase_id: PUR_P, product_id: PROD_P, description: 'Joint piece', quantity: 1, unit_price: 1000, line_total: 1000,
       position: 0, tax_scheme: 'ZERO', vat_rate: 0, vat_amount: 0 });
-    insert(db, 'stock_lots', { id: 'b23-lot-p', branch_id, product_id: PROD_P, purchase_id: PUR_P, purchase_line_id: PL_P, qty_initial: 1, qty_remaining: 1,
+    insert(db, 'stock_lots', { id: 'b23-lot-p', branch_id, product_id: PROD_P, purchase_id: PUR_P, purchase_line_id: PL_P, qty_total: 1, qty_remaining: 1,
       unit_cost: 1000, status: 'ACTIVE', acquired_at: '2026-10-05T09:00:00.000Z', created_at: now });
     for (const [party, partner_id] of [['HOUSE', null], ['PARTNER', PARTNER_P]]) {
       insert(db, 'item_participations', { id: `b23-ip-${party}`, branch_id, purchase_id: PUR_P, purchase_line_id: PL_P, product_id: PROD_P, party, partner_id,
@@ -323,7 +323,7 @@ function seed() {
         total_amount: 1000, paid_amount: 1000, remaining_amount: 0, purchase_date: '2026-10-05', created_at: now, updated_at: now });
       insert(db, 'purchase_lines', { id: pl, purchase_id: pur, product_id: prod, description: 'Joint ' + sfx, quantity: 1, unit_price: 1000, line_total: 1000,
         position: 0, tax_scheme: 'ZERO', vat_rate: 0, vat_amount: 0 });
-      insert(db, 'stock_lots', { id: lot, branch_id, product_id: prod, purchase_id: pur, purchase_line_id: pl, qty_initial: 1, qty_remaining: 1,
+      insert(db, 'stock_lots', { id: lot, branch_id, product_id: prod, purchase_id: pur, purchase_line_id: pl, qty_total: 1, qty_remaining: 1,
         unit_cost: 1000, status: 'ACTIVE', acquired_at: '2026-10-05T09:00:00.000Z', created_at: now });
       for (const [party, partner_id, bp] of [['HOUSE', null, 10000 - pct * 100], ['PARTNER', PARTNER_Q, pct * 100]]) {
         insert(db, 'item_participations', { id: `b23-ip-${sfx}-${party}`, branch_id, purchase_id: pur, purchase_line_id: pl, product_id: prod, party, partner_id,
@@ -862,6 +862,56 @@ try {
     const gezeigt = await text(client, '[data-purchase-return-added-shown]');
     ok(/added costs/.test(gezeigt) && /50.000/.test(gezeigt), `K Einkauf zeigt an der Rückgabe „+ added costs 50“ (${gezeigt})`);
     await foto(client, 'b23-k-pc2-after-return');
+  }
+
+  // ── L PC2 (v0.8.101 „Cancel return", Owner 11.11.): die Rückgabe aus K vollständig zurücknehmen; der Einkauf bleibt.
+  //    Erst ohne bestätigte Rückzahlung (Nein mit Betrag und Weg, nichts geschrieben), dann bestätigt: Rolex wieder mit 1100
+  //    im Lager, Verlust 50 gegengebucht, 1050 per Bank an den Lieferanten zurück, Partneranteil −25 storniert. ──
+  {
+    await syncRuhe();
+    const soll = (acc) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0) AS s
+      FROM ledger_entries WHERE account = ?`, [acc])[0]?.s || 0)) / 1000;
+    const r3 = (x) => Math.round(x * 1000) / 1000;
+    const lose = () => Math.round(1000 * Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(qty_remaining * unit_cost), 0) AS s FROM stock_lots WHERE status != 'CANCELLED'")[0]?.s || 0)) / 1000;
+    const retK = dbQ(BIZ_DB, "SELECT id, return_number FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K])[0] || {};
+    const inv0 = soll('INVENTORY'), los0 = soll('INVENTORY_LOSS'), bank0 = soll('BANK'), lager0 = lose(), led0 = zahl('SELECT COUNT(*) AS n FROM ledger_entries');
+    client = await lade(client, `/purchases/${PUR_K}`);
+    await waitFor(client, `[data-purchase-return-cancel="${retK.id}"]`, 45000);
+    ok(await mausKlick(client, `[data-purchase-return-cancel="${retK.id}"]`) === 'OK', `L PC2: Maus auf „Cancel return" an ${retK.return_number}`);
+    await waitFor(client, '[data-purchase-return-cancel-dialog]', 15000);
+    const dlg = await text(client, '[data-purchase-return-cancel-dialog]');
+    ok(/1,?050\.000 BHD back by bank/.test(dlg.replace(/\s+/g, ' ')), `L Dialog nennt die Erstattung 1050 per Bank zur Bestätigung (${dlg.slice(0, 160)})`);
+    ok(await tippe(client, '[data-purchase-return-cancel-reason]', 'supplier sent the watch back') === 'OK', 'L Tastatur: Grund');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'purchases.cancel_return').length;
+    ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'L Maus auf „Cancel Return" (ohne Bestätigung der Rückzahlung)');
+    await sleep(2500);
+    const nein = await text(client, '[data-purchase-return-cancel-dialog] [data-save-error]').catch(() => '');
+    ok(/paid 1050\.000 BHD back by bank/.test(nein) && zahl('SELECT COUNT(*) AS n FROM ledger_entries') === led0
+      && dbQ(BIZ_DB, 'SELECT status FROM purchase_returns WHERE id = ?', [retK.id])[0]?.status === 'COMPLETED',
+      `L ohne Bestätigung: Nein mit offenem Betrag, nichts gebucht (${nein.slice(0, 160)})`);
+    await foto(client, 'b23-l-pc2-cancel-blocked', '[data-purchase-return-cancel-dialog]');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-repaid]') === 'OK', 'L Maus: „I have repaid 1,050.000 BHD to the supplier by bank" angehakt');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'L Maus auf „Cancel Return"');
+    await dateiBis(() => dbQ(BIZ_DB, 'SELECT status FROM purchase_returns WHERE id = ?', [retK.id])[0]?.status === 'CANCELLED');
+    const rk = dbQ(BIZ_DB, 'SELECT status, refund_repaid_amount, cancel_reason, refund_amount, added_cost_refund FROM purchase_returns WHERE id = ?', [retK.id])[0] || {};
+    ok(rk.status === 'CANCELLED' && Number(rk.refund_repaid_amount) === 1050 && rk.cancel_reason === 'supplier sent the watch back'
+      && Number(rk.refund_amount) === 1000 && Number(rk.added_cost_refund) === 50,
+      `L Rückgabe CANCELLED, Beträge bleiben (Historie), Rückzahlung 1050 vermerkt (${S(rk)})`);
+    ok(r3(soll('INVENTORY') - inv0) === 1100 && r3(lose() - lager0) === 1100 && r3(los0 - soll('INVENTORY_LOSS')) === 50 && r3(bank0 - soll('BANK')) === 1050,
+      `L Hauptbuch: Lager +1100 (= Lose), Verlust −50, Bank −1050 (${r3(soll('INVENTORY') - inv0)}/${r3(lose() - lager0)}/${r3(los0 - soll('INVENTORY_LOSS'))}/${r3(bank0 - soll('BANK'))})`);
+    const pk = dbQ(BIZ_DB, 'SELECT status, total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [PUR_K])[0] || {};
+    ok(pk.status === 'PAID' && Number(pk.total_amount) === 1000 && Number(pk.paid_amount) === 1000 && Number(pk.remaining_amount) === 0,
+      `L Einkauf wie vor der Rückgabe: 1000 bezahlt (${S(pk)})`);
+    ok(zahl("SELECT COUNT(*) AS n FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'SUPPLIER_RETURN' AND cancelled_at IS NULL", [PL_K]) === 0
+      && dbQ(BIZ_DB, "SELECT stock_status FROM products WHERE id = 'b23-prod-k'")[0]?.stock_status === 'in_stock',
+      'L Partneranteil am Verlust storniert, die Rolex ist wieder im Lager');
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'purchases.cancel_return');
+    ok(cmds.length === vor + 2 && cmds.at(-1)?.payload?.refundRepaid === true && cmds.at(-1)?.payload?.returnId === retK.id,
+      `L PC2 schickt purchases.cancel_return (erst ohne, dann mit bestätigter Rückzahlung; ${cmds.length - vor} Versuche)`);
+    await waitFor(client, `[data-purchase-return-repaid-shown="${retK.id}"]`, 30000).catch(() => null);
+    const gezeigt = await text(client, `[data-purchase-return-repaid-shown="${retK.id}"]`);
+    ok(/repaid 1,?050\.000 bank/.test(gezeigt), `L Einkauf zeigt an der stornierten Rückgabe „repaid 1,050.000 bank" (${gezeigt})`);
+    await foto(client, 'b23-l-pc2-after-cancel');
   }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));

@@ -399,14 +399,14 @@ marker('CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED');
 // ══ §8 — Registry und Matrix ══════════════════════════════════════════════════
 {
   // R6C — R6B selbst fügte keine Buchung hinzu; seither nur die elf aus R6C (hinter invoices.cancel).
-  ok(ALLOWED_MUTATIONS.length === 129 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-27) === 'production.complete' && ALLOWED_MUTATIONS.at(-26) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-20) === 'partner_items.change_partners'
+  ok(ALLOWED_MUTATIONS.length === 130 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-28) === 'production.complete' && ALLOWED_MUTATIONS.at(-27) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-21) === 'partner_items.change_partners'
     // BULK METAL V1
-    && ALLOWED_MUTATIONS.at(-19) === 'bulk_metals.write_off' && ALLOWED_MUTATIONS.at(-16) === 'bulk_metals.reverse_adjustment' && ALLOWED_MUTATIONS.at(-14) === 'stock_adjustments.cancel' && ALLOWED_MUTATIONS.at(-13) === 'stock_adjustments.add_old_stock',
+    && ALLOWED_MUTATIONS.at(-20) === 'bulk_metals.write_off' && ALLOWED_MUTATIONS.at(-17) === 'bulk_metals.reverse_adjustment' && ALLOWED_MUTATIONS.at(-15) === 'stock_adjustments.cancel' && ALLOWED_MUTATIONS.at(-14) === 'stock_adjustments.add_old_stock',
     `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + zwei STOCK CORRECTION (${ALLOWED_MUTATIONS.length})`);
   const rs = src('src-tauri/src/bridge.rs');
   const block = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   const n = (block.match(/^\s+OP_[A-Z0-9_]+,/gm) ?? []).length;
-  ok(n === 216, `REGISTRY Rust REMOTE_OPS = 214 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${n})`);
+  ok(n === 217, `REGISTRY Rust REMOTE_OPS = 214 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${n})`);
   const exakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && z.verdrahtet).length;
   const keineUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
   const enger = R4C_MATRIX.filter((z) => z.paritaet === 'enger').length;

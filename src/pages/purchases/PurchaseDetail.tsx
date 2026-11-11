@@ -32,7 +32,7 @@ import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payab
 // (`purchases.return_to_supplier` / `purchases.cancel`): am Primary die Hausfolge in einer Klammer,
 // auf PC2 der geprüfte Befehl mit der gesehenen Fassung. Summen, Erstattung, Bestand rechnet der Primary.
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
-import { savePurchaseCancel, savePurchasePaymentDate, savePurchasePaymentVoid, savePurchaseReturn } from '@/core/purchases/purchase-house';
+import { savePurchaseCancel, savePurchasePaymentDate, savePurchasePaymentVoid, savePurchaseReturn, savePurchaseReturnCancel } from '@/core/purchases/purchase-house';
 import { latestBusinessDate } from '@/core/utils/business-date';
 // PURCHASE-EDIT — Bearbeiten (eigene Maske), eine falsch erfasste Zahlung stornieren (D14, nur Owner).
 import { PURCHASE_EDIT_OP } from '@/core/purchases/purchase-edit-house';
@@ -87,6 +87,11 @@ export function PurchaseDetail() {
   const [newPayDate, setNewPayDate] = useState('');
   const [dateReason, setDateReason] = useState('');
   const [dateFehler, setDateFehler] = useState('');
+  // v0.8.101 — „Cancel return": welche Rückgabe, warum, und (bei Geld) die bestätigte Rückzahlung an den Lieferanten.
+  const [cancelRet, setCancelRet] = useState<{ id: string; number: string; geld: number; weg: string; guthaben: number } | null>(null);
+  const [cancelRetGrund, setCancelRetGrund] = useState('');
+  const [cancelRetRepaid, setCancelRetRepaid] = useState(false);
+  const [cancelRetFehler, setCancelRetFehler] = useState('');
   const perm = usePermission();
 
   useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
@@ -221,6 +226,17 @@ export function PurchaseDetail() {
     if (r.kind !== 'ok') { setCancelFehler(fehlertext(r)); return; }
     setCreditTick((t) => t + 1);
     setConfirmCancel(false);
+  }
+
+  // v0.8.101 — „Cancel return": EINE Buchung gegen die gesehene Fassung; das Modal schließt nur bei Erfolg.
+  async function handleCancelReturn() {
+    if (!purchase || !cancelRet || w.busy) return;
+    setCancelRetFehler('');
+    const r = await savePurchaseReturnCancel(viaWrites(w, PURCHASE_LIFECYCLE_OP.CANCEL_RETURN), purchase,
+      { returnId: cancelRet.id, reason: cancelRetGrund, refundRepaid: cancelRetRepaid });
+    if (r.kind !== 'ok') { setCancelRetFehler(fehlertext(r)); return; }
+    setCreditTick((t) => t + 1);
+    setCancelRet(null);
   }
 
   // D14 — „Void payment": EINE Buchung gegen die gesehene Fassung; die Zahlung bleibt als stornierte Zeile.
@@ -562,6 +578,27 @@ export function PurchaseDetail() {
                     {(r.addedCostRefund ?? 0) > 0 && (
                       <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }} data-purchase-return-added-shown={r.id}>+ added costs <Bhd v={r.addedCostRefund ?? 0}/></span>
                     )}
+                    {r.status === 'CANCELLED' && (r.refundRepaidAmount ?? 0) > 0 && (
+                      <span className="font-mono" style={{ fontSize: 12, color: '#DC2626' }} data-purchase-return-repaid-shown={r.id}>
+                        repaid <Bhd v={r.refundRepaidAmount ?? 0}/> {r.refundMethod}{r.cancelledAt ? ` · ${r.cancelledAt.slice(0, 10)}` : ''}
+                      </span>
+                    )}
+                    {r.status === 'CANCELLED' && r.cancelReason && (
+                      <span style={{ fontSize: 11, color: '#6B7280' }} title={r.cancelReason}>cancelled: {r.cancelReason}</span>
+                    )}
+                    {perm.isOwner && purchase.status !== 'CANCELLED' && (r.status === 'CONFIRMED' || r.status === 'COMPLETED') && (
+                      <button type="button" className="cursor-pointer" data-purchase-return-cancel={r.id} disabled={w.busy}
+                        style={{ fontSize: 11, color: '#DC2626', background: 'none', border: 'none', padding: 0, textDecoration: 'underline' }}
+                        onClick={() => {
+                          const geldweg = r.refundMethod && r.refundMethod !== 'credit';
+                          setCancelRet({ id: r.id, number: r.returnNumber, weg: r.refundMethod || '',
+                            geld: geldweg ? (r.refundAmount || 0) + (r.addedCostRefund ?? 0) : 0,
+                            guthaben: r.refundMethod === 'credit' ? (r.refundAmount || 0) + (r.addedCostRefund ?? 0) : 0 });
+                          setCancelRetGrund(''); setCancelRetRepaid(false); setCancelRetFehler('');
+                        }}>
+                        Cancel return
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -741,6 +778,36 @@ export function PurchaseDetail() {
           <Button variant="danger" onClick={() => void handleCancelPurchase()} disabled={w.busy} data-purchase-cancel-confirm>
             {w.busy ? 'Cancelling…' : 'Confirm Cancel'}
           </Button>
+        </div>
+      </Modal>
+
+      {/* v0.8.101 — „Cancel return": eine gebuchte Lieferantenrückgabe zurücknehmen; der Einkauf bleibt. Geld, das der Lieferant
+          zurückgezahlt hat, geht an ihn zurück — nur mit ausdrücklicher Bestätigung (sonst nennt das Nein den offenen Betrag). */}
+      <Modal open={!!cancelRet} onClose={() => setCancelRet(null)} title="Cancel Supplier Return" width={480}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }} data-purchase-return-cancel-dialog>
+          <p style={{ fontSize: 13, color: '#4B5563' }}>
+            Cancel <strong style={{ color: '#0F0F10' }}>{cancelRet?.number}</strong>? The returned items come back into stock at the book value they left with,
+            a loss booked with the return is reversed, partner shares are set back and the purchase amounts are restored. The return stays visible as cancelled.
+          </p>
+          {cancelRet && cancelRet.geld > 0 && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: '#0F0F10' }}>
+              <input type="checkbox" checked={cancelRetRepaid} onChange={e => setCancelRetRepaid(e.target.checked)} disabled={w.busy} data-purchase-return-cancel-repaid style={{ marginTop: 3 }} />
+              <span>The supplier paid <strong><Bhd v={cancelRet.geld}/> BHD</strong> back by {cancelRet.weg} with this return. I have repaid this amount to the supplier by {cancelRet.weg}{' '}
+                (it is booked as a repayment today).</span>
+            </label>
+          )}
+          {cancelRet && cancelRet.guthaben > 0 && (
+            <p style={{ fontSize: 12, color: '#6B7280' }}>The supplier credit from this return (<Bhd v={cancelRet.guthaben}/> BHD) is removed — only possible while it is unused.</p>
+          )}
+          <Input required label="REASON" value={cancelRetGrund} onChange={e => setCancelRetGrund(e.target.value)} disabled={w.busy} data-purchase-return-cancel-reason
+            placeholder="e.g. supplier sent the watch back" />
+          <WriteError text={cancelRetFehler} />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setCancelRet(null)} disabled={w.busy}>Close</Button>
+            <Button variant="danger" onClick={() => void handleCancelReturn()} disabled={w.busy || !cancelRetGrund.trim()} data-purchase-return-cancel-confirm>
+              {w.busy ? 'Cancelling…' : 'Cancel Return'}
+            </Button>
+          </div>
         </div>
       </Modal>
 

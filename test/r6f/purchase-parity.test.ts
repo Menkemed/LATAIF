@@ -353,10 +353,12 @@ const zaehler = (db: Db) => S({
     ok(perms.OPERATION_PERMISSIONS[op] === null, `SCOPE ${op} ohne Rollen-Tor (wie die Knöpfe der Maske)`);
   }
   // MEDIA-INBOX (b8aba6f) — der Posteingang des Telefons kam als vierter Befehl derselben Datei dazu.
-  ok(S([...cmds.PURCHASE_LIFECYCLE_OPS].sort()) === S([OP_CANCEL, OP_INBOX, OP_RET, 'purchase_inbox.create'].sort()), 'SCOPE die Befehlsdatei kennt genau diese vier');
+  // v0.8.101 (Owner 11.11.2026) — „Cancel return" (nur Owner) kam als fünfter Befehl derselben Datei dazu.
+  ok(S([...cmds.PURCHASE_LIFECYCLE_OPS].sort()) === S([OP_CANCEL, OP_INBOX, OP_RET, 'purchase_inbox.create', 'purchases.cancel_return'].sort()), 'SCOPE die Befehlsdatei kennt genau diese fünf');
+  ok(perms.permissionForOp('purchases.cancel_return')?.kind === 'isOwner', 'SCOPE purchases.cancel_return nur für den Owner (wie „Cancel Return" der Kundenretoure)');
   const reg = codeOf(src('src/core/bridge/purchase-lifecycle-commands.ts'));
-  ok((reg.match(/registerCommand\(/g) || []).length === 4 && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
-    'SCOPE vier ausdrückliche Anmeldungen, keine Schleife');
+  ok((reg.match(/registerCommand\(/g) || []).length === 5 && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
+    'SCOPE fünf ausdrückliche Anmeldungen, keine Schleife');
 }
 marker('CENTRAL_UI_R6F_PURCHASE_SCOPE_PROVED');
 

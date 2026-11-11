@@ -1348,6 +1348,7 @@
         "purchase_line_id",
         "quantity",
         "return_id",
+        "unit_cost_at_return",
         "unit_price"
       ],
       "required_fields": [],
@@ -1363,6 +1364,9 @@
       "allowed_fields": [
         "added_cost_refund",
         "branch_id",
+        "cancel_reason",
+        "cancelled_at",
+        "cancelled_by",
         "created_at",
         "created_by",
         "id",
@@ -1370,6 +1374,7 @@
         "purchase_id",
         "refund_amount",
         "refund_method",
+        "refund_repaid_amount",
         "return_date",
         "return_number",
         "status",

@@ -97,7 +97,7 @@ const BULK_READ = ['page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bul
 const STOCK_READ = ['stock_adjustments.product.get', 'page.old_stock.get'];
 const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_balances.get'];
 const MODULES: Record<string, number> = {
-  'purchase-lifecycle-commands': 4, 'order-lifecycle-commands': 4, 'consignment-lifecycle-commands': 2,
+  'purchase-lifecycle-commands': 5, 'order-lifecycle-commands': 4, 'consignment-lifecycle-commands': 2,
   'production-commands': 2, 'office-commands': 4,
 };
 const ADMIN_OPS = ['orders.cancel', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale'];
@@ -111,7 +111,7 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 129 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse']) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 88 && jetzt.length === 130 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ, 'page.opening_accounting.get', 'purchase.edit_check.get', 'page.cost_corrections.get']),
@@ -122,10 +122,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 216 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse']),
+  ok(rVor.length === 160 && rJetzt.length === 217 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 216 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 217 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;

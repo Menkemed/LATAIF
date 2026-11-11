@@ -30,6 +30,7 @@ import { assertHouseBranch } from './remote-create-support';
 import {
   PURCHASE_LIFECYCLE_OP, PurchaseLifecycleRejected, isRefundMethod, type RefundMethod,
   returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse, createPurchaseInboxInHouse,
+  cancelPurchaseReturnInHouse,
 } from '@/core/purchases/purchase-lifecycle-house';
 import {
   discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord,
@@ -41,9 +42,12 @@ export const OP_PURCHASES_RETURN_TO_SUPPLIER = PURCHASE_LIFECYCLE_OP.RETURN_TO_S
 export const OP_PURCHASES_CANCEL = PURCHASE_LIFECYCLE_OP.CANCEL;
 export const OP_PURCHASES_DISMISS_INBOX = PURCHASE_LIFECYCLE_OP.DISMISS_INBOX;
 export const OP_PURCHASE_INBOX_CREATE = PURCHASE_LIFECYCLE_OP.CREATE_INBOX;
+// v0.8.101 (Owner 11.11.2026) — „Cancel return": eine gebuchte Lieferantenrückgabe zurücknehmen (nur Owner).
+export const OP_PURCHASES_CANCEL_RETURN = PURCHASE_LIFECYCLE_OP.CANCEL_RETURN;
 
 export const PURCHASE_LIFECYCLE_OPS = [
   OP_PURCHASES_RETURN_TO_SUPPLIER, OP_PURCHASES_CANCEL, OP_PURCHASES_DISMISS_INBOX, OP_PURCHASE_INBOX_CREATE,
+  OP_PURCHASES_CANCEL_RETURN,
 ] as const;
 
 /** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. Der Client korrigiert und schickt neu. */
@@ -72,6 +76,10 @@ export const PURCHASE_LIFECYCLE_COMPUTED = {
     'reversedPayments', 'returnIds', 'cancelledReturns', 'orderId', 'orderLineIds', 'sourceOrderId', 'revertedOrderLines',
     'lots', 'lotIds', 'cancelledLots', 'stockStatus', 'quantity', 'supplierCreditIds', 'restoredSupplierCredits', ...LEDGER],
   dismissInbox: ['images', 'image', 'note', 'mediaId', 'mediaIds', 'stagingId', 'stagingIds', 'purchaseId', ...LEDGER],
+  // v0.8.101 — „Cancel return": Betrag, Weg, Guthaben, Lager und Partner findet der Primary selbst.
+  cancelReturn: ['returnNumber', 'supplierId', 'refundAmount', 'addedCostRefund', 'refundMethod', 'moneyRepaid', 'repaidMethod',
+    'supplierCreditId', 'supplierCreditRemoved', 'restoredBookValue', 'reversedLoss', 'partnerMovements', 'lots', 'lotIds',
+    'totalAmount', 'paidAmount', 'remainingAmount', 'purchaseStatus', 'cancelledAt', 'cancelledBy', ...LEDGER],
 } as const;
 
 const isPlain = (v: unknown): v is Record<string, unknown> =>
@@ -151,6 +159,20 @@ export function parsePurchaseCancel(raw: unknown): PurchaseCancelCommand {
   return { purchaseId: idOf(r.purchaseId, 'purchaseId'), expectedRevision: revisionOf(r.expectedRevision) };
 }
 
+export interface PurchaseReturnCancelCommand { purchaseId: string; returnId: string; expectedRevision: number; reason: string; refundRepaid: boolean }
+
+export function parsePurchaseReturnCancel(raw: unknown): PurchaseReturnCancelCommand {
+  const r = strict(raw, ['purchaseId', 'returnId', 'expectedRevision', 'reason', 'refundRepaid'], PURCHASE_LIFECYCLE_COMPUTED.cancelReturn);
+  if (typeof r.reason !== 'string' || !r.reason.trim()) {
+    throw new PurchaseLifecyclePayloadError('A reason is required to cancel a supplier return.', 'PURCHASE_RETURN_REASON_REQUIRED');
+  }
+  if (r.refundRepaid !== undefined && typeof r.refundRepaid !== 'boolean') throw new PurchaseLifecyclePayloadError('refundRepaid must be true or false');
+  return {
+    purchaseId: idOf(r.purchaseId, 'purchaseId'), returnId: idOf(r.returnId, 'returnId'), expectedRevision: revisionOf(r.expectedRevision),
+    reason: r.reason.trim(), refundRepaid: r.refundRepaid === true,
+  };
+}
+
 export interface InboxDismissCommand { inboxId: string }
 
 export function parseInboxDismiss(raw: unknown): InboxDismissCommand {
@@ -191,6 +213,19 @@ export function runPurchaseCancel(deps: EngineDeps, identity: CommandIdentity, r
     const out = urteil(() => cancelPurchaseInHouse(req.purchaseId, identity.branchId, {
       expectedRevision: req.expectedRevision, blockPaid: true, now: deps.now(),
     }));
+    return { ...out };
+  });
+}
+
+/** v0.8.101 — „Cancel return" vom zweiten Rechner: dieselbe Hausfolge, dieselben Sperren, in der Transaktion des Auftrags. */
+export function runPurchaseReturnCancel(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parsePurchaseReturnCancel(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
+    const out = urteil(() => cancelPurchaseReturnInHouse({
+      purchaseId: req.purchaseId, returnId: req.returnId, reason: req.reason, refundRepaid: req.refundRepaid,
+    }, ctx, req.expectedRevision));
     return { ...out };
   });
 }
@@ -297,4 +332,5 @@ async function execute(run: Run, op: string, payload: unknown, actor?: CommandAc
 registerCommand(OP_PURCHASES_RETURN_TO_SUPPLIER, { kind: 'mutation', handler: (p, a) => execute(runPurchaseReturn, OP_PURCHASES_RETURN_TO_SUPPLIER, p, a) });
 registerCommand(OP_PURCHASES_CANCEL, { kind: 'mutation', handler: (p, a) => execute(runPurchaseCancel, OP_PURCHASES_CANCEL, p, a) });
 registerCommand(OP_PURCHASES_DISMISS_INBOX, { kind: 'mutation', handler: (p, a) => execute(runInboxDismiss, OP_PURCHASES_DISMISS_INBOX, p, a) });
+registerCommand(OP_PURCHASES_CANCEL_RETURN, { kind: 'mutation', handler: (p, a) => execute(runPurchaseReturnCancel, OP_PURCHASES_CANCEL_RETURN, p, a) });
 registerCommand(OP_PURCHASE_INBOX_CREATE, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runInboxCreate(d, i, r), OP_PURCHASE_INBOX_CREATE, p, a) });

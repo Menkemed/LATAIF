@@ -67,12 +67,16 @@ import { PURCHASE_HAS_OFFSET, purchaseHasActiveOffsets, purchaseHasOffsetMessage
 import type { HouseCtx } from '@/core/payables/payables-house';
 import { purchaseCancelBlocker } from '@/core/purchases/purchase-consumption';
 import { herkunftUnklar, statusOhneBestand } from '@/core/purchases/purchase-undo';
+import { correctionDateIssue } from '@/core/ledger/correction-dates';
+import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
 
 /** Die drei Buchungen dieses Bereichs — Maske (useSharedWrite) und Fernbefehl benutzen DIESE Namen. */
 export const PURCHASE_LIFECYCLE_OP = {
   RETURN_TO_SUPPLIER: 'purchases.return_to_supplier',
   CANCEL: 'purchases.cancel',
   DISMISS_INBOX: 'purchases.dismiss_inbox',
+  /** v0.8.101 (Owner 11.11.2026) — EINE gebuchte Lieferantenrückgabe zurücknehmen; der Einkauf bleibt. Nur Owner. */
+  CANCEL_RETURN: 'purchases.cancel_return',
   /**
    * MEDIA-INBOX — das Telefon legt einen Posteingangs-Eintrag an.
    *
@@ -283,6 +287,9 @@ export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput
       unitPrice: l.unitPrice,
       lineTotalF: F(l.quantity * l.unitPrice),
       addedF: F(l.addedCostRefund ?? 0),
+      // v0.8.101 — der Einstand je Stück, mit dem die Stücke gehen (die Bestätigung schreibt ihn noch einmal fest).
+      unitCost: query(`SELECT unit_cost FROM stock_lots WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+                        ORDER BY acquired_at ASC, id ASC LIMIT 1`, [l.purchaseLineId])[0]?.unit_cost as number | undefined,
     };
   });
   const totalF = lines.reduce((s, l) => s + l.lineTotalF, 0);
@@ -296,9 +303,10 @@ export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput
   );
   for (const l of lines) {
     db.run(
-      `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total, added_cost_refund)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [l.id, id, l.purchaseLineId, l.productId, l.quantity, l.unitPrice, B(l.lineTotalF), B(l.addedF)]
+      `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total, added_cost_refund, unit_cost_at_return)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [l.id, id, l.purchaseLineId, l.productId, l.quantity, l.unitPrice, B(l.lineTotalF), B(l.addedF),
+       l.unitCost === undefined || l.unitCost === null ? null : Number(l.unitCost)]
     );
   }
   trackInsert('purchase_returns', id, { returnNumber, purchaseId: input.purchaseId, total: B(totalF) });
@@ -349,7 +357,7 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   // Gebucht (unten, unter der Rückgabe): Soll Erstattungskonto / Haben INVENTORY (Zusatzkosten), Soll INVENTORY_LOSS / Haben
   // INVENTORY (Verlust) — danach steht kein Lagerwert der Stücke mehr. Ein GEWINN (Erstattung über dem Buchwert) hat kein
   // festgelegtes Konto: abgewiesen, nichts geschrieben.
-  const bewertung = new Map<string, { carryingF: number; netF: number; addedF: number; addedCostsF: number; lossF: number }>();
+  const bewertung = new Map<string, { carryingF: number; netF: number; addedF: number; addedCostsF: number; lossF: number; unitCost: number }>();
   let addedRefundF = 0;
   let lossF = 0;
   for (const line of lines) {
@@ -385,7 +393,7 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
     // Ein Rest bis RUNDUNG_F stammt aus der Rundung (Vorsteuer-Anteil auf 3 Stellen, Einstand ungerundet) — kein Verlust,
     // keine 0,001-Buchung (so stand es auch vor v0.8.101).
     const lineLossF = residualF > RUNDUNG_F ? residualF : 0;
-    bewertung.set(String(line.id), { carryingF, netF, addedF: lineAddedF, addedCostsF, lossF: lineLossF });
+    bewertung.set(String(line.id), { carryingF, netF, addedF: lineAddedF, addedCostsF, lossF: lineLossF, unitCost: Number(lot.unit_cost) || 0 });
     addedRefundF += lineAddedF;
     lossF += lineLossF;
   }
@@ -452,6 +460,8 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   const finalStatus: 'CONFIRMED' | 'COMPLETED' =
     (plan.refundF === 0 || (method && method !== 'credit')) ? 'COMPLETED' : 'CONFIRMED';
   db.run(`UPDATE purchase_returns SET status = ?, refund_amount = ?, added_cost_refund = ? WHERE id = ?`, [finalStatus, B(plan.refundF), B(addedRefundF), returnId]);
+  // v0.8.101 — der Einstand je zurückgegebenem Stück: ein späterer Storno bringt die Stücke genau zu diesem Wert zurück.
+  for (const [lineId, v] of bewertung) db.run('UPDATE purchase_return_lines SET unit_cost_at_return = ? WHERE id = ?', [v.unitCost, lineId]);
   if (plan.refundF > 0 && method && method !== 'credit') trackRefund('purchase_returns', returnId, B(plan.refundF), method);
 
   // Plan §8 #3 — Erstattung als Guthaben beim Lieferanten (gegen kuenftige Kaeufe verrechenbar).
@@ -754,6 +764,236 @@ export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: str
 
   // Slice 4b — Summen restauriert → Overpay-Gutschrift nachziehen (nach der Return-Credit-Entfernung).
   if (p) liveOrRedeemed(() => reconcilePurchaseOverpayCredit(purchaseId));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v0.8.101 (Owner 11.11.2026) — „Cancel return": EINE gebuchte Lieferantenrückgabe zurücknehmen; der Einkauf bleibt.
+//
+// Die Umkehr selbst ist der bestehende Weg (`reverseConfirmedPurchaseReturnInHouse`, derselbe wie im Einkaufs-Storno):
+// Partnerbuchungen der Rückgabe gegengebucht, die Rückgabebuchung storniert (Lagerwert inkl. Zusatzkosten, Verlust,
+// Vorsteuer, A/P, Erstattung), die Stücke zurück ins Los, Einkaufssummen, ungenutztes Guthaben der Rückgabe entfernt.
+// Diese Folge prüft VORHER — nichts wird geschrieben, solange etwas offen ist — und nennt den konkreten offenen Ausgleich:
+//   • Geld (Kasse/Bank/Benefit), das der Lieferant mit der Rückgabe zurückgezahlt hat, geht beim Storno an ihn zurück.
+//     Das ist eine ECHTE Zahlung — nur mit ausdrücklicher Bestätigung (`refundRepaid`), sonst Nein mit Betrag und Weg.
+//     Die Rückgabe vermerkt sie (`refund_repaid_amount`, `cancelled_at`); Banking zeigt Eingang UND Rückzahlung.
+//   • Ein Lieferantenguthaben aus der Rückgabe darf nicht verbraucht oder ausgezahlt sein (wo und wieviel, steht im Nein).
+//   • Partnerbuchungen NACH der Rückgabe (Auszahlung, Verrechnung …) zuerst zurücknehmen — keine doppelte Auszahlung.
+//   • Der Einstand des Loses muss derselbe sein wie bei der Rückgabe (sonst kämen die Stücke zum falschen Wert zurück).
+//   • Rückgaben aus einer Kommission bleiben beim Kommissionsweg; die Gegenbuchung heute braucht ein offenes VAT-Quartal.
+// Die Rückgabe bleibt als CANCELLED mit Nummer, Zeilen und Beträgen stehen (Historie); das Protokoll nennt alles.
+// ════════════════════════════════════════════════════════════════════════════
+
+export const PURCHASE_RETURN_NOT_FOUND = 'PURCHASE_RETURN_NOT_FOUND';
+export const PURCHASE_RETURN_ALREADY_CANCELLED = 'PURCHASE_RETURN_ALREADY_CANCELLED';
+export const PURCHASE_RETURN_NOT_BOOKED = 'PURCHASE_RETURN_NOT_BOOKED';
+export const PURCHASE_RETURN_REASON_REQUIRED = 'PURCHASE_RETURN_REASON_REQUIRED';
+export const PURCHASE_RETURN_REFUND_NOT_REPAID = 'PURCHASE_RETURN_REFUND_NOT_REPAID';
+export const PURCHASE_RETURN_CREDIT_USED = 'PURCHASE_RETURN_CREDIT_USED';
+export const PURCHASE_RETURN_PARTNER_LATER = 'PURCHASE_RETURN_PARTNER_LATER';
+export const PURCHASE_RETURN_COST_CHANGED = 'PURCHASE_RETURN_COST_CHANGED';
+export const PURCHASE_RETURN_COST_UNKNOWN = 'PURCHASE_RETURN_COST_UNKNOWN';
+export const PURCHASE_RETURN_CONSIGNMENT = 'PURCHASE_RETURN_CONSIGNMENT';
+export const PURCHASE_RETURN_STOCK_MISSING = 'PURCHASE_RETURN_STOCK_MISSING';
+
+const GELD_WEGE = ['cash', 'bank', 'benefit'];
+const wegName = (m: string): string => (m === 'benefit' ? 'Benefit' : m);
+const bhd = (f: number): string => `${B(f).toFixed(3)} BHD`;
+
+export interface PurchaseReturnCancelRequest {
+  purchaseId: string;
+  returnId: string;
+  reason: string;
+  /** Pflicht, wenn der Lieferant mit der Rückgabe Geld gezahlt hat: es ging an ihn zurück (echte Zahlung). */
+  refundRepaid?: boolean;
+}
+
+export interface PurchaseReturnCancelled {
+  returnId: string;
+  returnNumber: string;
+  purchaseId: string;
+  previousStatus: string;
+  /** Echte Rückzahlung an den Lieferanten (Kasse/Bank/Benefit) — 0, wenn kein Geld geflossen war. */
+  moneyRepaid: number;
+  repaidMethod: string | null;
+  /** Ungenutztes Lieferantenguthaben der Rückgabe, das entfernt wurde. */
+  supplierCreditRemoved: number;
+  /** Buchwert der Stücke, die wieder im Lager stehen (Menge × Einstand). */
+  restoredBookValue: number;
+  /** Mit der Rückgabe gebuchter Verlust (INVENTORY_LOSS), jetzt gegengebucht. */
+  reversedLoss: number;
+  partnerMovementsReversed: number;
+  purchaseStatus: PurchaseStatus;
+  remainingAmount: number;
+}
+
+/** Wo ein Lieferantenguthaben aus der Rückgabe schon steckt — für den Satz an den Menschen. */
+function guthabenVerwendung(creditId: string): string[] {
+  const out: string[] = [];
+  for (const r of query(
+    `SELECT p.purchase_number, pp.amount FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
+      WHERE pp.method = 'credit' AND pp.reference = ? AND pp.voided_at IS NULL`, [creditId],
+  )) out.push(`${bhd(F(r.amount))} applied to ${String(r.purchase_number ?? 'a purchase')}`);
+  for (const r of query(
+    `SELECT e.expense_number, ep.amount FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id
+      WHERE ep.method = 'credit' AND ep.reference = ?`, [creditId],
+  )) out.push(`${bhd(F(r.amount))} applied to ${String(r.expense_number ?? 'an expense')}`);
+  for (const r of query('SELECT amount, method, received_at FROM supplier_credit_refunds WHERE supplier_credit_id = ?', [creditId])) {
+    out.push(`${bhd(F(r.amount))} paid out by the supplier (${wegName(String(r.method ?? ''))}, ${String(r.received_at ?? '').slice(0, 10)})`);
+  }
+  return out;
+}
+
+/**
+ * „Cancel return" — prüft alles, dann die bestehende Umkehr, dann Status/Vermerk/Protokoll. Läuft in der Transaktion des
+ * Aufrufers (`runOnPrimary` am Primary, `runRemoteCommand` für PC2); ein Nein ist ein `PurchaseLifecycleRejected`.
+ */
+export function cancelPurchaseReturnInHouse(
+  req: PurchaseReturnCancelRequest, ctx: HouseCtx, expectedRevision?: number,
+): PurchaseReturnCancelled {
+  assertBooks();
+  const p = livePurchase(req.purchaseId, ctx.branchId);
+  assertSeen(req.purchaseId, expectedRevision);
+  const ret = query('SELECT * FROM purchase_returns WHERE id = ? AND purchase_id = ? AND branch_id = ?',
+    [req.returnId, req.purchaseId, ctx.branchId])[0];
+  if (!ret) throw nein(PURCHASE_RETURN_NOT_FOUND, 'no such supplier return on this purchase in this branch');
+  const returnId = String(ret.id);
+  const nummer = String(ret.return_number ?? '') || returnId.slice(0, 8);
+  const vorher = String(ret.status ?? '');
+  if (vorher === 'CANCELLED') throw nein(PURCHASE_RETURN_ALREADY_CANCELLED, `${nummer} is already cancelled — nothing was changed`);
+  if (vorher !== 'CONFIRMED' && vorher !== 'COMPLETED') {
+    throw nein(PURCHASE_RETURN_NOT_BOOKED, `${nummer} was never booked (${vorher || 'no status'}) — there is nothing to undo`);
+  }
+  if (String(p.status) === 'CANCELLED') throw nein('PURCHASE_CANCELLED', 'this purchase is cancelled — its returns were undone with it');
+  const grund = typeof req.reason === 'string' ? req.reason.trim() : '';
+  if (!grund) throw nein(PURCHASE_RETURN_REASON_REQUIRED, 'A reason is required to cancel a supplier return.');
+  if (purchaseHasActiveOffsets(req.purchaseId)) throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage('Cancelling a supplier return'));
+  const kommission = !!p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))
+    || query(`SELECT 1 FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
+               WHERE prl.return_id = ? AND pl.source_consignment_id IS NOT NULL LIMIT 1`, [returnId]).length > 0;
+  if (kommission) {
+    throw nein(PURCHASE_RETURN_CONSIGNMENT,
+      `${nummer} belongs to a consignment — undo it from the consignment, not here; nothing was changed`);
+  }
+  // Die Gegenbuchung steht HEUTE (die ursprüngliche VAT-Korrektur bleibt in ihrem Quartal) — heute muss offen sein.
+  const tagNein = correctionDateIssue(ctx.branchId, [{ iso: ctx.now, what: 'the cancellation of this supplier return' }]);
+  if (tagNein) throw nein(tagNein.code, tagNein.message);
+
+  // 1. Geld: was der Lieferant mit der Rückgabe gezahlt hat, geht an ihn zurück — nur bestätigt (keine fiktive Zahlung).
+  const weg = (ret.refund_method as string | null) || null;
+  const refundF = F(ret.refund_amount);
+  const addedF = F(ret.added_cost_refund);
+  const geldF = weg && GELD_WEGE.includes(weg) ? refundF + addedF : 0;
+  if (geldF > 0 && req.refundRepaid !== true) {
+    throw nein(PURCHASE_RETURN_REFUND_NOT_REPAID,
+      `with ${nummer} the supplier paid ${bhd(geldF)} back by ${wegName(weg!)}`
+      + (addedF > 0 ? ` (refund ${bhd(refundF)} + added costs ${bhd(addedF)})` : '')
+      + `. Cancelling the return sends this money back to the supplier — repay ${bhd(geldF)} by ${wegName(weg!)} and confirm the repayment. Nothing was changed.`);
+  }
+  // 2. Guthaben aus der Rückgabe: unbenutzt (sonst wo und wieviel).
+  let guthabenF = 0;
+  for (const c of query('SELECT id, amount, used_amount FROM supplier_credits WHERE source_return_id = ?', [returnId])) {
+    const usedF = F(c.used_amount);
+    if (usedF > 5) {
+      const wo = guthabenVerwendung(String(c.id));
+      throw nein(PURCHASE_RETURN_CREDIT_USED,
+        `the supplier credit from ${nummer} (${bhd(F(c.amount))}) is already used: ${wo.length ? wo.join(', ') : bhd(usedF)}. `
+        + 'Undo that first, then cancel the return. Nothing was changed.');
+    }
+    guthabenF += F(c.amount);
+  }
+  // 3. Partner: keine Partnerbuchung NACH der Rückgabe (sonst würde eine Auszahlung/Verrechnung doppelt).
+  const partnerZeilen = query(
+    `SELECT rowid AS rid, id, purchase_line_id, partner_id FROM item_partner_movements
+      WHERE purchase_return_id = ? AND kind = 'SUPPLIER_RETURN' AND cancelled_at IS NULL`, [returnId]);
+  const eigene = new Set(partnerZeilen.map((r) => String(r.id)));
+  for (const t of partnerZeilen) {
+    const spaeter = query(
+      `SELECT m.id, m.kind, m.amount, m.occurred_at, COALESCE(pa.name, m.partner_id) AS name FROM item_partner_movements m
+         LEFT JOIN partners pa ON pa.id = m.partner_id
+        WHERE m.purchase_line_id = ? AND m.partner_id = ? AND m.cancelled_at IS NULL AND m.rowid > ?`,
+      [t.purchase_line_id, t.partner_id, t.rid]).filter((x) => !eigene.has(String(x.id)));
+    if (spaeter.length > 0) {
+      throw nein(PURCHASE_RETURN_PARTNER_LATER,
+        `after ${nummer} the partner share of this item was settled further: `
+        + spaeter.map((x) => `${String(x.name)} ${String(x.kind).toLowerCase()} ${bhd(F(x.amount))} (${String(x.occurred_at ?? '').slice(0, 10)})`).join(', ')
+        + ' — reverse that first, so nothing is paid out twice. Nothing was changed.');
+    }
+  }
+  // 4. Stücke und Einstand: jedes zurückgegebene Stück kommt zu dem Wert zurück, mit dem es ging.
+  let buchwertF = 0;
+  for (const line of query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [returnId])) {
+    const plId = (line.purchase_line_id as string | null) || null;
+    const q = Math.max(0, Number(line.quantity) || 0);
+    if (q <= 0) continue;
+    const lot = plId ? query(
+      `SELECT id, product_id, unit_cost, qty_total, qty_remaining FROM stock_lots
+        WHERE purchase_line_id = ? AND status != 'CANCELLED' ORDER BY acquired_at ASC, id ASC LIMIT 1`, [plId])[0] : undefined;
+    if (!lot || !query('SELECT 1 FROM products WHERE id = ?', [lot.product_id]).length) {
+      throw nein(PURCHASE_RETURN_STOCK_MISSING,
+        `a returned item of ${nummer} has no stock lot to come back to (an old entry or a removed item) — its value cannot be put back exactly; nothing was changed`);
+    }
+    if (Number(lot.qty_remaining) + q > Number(lot.qty_total) + 1e-9) {
+      throw nein(PURCHASE_RETURN_STOCK_MISSING,
+        `the stock lot of a returned item of ${nummer} cannot take ${q} piece(s) back (${Number(lot.qty_remaining)} of ${Number(lot.qty_total)} in stock); nothing was changed`);
+    }
+    const jetzt = Number(lot.unit_cost) || 0;
+    const damals = line.unit_cost_at_return === null || line.unit_cost_at_return === undefined ? null : Number(line.unit_cost_at_return);
+    if (damals !== null) {
+      if (Math.abs(jetzt - damals) > 0.0005) {
+        throw nein(PURCHASE_RETURN_COST_CHANGED,
+          `the remaining pieces of this item changed cost after ${nummer} (then ${damals.toFixed(3)}, now ${jetzt.toFixed(3)} per piece, e.g. a repair) — `
+          + 'the returned pieces would come back at the wrong value. Reverse that cost change first. Nothing was changed.');
+      }
+    } else {
+      // Ältere Rückgabe ohne festgehaltenen Einstand: nur sicher, wenn das Los noch genau den Einkaufseinstand trägt.
+      const pl = query('SELECT quantity, unit_price, line_total, vat_amount FROM purchase_lines WHERE id = ?', [plId])[0];
+      const einkauf = pl ? purchaseLotUnitCost({ qty: Math.max(1, Number(pl.quantity) || 1), unitPrice: Number(pl.unit_price) || 0,
+        lineTotal: Number(pl.line_total) || 0, vatAmount: Number(pl.vat_amount) || 0 }) : jetzt;
+      if (Math.abs(jetzt - einkauf) > 0.0005 && Math.abs(jetzt - (Number(pl?.unit_price) || 0)) > 0.0005) {
+        throw nein(PURCHASE_RETURN_COST_UNKNOWN,
+          `${nummer} was booked before the book value of returned pieces was recorded, and this item now carries ${jetzt.toFixed(3)} per piece `
+          + `instead of the purchase cost ${einkauf.toFixed(3)} — what the returned pieces were worth cannot be proven. Please check it with the accountant. Nothing was changed.`);
+      }
+    }
+    buchwertF += Math.round(q * jetzt * 1000);
+  }
+  const verlustF = F(query(
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM ledger_entries
+      WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND account = 'INVENTORY_LOSS' AND direction = 'DEBIT'`, [returnId])[0]?.t);
+  const vorherEinkauf = { total: Number(p.total_amount) || 0, paid: Number(p.paid_amount) || 0, remaining: Number(p.remaining_amount) || 0, status: String(p.status) };
+
+  // 5. Die bestehende Umkehr (Partner, Hauptbuch, Lose, Artikelstatus, Einkaufssummen, Guthaben, Overpay).
+  reverseConfirmedPurchaseReturnInHouse(returnId, ctx.now);
+
+  const db = getDatabase();
+  db.run(
+    `UPDATE purchase_returns SET status = 'CANCELLED', cancelled_at = ?, cancelled_by = ?, cancel_reason = ?, refund_repaid_amount = ? WHERE id = ?`,
+    [ctx.now, ctx.userId || null, grund, B(geldF), returnId],
+  );
+  trackChange('purchase_returns', returnId, 'update', {});
+  const nachher = query('SELECT status, total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [req.purchaseId])[0] ?? {};
+  logAuditOrThrow({
+    module: 'Purchase', entityType: 'purchase_returns', entityId: returnId, action: 'STATUS_CHANGE', field: 'status',
+    oldValue: vorher,
+    newValue: {
+      status: 'CANCELLED', reason: grund, purchaseId: req.purchaseId, returnNumber: nummer,
+      // Echte Geldbewegung (bestätigt) getrennt von den buchhalterischen Gegenbuchungen:
+      moneyRepaid: geldF > 0 ? { amount: B(geldF), method: weg, refund: B(refundF), addedCosts: B(addedF) } : null,
+      supplierCreditRemoved: B(guthabenF),
+      restoredBookValue: B(buchwertF), reversedLoss: B(verlustF), reversedAddedCostRefund: B(addedF),
+      partnerMovementsReversed: partnerZeilen.length,
+      purchaseBefore: vorherEinkauf,
+      purchaseAfter: { total: Number(nachher.total_amount) || 0, paid: Number(nachher.paid_amount) || 0,
+        remaining: Number(nachher.remaining_amount) || 0, status: String(nachher.status ?? '') },
+    },
+    actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },
+  });
+  return {
+    returnId, returnNumber: nummer, purchaseId: req.purchaseId, previousStatus: vorher,
+    moneyRepaid: B(geldF), repaidMethod: geldF > 0 ? weg : null, supplierCreditRemoved: B(guthabenF),
+    restoredBookValue: B(buchwertF), reversedLoss: B(verlustF), partnerMovementsReversed: partnerZeilen.length,
+    purchaseStatus: String(nachher.status ?? '') as PurchaseStatus, remainingAmount: Number(nachher.remaining_amount) || 0,
+  };
 }
 
 // ════════════════════════════════════════════════════════════════════════════
