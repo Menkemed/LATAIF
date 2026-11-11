@@ -2606,6 +2606,26 @@ export function postItemPartnerMovement(m: ItemPartnerMovementLike): PostingResu
   return postEntries(entries, { occurredAt: m.occurredAt, sourceModule: 'PARTNER_ITEM', sourceId: m.id });
 }
 
+/**
+ * v0.8.101 S3 (Owner E1, 11.11.2026) — ein beteiligter Partner bezahlt eine artikelbezogene Kostenstelle (Werkstatt) DIREKT:
+ *   Soll ACCOUNTS_PAYABLE      Gegenpartei LIEFERANT (die Werkstattschuld von LATAIF sinkt)
+ *   Haben PARTNER_ITEM_BALANCE Gegenpartei PARTNER   (LATAIF schuldet dem Partner diesen Betrag — wie ein Beitrag)
+ * Kein Geldkonto: LATAIF zahlt nichts. Dasselbe Muster wie die Lieferantenguthaben-Anrechnung (Soll AP / Haben
+ * SUPPLIER_CREDIT) und die Einkaufsverrechnung (Soll AP / Haben AR). Quelle: die Partnerbewegung (Storno = reverseSource).
+ */
+export function postPartnerDirectCost(m: {
+  id: string; partnerId: string; supplierId: string; amount: number; occurredAt: string; purchaseLineId: string; expenseId: string;
+}): PostingResult {
+  const amount = ROUND(m.amount);
+  if (amount <= 0) throw new Error(`postPartnerDirectCost: amount must be > 0 (got ${m.amount})`);
+  if (!m.supplierId || !m.partnerId) throw new Error('postPartnerDirectCost: supplier and partner are required — nothing was booked');
+  const meta = { kind: 'CONTRIBUTION', method: 'direct', purchaseLineId: m.purchaseLineId, expenseId: m.expenseId, noCash: true };
+  return postEntries([
+    { account: 'ACCOUNTS_PAYABLE', direction: 'DEBIT', amount, counterpartyType: 'SUPPLIER', counterpartyId: m.supplierId, metadata: meta },
+    { account: 'PARTNER_ITEM_BALANCE', direction: 'CREDIT', amount, counterpartyType: 'PARTNER', counterpartyId: m.partnerId, metadata: meta },
+  ], { occurredAt: m.occurredAt, sourceModule: 'PARTNER_ITEM', sourceId: m.id });
+}
+
 // ── Repair Payment (Customer-Charge ohne Invoice) ────────────
 //
 // Anwendungsfall: Kunde zahlt direkt für die Reparatur, OHNE dass eine Invoice

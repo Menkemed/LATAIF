@@ -179,7 +179,7 @@ export async function saveExpenseUpdate(write: PayablesWrite<Result>, base: Expe
 
 /** „Record Payment" (ExpenseList, Lieferant, Reparatur, Auftrag — ein Modal). */
 export async function saveExpensePayment(
-  write: PayablesWrite<Result>, expense: Expense, amount: number, method: string,
+  write: PayablesWrite<Result>, expense: Expense, amount: number, method: string, partnerId?: string,
 ): Promise<WriteOutcome<Result>> {
   const nein = rechtFehlt<Result>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
   if (nein) return nein;
@@ -188,10 +188,10 @@ export async function saveExpensePayment(
   if (write.remote && rev === undefined) return ohneFassung();
   return speichern(write, {
     local: () => runOnPrimary(
-      () => recordExpensePaymentInHouse(expense.id, amount, method, localHouseCtx(), { expectedRevision: rev }) as unknown as Result,
+      () => recordExpensePaymentInHouse(expense.id, amount, method, localHouseCtx(), { expectedRevision: rev, ...(partnerId ? { partnerId } : {}) }) as unknown as Result,
       () => { expensesHier(); reloadLinkedExpenseViews(expense.id); },
     ),
-    remote: () => ({ expenseId: expense.id, expectedRevision: rev, amount, method }),
+    remote: () => ({ expenseId: expense.id, expectedRevision: rev, amount, method, ...(partnerId ? { partnerId } : {}) }),
   }, () => { expensesHier(); linkedViewsFern(expense); });
 }
 

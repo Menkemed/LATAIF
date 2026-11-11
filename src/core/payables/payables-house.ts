@@ -38,6 +38,7 @@ import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackPayment, trackStatusChange } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
+import { PARTNER_DIRECT_PAY_METHOD, partnerCostLineOf, recordPartnerDirectCostInHouse } from '@/core/partners/item-participation-house';
 import {
   postExpense, postExpensePayment, postExpenseSupplierCreditPayment, postPurchasePayment,
   postStandaloneSupplierCredit, postSupplierCreditRefund, reverseSource, hasLedgerEntries, hasReversalFor,
@@ -534,13 +535,16 @@ export interface ExpensePaid {
  */
 export function recordExpensePaymentInHouse(
   expenseId: string, amount: number, method: string, ctx: HouseCtx,
-  opts: { expectedRevision?: number; paidAt?: string; note?: string } = {},
+  opts: { expectedRevision?: number; paidAt?: string; note?: string; partnerId?: string } = {},
 ): ExpensePaid {
   assertHouseBooks();
   if (typeof amount !== 'number' || !Number.isFinite(amount) || F(amount) <= 0) {
     throw nein('PAYMENT_AMOUNT_INVALID', 'Payment amount must be positive.');
   }
-  const m = methodOf(method);
+  // v0.8.101 S3 (Owner E1) — „Paid by partner": ein beteiligter Partner hat die Werkstatt DIREKT bezahlt (kein Geld von LATAIF).
+  const byPartner = method === PARTNER_DIRECT_PAY_METHOD;
+  if (byPartner && (typeof opts.partnerId !== 'string' || !opts.partnerId)) throw nein('PAYMENT_PARTNER_REQUIRED', 'name the partner who paid');
+  const m = byPartner ? PARTNER_DIRECT_PAY_METHOD : methodOf(method);
   const row = liveExpense(expenseId, ctx.branchId);
   assertSeen('expenses', expenseId, opts.expectedRevision);
   if (String(row.status) === 'CANCELLED') throw nein('EXPENSE_CANCELLED', 'Cannot record payment on cancelled expense');
@@ -558,6 +562,26 @@ export function recordExpensePaymentInHouse(
 
   const db = getDatabase();
   const paymentId = uuid();
+  if (byPartner) {
+    // Die Kostenstelle MUSS an einem gemeinsamen Artikel dieses Partners hängen und einen Gläubiger (Werkstatt) haben.
+    const supplierId = txt(row.supplier_id);
+    if (!supplierId) throw nein('PAYMENT_PARTNER_NO_CREDITOR', 'this expense has no workshop/supplier — a direct payment by the partner needs the creditor');
+    const { purchaseLineId } = partnerCostLineOf(expenseId, String(opts.partnerId), ctx.branchId);
+    db.run(
+      `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [paymentId, expenseId, paid, m, paidAt, opts.note || 'Paid directly by the partner · no cash from LATAIF', ctx.now]
+    );
+    // payment_method bleibt der Geldweg von LATAIF (Banking/Anzeige) — eine Partnerzahlung ist keiner.
+    db.run('UPDATE expenses SET paid_amount = ?, status = ? WHERE id = ?', [newPaid, status, expenseId]);
+    trackInsert('expense_payments', paymentId, { expenseId, amount: paid, method: m, partnerId: opts.partnerId });
+    trackUpdate('expenses', expenseId, { paidAmount: newPaid, status });
+    const { movementId } = recordPartnerDirectCostInHouse({
+      expenseId, expensePaymentId: paymentId, partnerId: String(opts.partnerId), purchaseLineId, supplierId,
+      expenseNumber: txt(row.expense_number) || expenseId.slice(0, 8), amountF: payF, date: paidAt,
+    }, { branchId: ctx.branchId, userId: ctx.userId, now: ctx.now });
+    db.run('UPDATE expense_payments SET reference = ? WHERE id = ?', [movementId, paymentId]);
+  } else {
   db.run(
     `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -567,9 +591,10 @@ export function recordExpensePaymentInHouse(
   trackInsert('expense_payments', paymentId, { expenseId, amount: paid, method: m });
   trackUpdate('expenses', expenseId, { paidAmount: newPaid, status });
   postExpensePayment(
-    { id: paymentId, expenseId, amount: paid, method: m, paidAt, createdAt: ctx.now, note: opts.note },
+    { id: paymentId, expenseId, amount: paid, method: m as PayMethod, paidAt, createdAt: ctx.now, note: opts.note },
     txt(row.supplier_id),
   );
+  }
   return {
     expenseId, paymentId, amount: paid, paidAmount: newPaid, remainingAmount: B(remainingF - payF),
     status, revision: revisionOf('expenses', expenseId),

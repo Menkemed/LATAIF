@@ -512,6 +512,8 @@ export function backfillExpensePayments(branchId: string): BackfillResult {
     // wuerde sie ohnehin als "jemals gebucht" skippen; dieser Guard ist explizit + robust gegen
     // hypothetische Legacy-credit-Rows ohne Ledger.
     if ((r.method as string) === 'credit') { res.skipped++; continue; }
+    // v0.8.101 S3 — 'partner' (Partner zahlte die Werkstatt direkt) bucht die Partnerbewegung: Soll AP / Haben PARTNER_ITEM_BALANCE.
+    if ((r.method as string) === 'partner') { res.skipped++; continue; }
     // Skip, sobald JE ledgerisiert (auch reversiert). Reverse-Pfade loeschen heute zwar die
     // expense_payments-Row (kein Re-Post moeglich) — semantisch ist der Skip aber "jemals
     // ledgerisiert", daher hasAnyLedgerEntries (defensiv, falls je reverst-ohne-Loeschen).

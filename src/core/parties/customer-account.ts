@@ -286,6 +286,7 @@ const PAYMENT_LABEL: Record<string, string> = {
   purchase_offset: 'Offset with purchase · no cash', offset: 'Offset · no cash',
   // v0.8.101 S4 — Verrechnung mit einem Partnerguthaben derselben Person.
   partner_offset: 'Offset with partner balance · no cash',
+  partner: 'by partner directly · no cash from LATAIF',
 };
 /** Unbekannte Zahlart: die gemeinsame Beschriftung (`paymentMethodLabel`), nie der technische Rohwert. */
 const payLabel = (m: unknown): string => PAYMENT_LABEL[txt(m)] || (txt(m) ? paymentMethodLabel(txt(m)) : 'Payment');

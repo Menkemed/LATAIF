@@ -14,6 +14,9 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { usePermission } from '@/hooks/usePermission';
 import type { PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 import { saveCancelMovement, saveItemMovement, saveItemOffset } from '@/core/partners/item-participation-save';
+import { saveExpensePayment } from '@/core/payables/payables-save';
+import type { PartnerCostDoc } from '@/core/partners/item-participation-house';
+import type { Expense } from '@/core/models/types';
 import type { Partner } from '@/core/models/types';
 import { OwnershipChangeModal, type OwnershipTarget } from './OwnershipChangeModal';
 import { SettleSaleModal, type SettleTarget } from './SettleSaleModal';
@@ -61,6 +64,18 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
   const [fehler, setFehler] = useState('');
   const [busy, setBusy] = useState(false);
   const [settleFor, setSettleFor] = useState<SettleTarget | null>(null);
+  // v0.8.101 S3 — „Partner paid directly": der Partner hat eine Werkstattkosten dieses Artikels selbst bezahlt (kein Geld von LATAIF).
+  const [direct, setDirect] = useState<{ partnerId: string; partnerName: string; doc: PartnerCostDoc } | null>(null);
+  async function saveDirect() {
+    if (!direct) return;
+    setBusy(true); setFehler('');
+    const payW = { remote: w.remote, save: (a: never) => w.save('expenses.record_payment', a) };
+    const r = await saveExpensePayment(payW as never, { id: direct.doc.expenseId, revision: direct.doc.revision } as unknown as Expense,
+      parseFloat(amount), 'partner', direct.partnerId);
+    setBusy(false);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    setDirect(null);
+  }
 
   useEffect(() => {
     if (!action) return;
@@ -213,6 +228,20 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                           Purchase <Bhd v={it.purchaseGross} /> BHD incl. input VAT <Bhd v={it.purchaseInputVat} /> — LATAIF reclaims the input VAT; the cost share is on <Bhd v={it.purchaseGross - it.purchaseInputVat} /> BHD.
                         </div>
                       )}
+                      {canPay && it.costDocs.length > 0 && (
+                        <div style={{ marginBottom: 8, color: '#6B7280' }} data-partner-item-cost-docs={it.purchaseLineId}>
+                          Open workshop costs of this item — LATAIF pays them as usual; if {p.name} paid the workshop himself, record it here (no cash from LATAIF):
+                          {it.costDocs.map((d) => (
+                            <div key={d.expenseId} className="flex items-center gap-2" style={{ marginTop: 4 }} data-partner-cost-doc={d.expenseNumber}>
+                              <span>{d.expenseNumber} · {d.supplierName} · open <Bhd v={d.open} /> BHD</span>
+                              <Button variant="ghost" disabled={busy} data-partner-cost-pay={d.expenseNumber}
+                                onClick={() => { setFehler(''); setAmount(d.open.toFixed(3)); setDirect({ partnerId: p.partnerId, partnerName: p.name, doc: d }); }}>
+                                Partner paid directly
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       {it.moneyAction !== 'NONE' && (<div style={{ color: '#6B7280', marginBottom: 6 }}>
                         {openText(it.open, p.name)}
                         {it.owedCost > 0 && <> · still to fund for unsold pieces: <Bhd v={it.owedCost} /> BHD</>}
@@ -359,6 +388,22 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
         )}
       </Modal>
 
+      <Modal open={!!direct} onClose={() => setDirect(null)} width={460} title={`Paid directly by ${direct?.partnerName ?? ''}`}>
+        {direct && (
+          <div style={{ fontSize: 13 }} data-partner-direct-modal={direct.doc.expenseNumber}>
+            <p style={{ color: '#6B7280', marginBottom: 10 }}>
+              {direct.doc.expenseNumber} · {direct.doc.supplierName} · open {direct.doc.open.toFixed(3)} BHD. The workshop debt goes down by this amount and
+              LATAIF owes {direct.partnerName} the same amount — no cash or bank of LATAIF moves. His own cost share follows separately from his share percentage.
+            </p>
+            <Input label="Amount (BHD)" value={amount} onChange={(e) => setAmount(e.target.value)} data-partner-direct-amount />
+            <WriteError text={fehler} />
+            <div className="flex justify-end gap-2" style={{ marginTop: 12 }}>
+              <Button variant="ghost" onClick={() => setDirect(null)}>Cancel</Button>
+              <Button variant="primary" disabled={busy || !amount || parseFloat(amount) <= 0} onClick={() => void saveDirect()} data-partner-direct-save>Confirm</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
       <Modal open={!!offset} onClose={() => setOffset(null)} width={520} title={`Offset items — ${offset?.partner.name ?? ''}`}>
         {offset && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

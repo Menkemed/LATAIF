@@ -139,11 +139,13 @@ export function parseExpenseUpdate(raw: unknown): { expenseId: string; expectedR
   return { expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision), fields };
 }
 
-export function parseExpensePayment(raw: unknown): { expenseId: string; expectedRevision: number; amount: number; method: string } {
-  const r = strict(raw, ['expenseId', 'expectedRevision', 'amount', 'method']);
+export function parseExpensePayment(raw: unknown): { expenseId: string; expectedRevision: number; amount: number; method: string; partnerId?: string } {
+  const r = strict(raw, ['expenseId', 'expectedRevision', 'amount', 'method', 'partnerId']);
   return {
     expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision),
     amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'),
+    // v0.8.101 S3 — nur beim Zahlweg 'partner': der Partner, der die Werkstatt direkt bezahlt hat.
+    ...(r.partnerId !== undefined ? { partnerId: idOf(r.partnerId, 'partnerId') } : {}),
   };
 }
 
@@ -280,7 +282,8 @@ export const runExpenseUpdate: Run = (deps, identity, raw) => {
 
 export const runExpensePayment: Run = (deps, identity, raw) => {
   const req = parseExpensePayment(raw);
-  return lauf(deps, identity, (ctx) => recordExpensePaymentInHouse(req.expenseId, req.amount, req.method, ctx, { expectedRevision: req.expectedRevision }));
+  return lauf(deps, identity, (ctx) => recordExpensePaymentInHouse(req.expenseId, req.amount, req.method, ctx,
+    { expectedRevision: req.expectedRevision, ...(req.partnerId ? { partnerId: req.partnerId } : {}) }));
 };
 
 export const runTemplateCreate: Run = (deps, identity, raw) => {

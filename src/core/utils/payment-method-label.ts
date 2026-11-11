@@ -12,6 +12,8 @@ const LABELS: Readonly<Record<string, string>> = {
   purchase_offset: 'Purchase offset', offset: 'Offset (no cash)',
   // v0.8.101 S4 — Verrechnung mit einem auszahlbaren Partnerguthaben derselben Person (kein Geld).
   partner_offset: 'Partner offset',
+  // v0.8.101 S3 — eine Ausgabe, die ein beteiligter Partner direkt an die Werkstatt bezahlt hat (kein Geld von LATAIF).
+  partner: 'Paid by partner',
 };
 
 export function paymentMethodLabel(method: string | null | undefined): string {

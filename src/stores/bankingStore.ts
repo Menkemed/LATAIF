@@ -367,8 +367,9 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   // der SALES_IN-Zeile netto verrechnet → hier ausschliessen, sonst Doppel-
   // zaehlung falls die Fee-Expense je manuell als bezahlt markiert wird.
   const expenses = safeQuery('expenses',
-    `SELECT id, COALESCE(paid_amount, 0) AS paid_amount, payment_method,
-            expense_date, description, expense_number, category, created_at
+    `SELECT id, COALESCE(paid_amount, 0)
+              - COALESCE((SELECT SUM(pp.amount) FROM expense_payments pp WHERE pp.expense_id = expenses.id AND pp.method = 'partner'), 0) AS paid_amount,
+            payment_method, expense_date, description, expense_number, category, created_at
      FROM expenses
      WHERE branch_id = ? AND COALESCE(paid_amount, 0) > 0
        AND (status != 'CANCELLED'
@@ -383,6 +384,8 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     [branchId]
   );
   for (const e of expenses) {
+    // v0.8.101 S3 — nur das, was LATAIF selbst gezahlt hat; die Direktzahlung eines Partners bewegt kein Geld von LATAIF.
+    if (!((Number(e.paid_amount) || 0) > 0.0005)) continue;
     const date = (e.expense_date as string) || '';
     txs.push({
       id: `exp-${e.id}`,

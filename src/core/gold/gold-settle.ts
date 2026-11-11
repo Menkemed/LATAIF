@@ -25,9 +25,29 @@ import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
-import { postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
+import { postEntries, postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
 import type { Expense, GoldBucket, GoldPayable } from '@/core/models/types';
 import { KARAT_PURITY } from './purity';
+import { shiftOwnRepairCost } from '@/core/repairs/repair-cost-booking';
+import { isJointPurchaseLine } from '@/core/partners/item-participation-house';
+
+/**
+ * v0.8.101 S3/E2 — gehört diese Werkstattgold-Schuld eindeutig zu einem gemeinsam gekauften Artikel? Ja, wenn ihre Reparatur
+ * eine EIGENE ist, der Artikel nicht verkauft ist und das Los (gewählt oder per FIFO, wie die Reparaturkosten) aus einer
+ * gemeinsam gekauften Einkaufszeile stammt. Sonst null (unverändert Betriebsausgabe).
+ */
+function jointWorkshopGoldTarget(repairId: string | undefined): { repairId: string; productId: string; lotId: string | undefined } | null {
+  if (!repairId) return null;
+  const r = query(`SELECT r.id, r.product_id, r.lot_id, COALESCE(r.repair_scope, '') AS scope, pr.stock_status
+                     FROM repairs r LEFT JOIN products pr ON pr.id = r.product_id WHERE r.id = ?`, [repairId])[0];
+  if (!r || r.scope !== 'OWN' || !r.product_id || String(r.stock_status ?? '') === 'sold') return null;
+  const lot = r.lot_id
+    ? query('SELECT purchase_line_id FROM stock_lots WHERE id = ?', [String(r.lot_id)])[0]
+    : query(`SELECT purchase_line_id FROM stock_lots WHERE product_id = ? AND status = 'ACTIVE' AND qty_remaining > 0
+              ORDER BY acquired_at, id LIMIT 1`, [String(r.product_id)])[0];
+  if (!lot || !isJointPurchaseLine(lot.purchase_line_id ? String(lot.purchase_line_id) : null)) return null;
+  return { repairId: String(r.id), productId: String(r.product_id), lotId: r.lot_id ? String(r.lot_id) : undefined };
+}
 
 /** Ein fachliches Nein des Goldkerns — am Primary eine Meldung, aus der Ferne ein eingefrorenes Urteil. */
 export class GoldRejected extends Error {
@@ -459,7 +479,11 @@ export function settleGoldPayable(actor: GoldActor, req: PayableSettleRequest): 
     const description = `Gold-Settlement: ${open.toFixed(3)}g ${karat} (gold_payable ${id.slice(0, 8)})`;
     // v0.6.0 — Order-Gold-Payables kapitalisieren in COGS (Kategorie 'Inventory',
     // von den Betriebsausgaben ausgeschlossen); Repair-Gold bleibt 'RepairCosts'.
-    const category: Expense['category'] = p.source_order_id ? 'Inventory' : 'RepairCosts';
+    // v0.8.101 S3/E2 (Owner 11.11.2026) — Werkstattgold an einem GEMEINSAM gekauften Artikel (eigene Reparatur, Los eindeutig, nicht
+    // verkauft) ist eine direkte Artikelkosten: aktiviert (Soll INVENTORY, Los-Einstand + Betrag) und damit nach den Anteilen
+    // geteilt. Jede andere Reparatur bleibt wie bisher Betriebsausgabe ('RepairCosts') — keine pauschale Änderung.
+    const joint = !p.source_order_id ? jointWorkshopGoldTarget(repairId) : null;
+    const category: Expense['category'] = p.source_order_id || joint ? 'Inventory' : 'RepairCosts';
     const supplierId = str(p.supplier_id);
     const day = now.split('T')[0];
     db.run(
@@ -478,7 +502,20 @@ export function settleGoldPayable(actor: GoldActor, req: PayableSettleRequest): 
       relatedModule: 'gold_payable', relatedEntityId: id,
       supplierId, status: 'PENDING', createdAt: now,
     };
-    if (!hasLedgerEntries('EXPENSE', expenseId)) postExpense(expense);
+    if (!hasLedgerEntries('EXPENSE', expenseId)) {
+      if (joint) {
+        // Wie die Auftrags-Goldabrechnung (order-gold-settle): eigene Zeilen unter der Ausgabe — Soll INVENTORY / Haben A/P (Werkstatt).
+        // `postExpense` aktiviert nur Bezug 'repair'/'order'; der Bezug 'gold_payable' bleibt (Sperren, Verlauf) unverändert.
+        const meta = { kind: 'workshop_gold_joint_item', payableId: id, repairId: joint.repairId, expenseNumber };
+        postEntries([
+          { account: 'INVENTORY', direction: 'DEBIT', amount: agreed, counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta },
+          { account: 'ACCOUNTS_PAYABLE', direction: 'CREDIT', amount: agreed, counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: meta },
+        ], { occurredAt: now, sourceModule: 'EXPENSE', sourceId: expenseId });
+      } else {
+        postExpense(expense);
+      }
+    }
+    if (joint) shiftOwnRepairCost({ id: joint.repairId, productId: joint.productId, lotId: joint.lotId }, agreed, now, 'workshop-gold');
 
     db.run(
       `UPDATE gold_payables SET settlement_expense_id = ?, status = 'FULFILLED',

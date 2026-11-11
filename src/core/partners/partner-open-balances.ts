@@ -32,7 +32,7 @@ export interface PartnerOpenRow {
   covered: number;
   /** Relevantes Datum: Einkauf beim Kostenanteil, sonst die letzte wirksame Bewegung. */
   date: string;
-  /** Auszahlung wartet (Nachabrechnung offen oder Lieferantengutschrift noch nicht verwendet). */
+  /** Auszahlung wartet (Nachabrechnung offen, Lieferantengutschrift noch nicht verwendet, eigene Reparatur noch nicht „ready“). */
   onHold: boolean;
   /** Der Partner ist am laufenden Abschnitt beteiligt (sonst: beendete Beteiligung mit Rest). */
   participating: boolean;
@@ -69,7 +69,7 @@ export function partnerOpenRows(overview: readonly PartnerItemsOfPartner[]): Par
         total: costShare ? it.owedCost : open,
         covered: costShare ? Math.round((it.owedCost - open) * 1000) / 1000 : 0,
         date: origin === 'COST_SHARE' ? (it.purchaseDate || letzte) : (letzte || it.purchaseDate),
-        onHold: side === 'PAYABLE' && (it.correctionPending || it.refundPending),
+        onHold: side === 'PAYABLE' && (it.correctionPending || it.refundPending || it.repairPending),
         participating: it.participating,
         href: partnerItemHref(p.partnerId, it.purchaseLineId),
       });

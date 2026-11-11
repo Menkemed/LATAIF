@@ -268,7 +268,7 @@ let V1 = { id: '', line: '' };
   ok(r3(n(DB, "SELECT cost_share FROM item_participations WHERE purchase_line_id = ? AND party = 'PARTNER'", [V1.line])) === 400
     && r3(n(DB, "SELECT line_total FROM item_participations WHERE purchase_line_id = ? AND party = 'PARTNER'", [V1.line])) === 1000,
     'V1 gespeichert: Kostenanteil 400 und Kostenbasis 1000 (netto) — dieselbe Basis wie das Los');
-  ok(await code(() => move(V1.line, 'CONTRIBUTION', 401)) === rules.PARTNER_ITEM_OVERFUNDED, 'V1 Beitrag über dem wirtschaftlichen Anteil abgewiesen');
+  ok(await code(() => move(V1.line, 'CONTRIBUTION', 440.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'V1 Beitrag über dem Bruttoanteil (400 netto + 40 Vorsteueranteil) abgewiesen');
   await move(V1.line, 'CONTRIBUTION', 250);
   ok(open(V1.line) === -150, `V1 Teilbeitrag 250 → schuldet noch 150 (${open(V1.line)})`);
   await move(V1.line, 'CONTRIBUTION', 150);
@@ -384,6 +384,86 @@ let V1 = { id: '', line: '' };
   const ps = src('src/stores/purchaseStore.ts');
   ok(/insertLineParticipations\([\s\S]{0,300}vatAmount: l\.vatAmount/.test(ps), 'V10 createPurchase übergibt die Vorsteuer je Zeile');
   ok(/getPurchaseLineInputSplit/.test(src('src/core/partners/item-participation-house.ts')), 'V10 Rückgabe: Netto-Erstattungswert aus derselben Vorsteuer-Aufteilung wie die Buchung');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// S1-NACHPRÜFUNG (Owner 11.11.2026): 110 brutto = 100 netto + 10 VAT, 60/40 und 50/50 — tatsächliche Zahlungs- und
+// Buchungswege: Lieferantenschuld/Erstattung brutto, Kostenbasis netto, Vorsteuer und ihre Rückbuchung, Partnerfinanzierung
+// einschließlich vorfinanzierter VAT, Rückgabe nach Beiträgen, Altbestand.
+// ════════════════════════════════════════════════════════════════════════════
+const geldSaldo = (): number => r3(-(kontoSaldo('CASH') + kontoSaldo('BANK') + kontoSaldo('BENEFIT')));
+const apSup = (): number => kontoSaldo('ACCOUNTS_PAYABLE', 'sup-1');
+const PB50 = [{ partnerId: 'pa-b', sharePct: 50 }];
+const { recordPurchasePaymentInHouse, localHouseCtx: hctx } = await import('../../src/core/payables/payables-house.ts');
+const purchasePay = (id: string, amount: number) => recordPurchasePaymentInHouse(id, amount, 'bank', hctx());
+
+// ── V11 60/40: Bruttoschuld 110, netto 100, Vorsteuer 10; Partner finanziert brutto 44 (40 + 4 VAT) ──
+{
+  const g0 = geldSaldo(), ap0 = apSup(), inv0 = -kontoSaldo('INVENTORY'), vat0 = vatInput(), pb0 = kontoSaldo('PARTNER_ITEM_BALANCE', 'pa-b');
+  const a = await kauf('pw20', 110, PB40, 1, 0);
+  ok(r3(apSup() - ap0) === 110 && r3(-kontoSaldo('INVENTORY') - inv0) === 100 && r3(vatInput() - vat0) === 10,
+    'V11 Einkauf: Haben A/P Lieferant 110 (brutto), Soll INVENTORY 100 (netto), Soll VAT_INPUT 10 (abziehbar)');
+  imHaus(() => purchasePay(a.id, 110));
+  ok(r3(apSup() - ap0) === 0 && r3(g0 - geldSaldo()) === 110, 'V11 LATAIF bezahlt den Lieferanten brutto 110 (Bank) — A/P ausgeglichen');
+  const v = view(a.line)!;
+  ok(open(a.line) === -40 && v.owedCost === 40 && v.vatAllowance === 4 && v.purchaseGross === 110 && v.purchaseInputVat === 10,
+    `V11 B (40 %) schuldet netto 40; darf seinen VAT-Anteil 4 vorfinanzieren (${S([open(a.line), v.owedCost, v.vatAllowance])})`);
+  ok(await code(() => move(a.line, 'CONTRIBUTION', 44.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'V11 mehr als der Bruttoanteil 44 wird abgewiesen');
+  await move(a.line, 'CONTRIBUTION', 44);
+  ok(open(a.line) === 4 && view(a.line)!.moneyAction === 'PAY_OUT' && r3(kontoSaldo('PARTNER_ITEM_BALANCE', 'pa-b') - pb0) === 44,
+    `V11 B zahlt brutto 44: Kostenanteil 40 gedeckt, 4 vorfinanzierte VAT schuldet LATAIF ihm zurück (${open(a.line)})`);
+  // Rückgabe zum vollen Preis: Erstattung brutto 110, Vorsteuer 10 zurück, B bekommt seine tatsächlich gezahlten 44 zurück.
+  const ret0 = { g: geldSaldo(), inv: -kontoSaldo('INVENTORY'), vat: vatInput() };
+  ret(a.id, a.line, 1, 110, 'cash');
+  ok(r3(geldSaldo() - ret0.g) === 110 && r3(ret0.inv + kontoSaldo('INVENTORY')) === 100 && r3(ret0.vat - vatInput()) === 10,
+    'V11 Rückgabe: Erstattung brutto 110 in die Kasse, Haben INVENTORY 100, Haben VAT_INPUT 10 (Vorsteuer zurückgebucht)');
+  ok(r3(n(DB, "SELECT amount FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'SUPPLIER_RETURN'", [a.line])) === 0 && open(a.line) === 44,
+    `V11 kein Vorsteuer-„Gewinn"; B bekommt seine tatsächliche Zahlung 44 vollständig, nicht netto 40 (${open(a.line)})`);
+  ok(abgleich() === 0 && partnerAbgleich('pa-b') === 0 && ausgeglichen(), 'V11 Hauptbuch = Domäne je Partner, ausgeglichen');
+}
+
+// ── V12 60/40: vorfinanzierte VAT schon ausgezahlt, danach Rückgabe → insgesamt genau 44 zurück ──
+{
+  const a = await kauf('pw21', 110, PB40, 1, 110);
+  await move(a.line, 'CONTRIBUTION', 44);
+  await move(a.line, 'PAYOUT', 4, 'pa-b', 'bank');
+  ok(open(a.line) === 0, 'V12 die 4 vorfinanzierte VAT ist ausgezahlt → 0');
+  ret(a.id, a.line, 1, 110, 'cash');
+  ok(open(a.line) === 40 && partnerAbgleich('pa-b') === 0, `V12 Rückgabe: B bekommt 40 (zusammen 4 + 40 = seine 44) (${open(a.line)})`);
+}
+
+// ── V13 50/50: Bruttoanteil 55, Verkauf 165 brutto (150 netto): Gewinn 50 → 25; LATAIF wirtschaftlich genau 25 ──
+{
+  const g0 = geldSaldo(), vatNetto0 = r3(kontoSaldo('VAT_OUTPUT') - vatInput());
+  const a = await kauf('pw22', 110, PB50, 1, 110);
+  ok(view(a.line)!.vatAllowance === 5 && open(a.line) === -50, 'V13 B (50 %) schuldet netto 50, VAT-Anteil 5');
+  ok(await code(() => move(a.line, 'CONTRIBUTION', 56)) === rules.PARTNER_ITEM_OVERFUNDED, 'V13 56 > Bruttoanteil 55 abgewiesen');
+  await move(a.line, 'CONTRIBUTION', 55);
+  const vk = verkaufV('pw22', lotOf(DB, a.line), 150);
+  await save.settleSaleOnPrimary(vk.il);
+  ok(r3(n(DB, "SELECT amount FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'PROFIT_SHARE'", [a.line])) === 25 && open(a.line) === 80,
+    `V13 Gewinn netto 150 − 100 = 50, B 25; offen 50 Kapital + 5 VAT + 25 Gewinn = 80 (${open(a.line)})`);
+  await move(a.line, 'PAYOUT', 80, 'pa-b', 'bank');
+  const geld = r3(geldSaldo() - g0), vatNetto = r3(kontoSaldo('VAT_OUTPUT') - vatInput() - vatNetto0);
+  ok(geld === 30 && vatNetto === 5 && r3(geld - vatNetto) === 25,
+    `V13 LATAIF: Geld −110 + 55 + 165 − 80 = 30, VAT-Schuld netto 15 − 10 = 5 → wirtschaftlich 25 = 50 % von 50 (${geld}/${vatNetto})`);
+  ok(open(a.line) === 0 && abgleich() === 0 && partnerAbgleich('pa-b') === 0 && ausgeglichen(), 'V13 ausgeglichen, Abgleich ohne Differenz');
+}
+
+// ── V14 Altbestand 110 brutto gespeichert (vor v0.8.101), 60/40: dieselben Zahlen, keine Saldoänderung ──
+{
+  const a = await kauf('pw23', 110, PB40, 1, 110);
+  DB.run("UPDATE item_participations SET line_total = 110, unit_cost = 110, cost_share = CASE party WHEN 'PARTNER' THEN 44 ELSE 66 END WHERE purchase_line_id = ?", [a.line]);
+  ok(open(a.line) === -40 && view(a.line)!.vatAllowance === 4 && view(a.line)!.inputVatInCostShare === 4, 'V14 Altbestand: B schuldet netto 40, VAT-Anteil 4 — wie neu angelegt');
+  await move(a.line, 'CONTRIBUTION', 44);
+  ret(a.id, a.line, 1, 110, 'cash');
+  ok(open(a.line) === 44 && abgleich() === 0, `V14 Altbestand-Rückgabe: B bekommt 44, kein Vorsteuer-Gewinn (${open(a.line)})`);
+}
+
+// ── V15 ZERO: keine Vorsteuer → kein Spielraum (unverändert) ─────────────────
+{
+  const a = await kauf('pw24', 100, PB40, 1, 100, 'ZERO');
+  ok(view(a.line)!.vatAllowance === 0 && await code(() => move(a.line, 'CONTRIBUTION', 40.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'V15 ZERO: höchstens der Kostenanteil 40');
 }
 
 console.log(`\npartner-vat-basis: ${PASS} passed, ${fails.length} failed`);

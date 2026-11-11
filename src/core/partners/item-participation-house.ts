@@ -37,7 +37,9 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import type { PurchaseLineParticipation } from '@/core/models/types';
-import { getPurchaseLineInputSplit, hasLedgerEntries, hasReversalFor, postItemPartnerMovement, reverseSource } from '@/core/ledger/posting';
+import { getPurchaseLineInputSplit, hasLedgerEntries, hasReversalFor, postItemPartnerMovement, postPartnerDirectCost, reverseSource } from '@/core/ledger/posting';
+import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
+import { trackDelete, trackUpdate } from '@/core/sync/track';
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import { productDisplayName } from '../products/display-name.ts';
 import {
@@ -530,6 +532,14 @@ export interface LineState {
   refundPending: boolean;
   /** Ein Stück eines beendeten Abschnitts liegt wieder im Lager (Rückkehr nach Übernahme/Wechsel). */
   returnedAfterEnd: boolean;
+  /**
+   * v0.8.101 S1-Nachprüfung — der Anteil des Partners an der ABZIEHBAREN Vorsteuer der noch nicht abgerechneten Stücke des
+   * Einkaufsabschnitts: so viel darf er über seinen (netto) Kostenanteil hinaus vorfinanzieren (er zahlt seinen Bruttoanteil);
+   * LATAIF holt die Vorsteuer zurück und schuldet ihm diesen Teil. Ohne Vorsteuer (ZERO) 0.
+   */
+  vatAllowanceF: number;
+  /** v0.8.101 S3 — eine eigene Reparatur dieses Loses ist gebucht, aber noch nicht „ready" (Kostenanteil folgt erst dann). */
+  repairPending: boolean;
 }
 
 /**
@@ -559,6 +569,8 @@ function lineStateOf(purchaseLineId: string, partnerId: string, branchId: string
   let refundPending = false;
   let returnedAfterEnd = false;
   let cancelled = false;
+  let vatAllowanceF = 0;
+  const lineVatF = purchaseLineGrossVatF(purchaseLineId).vatF;
   for (const e of epochs) {
     cancelled = cancelled || purchaseCancelled(e.purchaseId);
     const st = epochStateOf(e, partnerId, branchId);
@@ -572,6 +584,9 @@ function lineStateOf(purchaseLineId: string, partnerId: string, branchId: string
     settledQty += st.settledQty;
     if (cancelled) continue;
     owed += Math.round(party.costShareF * st.unsettledQty / Math.max(1, e.qty));
+    if (lineVatF > 0 && e.endedAt === null && e.key === e.purchaseLineId && e.fromRowid === 0) {
+      vatAllowanceF += Math.round(lineVatF * st.unsettledQty / Math.max(1, e.qty) * party.shareBp / FULL_BP);
+    }
     if (e.endedAt === null) {
       // Laufender Abschnitt: aktivierte Kosten der Stücke im Lager und der verkauften, nicht abgerechneten.
       const inStock = Math.max(0, st.unsettledQty - st.unsettledSoldQty);
@@ -594,8 +609,28 @@ function lineStateOf(purchaseLineId: string, partnerId: string, branchId: string
   };
   return {
     ...s, settledQty, extraUnsettledF, extraCostShareF, correctionPending, refundPending, returnedAfterEnd,
-    openF: openBalanceF(state), owedCostF: owedCostF(state),
+    openF: openBalanceF(state), owedCostF: owedCostF(state), vatAllowanceF: cancelled ? 0 : vatAllowanceF,
+    repairPending: ownRepairPendingOn(purchaseLineId),
   };
+}
+
+/**
+ * v0.8.101 S3 — läuft an einem Los dieser Einkaufszeile eine EIGENE Reparatur, die noch nicht „ready" ist? Ihre Kosten stehen ab
+ * „in Arbeit" im Lager (Soll INVENTORY), der Los-Einstand und damit der Kostenanteil des Partners folgen erst bei „ready".
+ * Solange wartet jede Auszahlung/Verrechnung an diesem Artikel — sonst ginge eine Direktzahlung des Partners vorher als
+ * Guthaben hinaus, bevor sein Anteil daran feststeht. Ohne gewähltes Los zählt das Los, das die Reparatur per FIFO träfe.
+ */
+export function ownRepairPendingOn(purchaseLineId: string): boolean {
+  return !!query(
+    `SELECT 1 FROM repairs r
+       JOIN purchase_lines pl ON pl.id = ? AND pl.product_id = r.product_id
+      WHERE COALESCE(r.repair_scope, '') = 'OWN' AND LOWER(COALESCE(r.status, '')) NOT IN ('ready', 'picked_up', 'delivered', 'cancelled')
+        AND (r.lot_id IN (SELECT id FROM stock_lots WHERE purchase_line_id = pl.id)
+             OR (r.lot_id IS NULL AND (SELECT l.purchase_line_id FROM stock_lots l WHERE l.product_id = r.product_id AND l.status = 'ACTIVE'
+                   AND l.qty_remaining > 0 ORDER BY l.acquired_at, l.id LIMIT 1) = pl.id))
+      LIMIT 1`,
+    [purchaseLineId],
+  )[0];
 }
 
 function assertParticipates(purchaseLineId: string, partnerId: string, branchId: string): string {
@@ -634,6 +669,7 @@ function insertMovement(ctx: PartnerItemCtx, m: {
 
 /** Methode einer Auszahlung, die nicht bar floss, sondern mit einer Kundenrechnung desselben Menschen verrechnet wurde. */
 export const PARTNER_OFFSET_METHOD = 'offset';
+export const PARTNER_REPAIR_PENDING = 'PARTNER_REPAIR_PENDING';
 export const PARTNER_MOVEMENT_IS_OFFSET = 'PARTNER_MOVEMENT_IS_OFFSET';
 
 /**
@@ -686,6 +722,108 @@ export function cancelOffsetPayoutInHouse(movementId: string, now: string, userI
   }
 }
 
+// ── Partner bezahlt eine Kostenstelle direkt (v0.8.101 S3, Owner E1) ──────────
+
+/** Zahlweg einer Ausgabe, die ein beteiligter Partner DIREKT an die Werkstatt bezahlt hat (kein Geld von LATAIF). */
+export const PARTNER_DIRECT_PAY_METHOD = 'partner';
+/** Methode der Partnerbewegung zu dieser Zahlung. */
+export const PARTNER_DIRECT_MOVEMENT_METHOD = 'direct';
+export const PARTNER_COST_NOT_LINKED = 'PARTNER_COST_NOT_LINKED';
+
+export interface PartnerCostDoc {
+  expenseId: string; expenseNumber: string; supplierId: string; supplierName: string; date: string;
+  amount: number; open: number; revision: number;
+}
+
+/**
+ * Die offenen artikelbezogenen Kostenstellen dieser Einkaufszeile: Werkstattausgaben einer EIGENEN Reparatur eines Loses
+ * dieser Zeile (Reparaturzeile oder Werkstattgold-Abrechnung in BHD), mit der Werkstatt als Gläubiger. Ohne gewähltes Los
+ * gilt das Los, das die Reparatur per FIFO trifft (bei gemischten Losen ist das Los Pflicht). Nur, was noch offen ist.
+ */
+export function directCostDocsOf(purchaseLineId: string, branchId: string): PartnerCostDoc[] {
+  return query(
+    `SELECT e.id, e.expense_number, e.amount, COALESCE(e.paid_amount, 0) AS paid, e.supplier_id, e.revision, e.expense_date, s.name AS supplier_name,
+            COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
+       FROM expenses e
+       JOIN suppliers s ON s.id = e.supplier_id
+       JOIN repairs r ON r.id = COALESCE(
+              (SELECT rl.repair_id FROM repair_lines rl WHERE rl.expense_id = e.id AND rl.status = 'OPEN' LIMIT 1),
+              (SELECT gp.source_repair_id FROM gold_payables gp WHERE gp.settlement_expense_id = e.id LIMIT 1))
+       JOIN purchase_lines pl ON pl.id = ? AND pl.product_id = r.product_id
+      WHERE e.branch_id = ? AND e.status != 'CANCELLED' AND COALESCE(r.repair_scope, '') = 'OWN'
+        AND (r.lot_id IN (SELECT id FROM stock_lots WHERE purchase_line_id = pl.id)
+             OR (r.lot_id IS NULL AND (SELECT l.purchase_line_id FROM stock_lots l WHERE l.product_id = r.product_id AND l.status = 'ACTIVE'
+                   AND l.qty_remaining > 0 ORDER BY l.acquired_at, l.id LIMIT 1) = pl.id))
+      ORDER BY e.expense_date, e.expense_number`,
+    [purchaseLineId, branchId],
+  ).map((r) => ({ r, openF: F(r.amount) - F(r.paid) - F(r.credit_paid) }))
+    .filter((x) => x.openF > 0)
+    .map(({ r, openF }) => ({
+      expenseId: String(r.id), expenseNumber: String(r.expense_number ?? ''), supplierId: String(r.supplier_id), supplierName: String(r.supplier_name ?? ''),
+      date: String(r.expense_date ?? ''), amount: B(F(r.amount)), open: B(openF), revision: Number(r.revision ?? 1),
+    }));
+}
+
+/** An welcher gemeinsamen Zeile (laufender Abschnitt, dieser Partner beteiligt) hängt diese Kostenstelle? Sonst Nein. */
+export function partnerCostLineOf(expenseId: string, partnerId: string, branchId: string): { purchaseLineId: string; doc: PartnerCostDoc } {
+  const lines = query(
+    `SELECT DISTINCT ip.purchase_line_id, ip.purchase_id FROM item_participations ip
+      WHERE ip.partner_id = ? AND ip.branch_id = ? AND ip.party = 'PARTNER' AND ip.ended_at IS NULL`,
+    [partnerId, branchId],
+  );
+  for (const l of lines) {
+    if (purchaseCancelled(String(l.purchase_id))) continue;
+    const doc = directCostDocsOf(String(l.purchase_line_id), branchId).find((d) => d.expenseId === expenseId);
+    if (doc) return { purchaseLineId: String(l.purchase_line_id), doc };
+  }
+  throw nein(PARTNER_COST_NOT_LINKED, 'this cost does not belong to an item this partner currently shares (own repair of a jointly bought lot) — it cannot be paid by the partner');
+}
+
+/**
+ * Die Partnerseite einer Direktzahlung: ein Beitrag (CONTRIBUTION, Methode 'direct') über den GEZAHLTEN Betrag — NICHT durch
+ * seinen Kostenanteil gedeckelt (er darf die ganze Kostenstelle bezahlen, Owner E1), sondern durch den offenen Betrag der
+ * Ausgabe (prüft der Aufrufer). Gebucht: Soll A/P (Werkstatt) / Haben PARTNER_ITEM_BALANCE (Partner). Sein wirtschaftlicher
+ * Anteil folgt getrennt über den Los-Einstand bei „ready"; bis dahin wartet jede Auszahlung (repairPending).
+ */
+export function recordPartnerDirectCostInHouse(
+  v: { expenseId: string; expensePaymentId: string; partnerId: string; purchaseLineId: string; supplierId: string; expenseNumber: string; amountF: number; date: string },
+  ctx: PartnerItemCtx,
+): { movementId: string } {
+  assertItemBooksHere();
+  const purchaseId = assertParticipates(v.purchaseLineId, v.partnerId, ctx.branchId);
+  const movementId = insertMovement(ctx, {
+    purchaseId, purchaseLineId: v.purchaseLineId, partnerId: v.partnerId, kind: 'CONTRIBUTION', amountF: v.amountF,
+    method: PARTNER_DIRECT_MOVEMENT_METHOD, occurredAt: v.date,
+    basis: { expenseId: v.expenseId, expenseNumber: v.expenseNumber, expensePaymentId: v.expensePaymentId, supplierId: v.supplierId, noLataifCash: true },
+    note: `Paid ${v.expenseNumber} directly to the workshop · no cash from LATAIF`,
+  });
+  postPartnerDirectCost({
+    id: movementId, partnerId: v.partnerId, supplierId: v.supplierId, amount: B(v.amountF), occurredAt: v.date,
+    purchaseLineId: v.purchaseLineId, expenseId: v.expenseId,
+  });
+  return { movementId };
+}
+
+/** Storno einer Direktzahlung: Zahlungszeile an der Ausgabe entfernen, Bezahltes/Status der Ausgabe neu (Buchung oben gedreht). */
+function undoDirectCostPayment(movementId: string, now: string): void {
+  const m = query('SELECT kind, method, basis_json FROM item_partner_movements WHERE id = ?', [movementId])[0];
+  if (!m || m.kind !== 'CONTRIBUTION' || m.method !== PARTNER_DIRECT_MOVEMENT_METHOD) return;
+  let basis: Record<string, unknown> = {};
+  try { basis = JSON.parse(String(m.basis_json || '{}')); } catch { basis = {}; }
+  const payId = String(basis.expensePaymentId ?? ''), expenseId = String(basis.expenseId ?? '');
+  const pay = query('SELECT amount FROM expense_payments WHERE id = ? AND expense_id = ? AND method = ?', [payId, expenseId, PARTNER_DIRECT_PAY_METHOD])[0];
+  if (!pay) throw nein(PARTNER_MOVEMENT_CANCELLED, 'the payment line of this direct payment changed meanwhile — nothing was changed');
+  const e = query('SELECT amount, paid_amount, status FROM expenses WHERE id = ?', [expenseId])[0];
+  const db = getDatabase();
+  db.run('DELETE FROM expense_payments WHERE id = ?', [payId]);
+  trackDelete('expense_payments', payId);
+  const newPaid = B(Math.max(0, F(e?.paid_amount) - F(pay.amount)));
+  const status = computeExpenseSettlement(Number(e?.amount ?? 0), newPaid, creditPaidForExpense(expenseId), String(e?.status ?? 'PENDING')).status;
+  db.run('UPDATE expenses SET paid_amount = ?, status = ? WHERE id = ?', [newPaid, status, expenseId]);
+  trackUpdate('expenses', expenseId, { paidAmount: newPaid, status, partnerDirectPaymentReversed: payId });
+  void now;
+}
+
 // ── Beitrag und Auszahlung ──────────────────────────────────────────────────
 
 export interface ItemMovementRecorded {
@@ -707,6 +845,9 @@ function payoutBlocker(st: LineState): { code: string; message: string } | null 
   if (st.refundPending) {
     return { code: PARTNER_SUPPLIER_REFUND_PENDING, message: 'the supplier credit from the return of this item is not fully used yet — payouts wait until it is used or refunded' };
   }
+  if (st.repairPending) {
+    return { code: PARTNER_REPAIR_PENDING, message: 'an own repair of this item is not "Ready" yet — its cost share is fixed at "Ready"; payouts and offsets wait until then' };
+  }
   return null;
 }
 
@@ -726,7 +867,9 @@ export function recordItemMovementInHouse(raw: ItemMovementInput, ctx: PartnerIt
     // Ein Beitrag bezahlt, was der Partner an DIESEM Artikel schuldet — seinen offenen Kostenanteil oder
     // eine Rückforderung — und nie mehr. Schuldet er nichts (erledigt, von LATAIF übernommen, oder LATAIF
     // schuldet ihm), wird nichts gebucht: sonst entstünde aus dem Nichts ein neues Guthaben.
-    const owedF = Math.max(0, -st.openF);
+    // v0.8.101 S1 — er darf zusätzlich seinen Anteil an der abziehbaren Vorsteuer vorfinanzieren (Bruttoanteil); LATAIF holt sie
+    // zurück und schuldet ihm diesen Teil (offener Saldo bis höchstens +Vorsteueranteil). Ohne Vorsteuer genau wie bisher.
+    const owedF = Math.max(0, st.vatAllowanceF - st.openF);
     if (owedF === 0) {
       if (purchaseCancelled(purchaseId)) {
         throw nein(PARTNER_ITEM_PURCHASE_CANCELLED, 'this purchase is cancelled — no contribution can be booked on it');
@@ -736,7 +879,9 @@ export function recordItemMovementInHouse(raw: ItemMovementInput, ctx: PartnerIt
         : 'the partner owes LATAIF nothing on this item — it is settled');
     }
     if (amountF > owedF) {
-      throw nein(PARTNER_ITEM_OVERFUNDED, `the partner owes ${bhd(owedF)} BHD on this item — at most that can be paid in`);
+      throw nein(PARTNER_ITEM_OVERFUNDED, st.vatAllowanceF > 0
+        ? `the partner owes ${bhd(Math.max(0, -st.openF))} BHD on this item; with his share of the input VAT (${bhd(st.vatAllowanceF)} BHD, reclaimed by LATAIF) at most ${bhd(owedF)} BHD can be paid in`
+        : `the partner owes ${bhd(owedF)} BHD on this item — at most that can be paid in`);
     }
   } else {
     const b = payoutBlocker(st);
@@ -1142,6 +1287,8 @@ export function cancelItemMovementInHouse(movementId: string, ctx: PartnerItemCt
     const id = String(t.id);
     db.run('UPDATE item_partner_movements SET cancelled_at = ?, cancelled_by = ? WHERE id = ?', [ctx.now, ctx.userId || null, id]);
     if (hasLedgerEntries('PARTNER_ITEM', id) && !hasReversalFor('PARTNER_ITEM', id)) reverseSource('PARTNER_ITEM', id, ctx.now);
+    // v0.8.101 S3 — eine Direktzahlung an die Werkstatt: ihre Zahlungszeile an der Ausgabe geht mit, die Werkstattschuld ist wieder offen.
+    undoDirectCostPayment(id, ctx.now);
     out.push(id);
   }
   return { cancelled: out };
@@ -1290,6 +1437,12 @@ export interface PartnerItemView {
   open: number;
   correctionPending: boolean;
   refundPending: boolean;
+  /** v0.8.101 S3 — eine eigene Reparatur ist gebucht, aber noch nicht „ready": Auszahlung/Verrechnung wartet. */
+  repairPending: boolean;
+  /** v0.8.101 S1 — Anteil an der abziehbaren Vorsteuer, den der Partner über den Kostenanteil hinaus vorfinanzieren darf. */
+  vatAllowance: number;
+  /** v0.8.101 S3 — offene Werkstattkosten dieses Artikels, die der (beteiligte) Partner direkt bezahlen darf. */
+  costDocs: PartnerCostDoc[];
   ownership: OwnershipView;
   /**
    * Die EINE Geldhandlung, die zum offenen Stand passt (dieselbe Regel wie beim Buchen):
@@ -1380,6 +1533,7 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
     for (const s of sales) if (s.changedAfterSettlement) warnings.push(`${s.invoiceNumber || 'Sale'}: ${s.changedAfterSettlement}`);
     if (st.returnedAfterEnd) warnings.push('A piece came back after the partnership on it ended — take it over by LATAIF.');
     if (st.refundPending) warnings.push('Supplier credit from a return is not fully used yet — payouts wait.');
+    if (st.repairPending) warnings.push('An own repair of this item is not Ready yet — payouts and offsets wait until its cost share is fixed.');
     const item: PartnerItemView = {
       purchaseLineId, purchaseId: String(r.purchase_id), purchaseNumber: String(r.purchase_number ?? ''),
       purchaseDate: String(r.purchase_date ?? ''), purchaseStatus: String(r.purchase_status ?? ''),
@@ -1395,6 +1549,8 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
       contributed: B(st.contributedF), paidOut: B(st.paidOutF), offsets: B(st.offsetF),
       profitComputed: B(computedF), profitShare: B(st.profitShareF), settledQty: st.settledQty, owedCost: B(st.owedCostF),
       open: B(st.openF), correctionPending: st.correctionPending, refundPending: st.refundPending,
+      repairPending: st.repairPending, vatAllowance: B(st.vatAllowanceF),
+      costDocs: current ? directCostDocsOf(purchaseLineId, branchId) : [],
       ownership: ownershipViewOf(purchaseLineId, branchId),
       ...moneyStateOf(st, !!current, current ? null : (last?.endedReason ?? null), sales, last?.qty ?? 0),
       sales, movements, warnings,
