@@ -762,7 +762,7 @@ export function partnerReceivableNow(purchaseLineId: string, partnerId: string, 
  */
 export function recordOffsetRepaymentInHouse(
   v: { purchaseLineId: string; partnerId: string; amountF: number; date: string; offsetNumber: string; counterLabel: string;
-    counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string } },
+    counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE' | 'CUSTOMER_CREDIT'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string } },
   ctx: PartnerItemCtx,
 ): { movementId: string; receivableAfterF: number } {
   assertItemBooksHere();

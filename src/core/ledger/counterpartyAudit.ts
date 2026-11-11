@@ -331,6 +331,13 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
       ccRefunded.set(ref, (ccRefunded.get(ref) ?? 0) + toFils(r.amount));
     }
   } catch { /* ältere Datenbank ohne die Tabelle: keine Auszahlungen */ }
+  // v0.8.101 S5 — eine Verrechnung mit einer Partnerforderung verbraucht das Guthaben ebenso (used_amount), solange nicht zurückgenommen.
+  try {
+    for (const r of run(`SELECT customer_credit_id AS ref, amount FROM customer_credit_offsets WHERE branch_id=? AND reversed_at IS NULL`, [branchId])) {
+      const ref = String(r.ref);
+      ccRefunded.set(ref, (ccRefunded.get(ref) ?? 0) + toFils(r.amount));
+    }
+  } catch { /* ältere Datenbank ohne die Tabelle: keine Verrechnungen */ }
 
   for (const r of ccRows) {
     // R6E-CN — CANCELLED ist ein Endstatus (Gutschrift storniert, Buchung umgekehrt): kein
@@ -349,7 +356,7 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
       ? (refundClaim ? 'REFUNDED' : 'USED') : (refundClaim ? 'REFUND_DUE' : 'OPEN');
     if (String(r.status) !== expectedStatus) issues.push({ kind: 'inconsistent_status', severity: 'warning', side: 'customer', entityId: id, counterpartyId: cp, detail: `status='${r.status}' erwartet '${expectedStatus}' (used ${used}/amount ${amt} fils)` });
     const applied = toFils(r.applied) + (ccRefunded.get(id) ?? 0);
-    if (applied !== used) issues.push({ kind: 'used_drift', severity: 'warning', side: 'customer', entityId: id, counterpartyId: cp, amountFils: applied - used, detail: `Σ credit_applications ${applied} ≠ used_amount ${used} fils` });
+    if (applied !== used) issues.push({ kind: 'used_drift', severity: 'warning', side: 'customer', entityId: id, counterpartyId: cp, amountFils: applied - used, detail: `Σ credit_applications + refunds + partner offsets ${applied} ≠ used_amount ${used} fils` });
     // credit_no_ledger
     const st = String(r.source_type ?? '');
     let expectKey: string | null = null;

@@ -2635,7 +2635,7 @@ export function postPartnerDirectCost(m: {
  */
 export function postPartnerReceivableOffset(m: {
   id: string; partnerId: string; amount: number; occurredAt: string; purchaseLineId: string;
-  counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string };
+  counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE' | 'CUSTOMER_CREDIT'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string };
 }): PostingResult {
   const amount = ROUND(m.amount);
   if (amount <= 0) throw new Error(`postPartnerReceivableOffset: amount must be > 0 (got ${m.amount})`);

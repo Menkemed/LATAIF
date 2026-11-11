@@ -209,6 +209,8 @@ const sr = await import('../../src/core/offsets/party-settlement-reads.ts');
 const po = await import('../../src/core/offsets/party-offsets.ts');
 const pcmd = await import('../../src/core/bridge/party-commands.ts');
 const money = await import('../../src/core/finance/money-house.ts');
+const ca = await import('../../src/core/parties/customer-account.ts');
+const prc = await import('../../src/core/offsets/partner-receivable-offsets.ts');
 const DB = freshDb();
 for (let i = 6; i <= 30; i++) {
   const pid = 'pw' + i;
@@ -328,13 +330,53 @@ let STL = '';
   ok(res.ok && (await undo({ settlementNumber: res.v.settlementNumber, expectedActiveLines: 1 })).ok && rec(A.line) === 150, 'R4 zurückgesetzt');
 }
 
-// ── R5 Store Credit wird nicht gegen eine Partnerforderung gepaart; Partnerguthaben nie gegen Partnerforderung ──
+// ── R5 Variante B: freies Store Credit gegen die gebuchte Partnerforderung — eigener Verbrauchsbeleg, derselbe Saldo ──
 {
-  DB.run(`INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status, source_type, source_id, created_at)
-          VALUES ('cc-1', 'branch-main', 'cust-1', 40, 0, 'OPEN', 'overpayment', 'x', ?)`, [NOW]);
-  const r = lese('cust-1');
-  const pairs = sr.planSettlement(r.invoices, r.sources, { invoiceIds: [A.line], sourceIds: ['cc-1'] });
-  ok(pairs.length === 0, 'R5 Store Credit ↔ Partnerforderung: keine Zuordnung (Verbrauch ohne Rechnung = Owner-Entscheidung)');
+  const { runCounterpartyAudit } = await import('../../src/core/ledger/counterpartyAudit.ts');
+  const { planCustomerChange } = await import('../../src/core/invoices/customer-change.ts');
+  const audit = () => runCounterpartyAudit(((sql: string, p?: unknown[]) => { const r = DB.exec(sql, p ?? [])[0]; return r ? r.values.map((v) => Object.fromEntries(r.columns.map((c, i) => [c, v[i]]))) : []; }) as never, 'branch-main')
+    .issues.filter((i: { kind: string }) => i.kind === 'used_drift' || i.kind === 'overused' || i.kind === 'inconsistent_status');
+  // Ein echtes Guthaben mit Buchung: Rechnung 50, bezahlt 90 → Überzahlungsguthaben 40 (Haben CUSTOMER_CREDIT).
+  await kauf('pw11', 30, undefined, 1, 30);
+  const lot11 = s(DB, "SELECT id FROM stock_lots WHERE product_id = 'pw11' LIMIT 1");
+  const iu = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ productId: 'pw11', quantity: 1, unitPrice: 50, purchasePrice: 30,
+    taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 50, lotId: lot11 }] as never, 'P').id);
+  reload();
+  imHaus(() => useInvoiceStore.getState().recordPayment(iu, 90, 'cash'));
+  reload();
+  const cc = s(DB, "SELECT id FROM customer_credits WHERE customer_id = 'cust-1' AND status = 'OPEN' ORDER BY created_at DESC LIMIT 1");
+  ok(!!cc && r3(n(DB, 'SELECT amount FROM customer_credits WHERE id = ?', [cc])) === 40, 'R5 freies Store Credit 40 (Überzahlung, gebucht)');
+  const gaps1 = S([...KONTEN, 'CUSTOMER_CREDIT'].map(gap));
+  const g0 = geld(), ccL0 = saldo('CUSTOMER_CREDIT', 'cust-1'), pb0 = saldo('PARTNER_ITEM_BALANCE', 'pa-b');
+  const res = await settle(auftrag('cust-1', [], { invoiceIds: [A.line], sourceIds: [cc] }));
+  ok(res.ok && rec(A.line) === 110, `R5 Store Credit 40 gegen die Rückforderung 150 → 110 (${S(res).slice(0, 100)})`);
+  const c = DB.exec('SELECT used_amount, status FROM customer_credits WHERE id = ?', [cc])[0].values[0];
+  ok(r3(Number(c[0])) === 40 && String(c[1]) === 'USED' && !lese('cust-1').sources.some((x) => x.id === cc),
+    `R5 derselbe Saldo: used_amount 40, USED, nirgends mehr verfügbar (${S(c)})`);
+  ok(n(DB, 'SELECT COUNT(*) FROM customer_credit_offsets WHERE customer_credit_id = ? AND reversed_at IS NULL', [cc]) === 1
+    && n(DB, 'SELECT COUNT(*) FROM credit_applications WHERE credit_id = ?', [cc]) === 0 && n(DB, "SELECT COUNT(*) FROM payments WHERE method = 'credit'") === 0,
+    'R5 Verbrauchsbeleg in customer_credit_offsets; KEINE Anrechnung, KEINE künstliche Rechnungszahlung');
+  ok(geld() === g0 && r3(ccL0 - saldo('CUSTOMER_CREDIT', 'cust-1')) === 40 && r3(saldo('PARTNER_ITEM_BALANCE', 'pa-b') - pb0) === 40,
+    'R5 Soll CUSTOMER_CREDIT (Kunde) 40 / Haben PARTNER_ITEM_BALANCE (Partner) 40, kein Geld, keine VAT');
+  ok(S([...KONTEN, 'CUSTOMER_CREDIT'].map(gap)) === gaps1 && ausgeglichen() && audit().length === 0,
+    `R5 Hauptbuch = Bestand (auch CUSTOMER_CREDIT), Gegenpartei-Audit ohne Drift (${S(audit())})`);
+  const k = ca.customerAccountFor({ branchId: 'branch-main' } as never, 'cust-1');
+  ok(k.statement.some((x) => /Offset STL-.* → partner owed · no cash/.test(x.text)), 'R5 Kontoauszug zeigt die Verrechnung am Guthaben');
+  DB.run("INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level, preferences, customer_type, sales_stage, created_at, updated_at) VALUES ('cust-2','branch-main','Bea','Other','BH','en',0,'[]','collector','active',?,?)", [NOW, NOW]);
+  const kw = await code(() => Promise.resolve(planCustomerChange(iu, 'cust-1', 'cust-2' as never, { confirmed: true })));
+  ok(kw === 'INVOICE_HAS_OFFSET', `R5 Kundenwechsel der Ursprungsrechnung gesperrt, solange das Guthaben verrechnet ist (${kw})`);
+  const u = await undo({ settlementNumber: res.ok ? res.v.settlementNumber : '', expectedActiveLines: 1 });
+  const c2 = DB.exec('SELECT used_amount, status FROM customer_credits WHERE id = ?', [cc])[0].values[0];
+  ok(u.ok && r3(Number(c2[0])) === 0 && String(c2[1]) === 'OPEN' && rec(A.line) === 150
+    && n(DB, 'SELECT COUNT(*) FROM customer_credit_offsets WHERE customer_credit_id = ? AND reversed_at IS NOT NULL', [cc]) === 1,
+    `R5 Rückgängig: Guthaben wieder frei (0, OPEN), Beleg storniert (nicht gelöscht), Forderung wieder 150 (${S(c2)})`);
+  ok(S([...KONTEN, 'CUSTOMER_CREDIT'].map(gap)) === gaps1 && ausgeglichen() && audit().length === 0, 'R5 nach Rückgängig: Abgleich und Audit ohne Differenz');
+  // Ein Rückzahlungsanspruch (REFUND_DUE) und ein Eröffnungsguthaben sind kein freies Store Credit.
+  DB.run("UPDATE customer_credits SET status = 'REFUND_DUE' WHERE id = ?", [cc]);
+  const w = await code(() => Promise.resolve(imHaus(() => prc.createPartnerReceivableOffsetInHouse(
+    { customerId: 'cust-1', purchaseLineId: A.line, counterKind: 'STORE_CREDIT', counterId: cc, amount: 10 }, { branchId: 'branch-main' }))));
+  ok(w === 'OFFSET_COUNTER_NOT_OPEN', `R5 gebundenes Guthaben (Rückzahlungsanspruch) abgewiesen (${w})`);
+  DB.run("UPDATE customer_credits SET status = 'OPEN' WHERE id = ?", [cc]);
 }
 
 // ── R6 PC2 + Wiederholung ───────────────────────────────────────────────────

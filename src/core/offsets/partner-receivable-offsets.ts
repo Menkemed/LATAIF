@@ -9,8 +9,9 @@
 //     am Darlehen eine Rückzahlungszeile Quelle 'offset' OHNE eigene Buchung (wie B1); Rückgängig: Gegenzeile 'offset_reversal'.
 //   • offener Einkauf (ihre Lieferantenrolle):         Soll ACCOUNTS_PAYABLE (Lieferant) / Haben PARTNER_ITEM_BALANCE (Partner)
 //     am Einkauf eine Zeile 'offset' OHNE eigene Buchung (wie B2/B3); Rückgängig: die Zeile wird storniert (voided_at).
-//   • Store Credit: NICHT hier — ein Verbrauch ohne Rechnungszahlung passt nicht zum Anrechnungsmodell (`credit_applications`
-//     zeigt immer auf eine Rechnungszahlung; das Gegenpartei-Audit prüft used_amount = Σ Anrechnungen). Owner-Entscheidung offen.
+//   • freies Store Credit (Variante B):                Soll CUSTOMER_CREDIT (Kunde)     / Haben PARTNER_ITEM_BALANCE (Partner)
+//     Verbrauchsbeleg in `customer_credit_offsets` (eigene Tabelle, Muster customer_credit_refunds) + used_amount — derselbe
+//     Saldo wie jede Einlösung; `credit_applications` bleibt rechnungsgebunden; Audit zählt die Belege mit. Rückgängig: reversed_at.
 // Gebucht EINMAL an der Partnerbewegung (CONTRIBUTION 'offset'). `party_offsets`: receivable_type 'PARTNER_ITEM'
 // (receivable_id = Einkaufszeile, receivable_payment_id = Bewegung), payable_type 'DEBT' bzw. 'PURCHASE'.
 // ════════════════════════════════════════════════════════════════════════════
@@ -29,7 +30,7 @@ import { PURCHASE_OFFSET_METHOD, purchaseSettlementOf, refreshPurchaseSettlement
 import { PartnerItemRejected } from '@/core/partners/item-participation';
 import { cancelOffsetRepaymentInHouse, partnerReceivableNow, recordOffsetRepaymentInHouse } from '@/core/partners/item-participation-house';
 import {
-  DEBT_OFFSET_REVERSAL_SOURCE, DEBT_OFFSET_SOURCE, OFFSET_PAYABLE_DEBT, OFFSET_PAYABLE_PURCHASE, OffsetRestoreError,
+  DEBT_OFFSET_REVERSAL_SOURCE, DEBT_OFFSET_SOURCE, OFFSET_PAYABLE_DEBT, OFFSET_PAYABLE_PURCHASE, OFFSET_PAYABLE_STORE_CREDIT, OffsetRestoreError,
 } from './party-offset-restore';
 import { isBorrowedDirection, isDebtClosed } from './party-offset-reads';
 import { linkedPartnerOf, OFFSET_PARTNER_NOT_LINKED } from './partner-offsets';
@@ -50,14 +51,14 @@ const todayLocal = (): string => {
 export interface PartnerReceivableOffsetInput {
   customerId: string;
   purchaseLineId: string;
-  counterKind: 'LOAN_BORROWED' | 'PURCHASE';
+  counterKind: 'LOAN_BORROWED' | 'PURCHASE' | 'STORE_CREDIT';
   counterId: string;
   amount: number;
   offsetDate?: string;
 }
 export interface PartnerReceivableOffsetCreated {
   offsetId: string; offsetNumber: string; partnerId: string; purchaseLineId: string; movementId: string;
-  counterKind: 'LOAN_BORROWED' | 'PURCHASE'; counterId: string; counterPaymentId: string; amount: number; offsetDate: string;
+  counterKind: 'LOAN_BORROWED' | 'PURCHASE' | 'STORE_CREDIT'; counterId: string; counterPaymentId: string; amount: number; offsetDate: string;
 }
 
 /** Eine gebuchte Partnerforderung mit EINEM Gegenposten verrechnen — in der Transaktion des Aufrufers (`settleBalanceInHouse`). */
@@ -92,9 +93,26 @@ export function createPartnerReceivableOffsetInHouse(
   // ── Gegenposten derselben Person: frisch, offen, mit Buchung.
   let counterDate = '';
   let counterLabel = '';
-  let counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string };
+  let counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE' | 'CUSTOMER_CREDIT'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string };
   let debtAmountF = 0;
-  if (input.counterKind === 'LOAN_BORROWED') {
+  let creditRow: Record<string, unknown> | undefined;
+  if (input.counterKind === 'STORE_CREDIT') {
+    // Variante B — nur FREIES Store Credit dieses Kunden in dieser Filiale (OPEN, kein Eröffnungsguthaben, Betrag − verwendet):
+    // dieselbe Menge, die „Settle Balance" für Rechnungen anbietet. Rückzahlungsansprüche (REFUND_DUE) sind kein Store Credit.
+    creditRow = query(
+      `SELECT id, amount, used_amount, status, source_type, created_at, customer_id FROM customer_credits WHERE id = ? AND branch_id = ?`,
+      [input.counterId, ctx.branchId],
+    )[0];
+    if (!creditRow || String(creditRow.customer_id ?? '') !== input.customerId || String(creditRow.status) !== 'OPEN'
+      || String(creditRow.source_type ?? '') === 'opening') {
+      throw nein(OFFSET_COUNTER_NOT_OPEN, 'this is not free store credit of this client');
+    }
+    const freeF = F(creditRow.amount) - F(creditRow.used_amount);
+    if (amountF > freeF) throw nein('OFFSET_EXCEEDS_CREDIT', `at most ${B(Math.max(0, freeF)).toFixed(3)} of this store credit is free`);
+    counterDate = String(creditRow.created_at ?? '').slice(0, 10);
+    counterLabel = 'store credit';
+    counter = { account: 'CUSTOMER_CREDIT', counterpartyType: 'CUSTOMER', counterpartyId: input.customerId };
+  } else if (input.counterKind === 'LOAN_BORROWED') {
     const d = query('SELECT id, loan_number, amount, status, direction, customer_id, created_at FROM debts WHERE id = ? AND branch_id = ?', [input.counterId, ctx.branchId])[0];
     if (!d || String(d.customer_id ?? '') !== input.customerId || !isBorrowedDirection(d.direction)) {
       throw nein(OFFSET_COUNTER_NOT_OPEN, 'this loan is not a "We Borrowed" loan of this client');
@@ -122,7 +140,7 @@ export function createPartnerReceivableOffsetInHouse(
     counterLabel = `purchase ${String(p.purchase_number ?? '') || input.counterId.slice(0, 8)}`;
     counter = { account: 'ACCOUNTS_PAYABLE', counterpartyType: 'SUPPLIER', counterpartyId: String(p.supplier_id) };
   } else {
-    throw nein('SETTLE_SELECTION_INVALID', 'a partner receivable is offset only against "We Borrowed" or an open purchase');
+    throw nein('SETTLE_SELECTION_INVALID', 'a partner receivable is offset only against store credit, "We Borrowed" or an open purchase');
   }
   // ── Tag: gültig, nicht in der Zukunft, nicht vor Einkauf des Artikels, Gegenposten oder Eröffnungsstichtag.
   const tag = input.offsetDate ?? todayLocal();
@@ -152,7 +170,16 @@ export function createPartnerReceivableOffsetInHouse(
   // ── 2. Gegenposten-Zeile OHNE eigene Buchung.
   const db = getDatabase();
   const counterPaymentId = uuid();
-  if (input.counterKind === 'LOAN_BORROWED') {
+  if (input.counterKind === 'STORE_CREDIT') {
+    // Verbrauchsbeleg (eigene Tabelle) + derselbe Saldo wie jede Einlösung: used_amount steigt, USED bei vollem Verbrauch.
+    db.run(`INSERT INTO customer_credit_offsets (id, branch_id, customer_credit_id, customer_id, amount, purchase_line_id, movement_id,
+              offset_number, offset_date, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [counterPaymentId, ctx.branchId, input.counterId, input.customerId, B(amountF), input.purchaseLineId, movementId, offsetNumber, tag, createdAt, userId || null]);
+    const usedF = F(creditRow?.used_amount) + amountF;
+    const status = usedF >= F(creditRow?.amount) - 5 ? 'USED' : 'OPEN';
+    db.run('UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?', [B(usedF), status, input.counterId]);
+    trackUpdate('customer_credits', input.counterId, { usedAmount: B(usedF), status, partnerOffset: offsetNumber });
+  } else if (input.counterKind === 'LOAN_BORROWED') {
     db.run(`INSERT INTO debt_payments (id, debt_id, amount, source, paid_at, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [counterPaymentId, input.counterId, B(amountF), DEBT_OFFSET_SOURCE, businessTimestamp(tag, createdAt), `Offset ${offsetNumber} · ${itemLabel} (partner owed) · no cash`, createdAt]);
     trackInsert('debt_payments', counterPaymentId, { debtId: input.counterId, amount: B(amountF), source: DEBT_OFFSET_SOURCE });
@@ -171,7 +198,8 @@ export function createPartnerReceivableOffsetInHouse(
        payable_type, payable_id, payable_payment_id, amount, offset_date, status, note, created_at, created_by, settlement_number)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?, ?)`,
     [offsetId, ctx.branchId, offsetNumber, input.customerId, OFFSET_RECEIVABLE_PARTNER_ITEM, input.purchaseLineId, movementId,
-      input.counterKind === 'LOAN_BORROWED' ? OFFSET_PAYABLE_DEBT : OFFSET_PAYABLE_PURCHASE, input.counterId, counterPaymentId,
+      input.counterKind === 'LOAN_BORROWED' ? OFFSET_PAYABLE_DEBT : input.counterKind === 'STORE_CREDIT' ? OFFSET_PAYABLE_STORE_CREDIT : OFFSET_PAYABLE_PURCHASE,
+      input.counterId, counterPaymentId,
       B(amountF), tag, createdAt, userId || null, link?.settlementNumber ?? null],
   );
   trackInsert('party_offsets', offsetId, { offsetNumber, purchaseLineId: input.purchaseLineId, counterId: input.counterId, amount: B(amountF) });
@@ -206,7 +234,19 @@ export function reversePartnerReceivableOffsetInHouse(o: Record<string, unknown>
   }
   const db = getDatabase();
   let reversalId: string | null = null;
-  if (String(o.payable_type) === OFFSET_PAYABLE_DEBT) {
+  if (String(o.payable_type) === OFFSET_PAYABLE_STORE_CREDIT) {
+    // Verbrauchsbeleg zurückgenommen (reversed_at, nie gelöscht); das Guthaben ist im selben Saldo wieder frei.
+    const creditId = String(o.payable_id);
+    db.run('UPDATE customer_credit_offsets SET reversed_at = ?, reversed_by = ? WHERE id = ? AND customer_credit_id = ? AND reversed_at IS NULL',
+      [now, userId || null, String(o.payable_payment_id), creditId]);
+    if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new OffsetRestoreError('OFFSET_CREDIT_LINE_CHANGED', 'the store credit line of the offset changed meanwhile — nothing was changed');
+    const c = query('SELECT amount, used_amount FROM customer_credits WHERE id = ?', [creditId])[0];
+    const usedF = F(c?.used_amount) - amountF;
+    if (usedF < 0) throw new OffsetRestoreError('OFFSET_CREDIT_LINE_CHANGED', 'the store credit changed meanwhile — nothing was changed');
+    const status = usedF >= F(c?.amount) - 5 ? 'USED' : 'OPEN';
+    db.run('UPDATE customer_credits SET used_amount = ?, status = ? WHERE id = ?', [B(usedF), status, creditId]);
+    trackUpdate('customer_credits', creditId, { usedAmount: B(usedF), status, partnerOffsetReversed: nummer });
+  } else if (String(o.payable_type) === OFFSET_PAYABLE_DEBT) {
     const debtId = String(o.payable_id);
     reversalId = uuid();
     db.run(`INSERT INTO debt_payments (id, debt_id, amount, source, paid_at, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,

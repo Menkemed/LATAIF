@@ -262,7 +262,7 @@ export function planSettlementRows(
       if (q.left <= OPEN_EPS_F) continue;
       // v0.8.101 S5 — eine Partnerforderung nur gegen „We Borrowed" und offene Einkäufe derselben Person (nie gegen ein
       // Partnerguthaben — das ist die Verrechnung Artikel↔Artikel im Partnermodul; Store Credit: Owner-Entscheidung offen).
-      if (i.kind === 'PARTNER_ITEM' && q.kind !== 'LOAN_BORROWED' && q.kind !== 'PURCHASE') continue;
+      if (i.kind === 'PARTNER_ITEM' && q.kind === 'PARTNER_ITEM') continue;
       const maxF = Math.min(i.left, q.left);
       const hand = selected.amounts?.[settlePairKey(q.id, i.id)];
       const edited = typeof hand === 'number' && Number.isFinite(hand);

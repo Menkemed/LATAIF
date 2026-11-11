@@ -215,7 +215,7 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
     const links = read.invoices.find((i) => i.id === p.invoiceId);
     if (links?.kind === 'PARTNER_ITEM') {
       // v0.8.101 S5 — linke Seite ist eine gebuchte Partnerforderung: gegen „We Borrowed" bzw. einen offenen Einkauf.
-      if (p.sourceKind !== 'LOAN_BORROWED' && p.sourceKind !== 'PURCHASE') throw nein(SETTLE_SELECTION_INVALID, 'a partner receivable is offset only against "We Borrowed" or an open purchase');
+      if (p.sourceKind === 'PARTNER_ITEM') throw nein(SETTLE_SELECTION_INVALID, 'a partner receivable is not offset against a partner balance here (use "Offset items" in the partner module)');
       const r = createPartnerReceivableOffsetInHouse(
         { customerId: req.customerId, purchaseLineId: p.invoiceId, counterKind: p.sourceKind, counterId: p.sourceId, amount: B(p.amountF), offsetDate: tag },
         { branchId: ctx.branchId, userId }, { settlementNumber, line },

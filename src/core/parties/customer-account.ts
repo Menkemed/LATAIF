@@ -493,6 +493,19 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
     list.push({ date: day(a.received_at), text: a.offset_number ? `Offset ${txt(a.offset_number)} → ${ziel} · no cash` : `Applied to ${ziel}`, amountF: F(a.amount) });
     appByCredit.set(txt(a.credit_id), list);
   }
+  // v0.8.101 S5 — eine Verrechnung mit einer Partnerforderung (eigene Verbrauchstabelle), solange nicht zurückgenommen.
+  try {
+    for (const a of query(
+      `SELECT co.customer_credit_id AS credit_id, co.amount, co.offset_date, co.offset_number FROM customer_credit_offsets co
+         JOIN customer_credits cc ON cc.id = co.customer_credit_id
+        WHERE cc.customer_id = ? AND cc.branch_id = ? AND co.reversed_at IS NULL`,
+      [customerId, branchId],
+    )) {
+      const list = appByCredit.get(txt(a.credit_id)) ?? [];
+      list.push({ date: day(a.offset_date), text: `Offset ${txt(a.offset_number)} → partner owed · no cash`, amountF: F(a.amount) });
+      appByCredit.set(txt(a.credit_id), list);
+    }
+  } catch { /* ältere Datenbank ohne die Tabelle */ }
   const CREDIT_SOURCE: Record<string, string> = {
     sales_return: 'from a return', order_overpayment: 'order overpayment', overpayment: 'overpayment', order_cancel: 'order cancelled',
     gold_conversion: 'gold converted to money', invoice_edit: 'invoice correction', opening: 'opening balance',

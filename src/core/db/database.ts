@@ -2643,6 +2643,26 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_customer_credit_refunds_credit ON customer_credit_refunds(customer_credit_id)`,
+    // v0.8.101 S5 (Owner E3) — Store Credit verrechnet mit einer GEBUCHTEN Partnerforderung derselben Person: je Verrechnung ein
+    // Beleg; der verfügbare Saldo (amount − used_amount) sinkt um genau diesen Betrag — derselbe Saldo wie jede Einlösung.
+    // Eigene Tabelle (Spiegel von customer_credit_refunds): `credit_applications` bleibt streng an Rechnungszahlungen gebunden.
+    // Nur am Primary; Rückgängig setzt reversed_at (kein Löschen). Additiv — eine ältere App kennt sie nicht und braucht sie nicht.
+    `CREATE TABLE IF NOT EXISTS customer_credit_offsets (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      customer_credit_id TEXT NOT NULL,
+      customer_id TEXT NOT NULL,
+      amount REAL NOT NULL CHECK (amount > 0),
+      purchase_line_id TEXT NOT NULL,
+      movement_id TEXT NOT NULL,
+      offset_number TEXT NOT NULL,
+      offset_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      reversed_at TEXT,
+      reversed_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_credit_offsets_credit ON customer_credit_offsets(customer_credit_id)`,
     // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order: die Goldkosten der Order-Zeile, gebucht Soll
     // INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist (Tag der Buchung daneben). NULL = noch nicht bewertet
     // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.

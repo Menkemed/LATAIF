@@ -81,6 +81,8 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   // MIXED-INVOICE P1c — payouts on a customer's open refund (invoice correction): primary-only like supplier_credit_refunds;
   // PC2 reads them through the bridge (the ledger rows and the customer credit sync normally).
   'customer_credit_refunds',
+  // v0.8.101 S5: Store Credit gegen Partnerforderung (Variante B) — primary-only wie customer_credit_refunds.
+  'customer_credit_offsets',
 ]);
 const LOCAL_INACTIVE_MEDIA = new Set<string>(MEDIA_TABLES);
 const DEPRECATED_OR_UNREACHABLE_DDL = new Set<string>(); // none; see §2 note below.
@@ -122,7 +124,8 @@ for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t
 // PURCHASE-EDIT Phase 2: +2 primary-only tables purchase_edits, cost_corrections → 29.
 // CONSIGNMENT D3: +1 primary-only table supplier_credit_refunds → 30.
 // MIXED-INVOICE P1c: +1 primary-only table customer_credit_refunds → 31.
-ok(LEGACY_LOCAL_NON_SYNC.size === 31, `legacy_local_non_sync = 31 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+// v0.8.101 S5: +1 primary-only table customer_credit_offsets → 32.
+ok(LEGACY_LOCAL_NON_SYNC.size === 32, `legacy_local_non_sync = 32 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

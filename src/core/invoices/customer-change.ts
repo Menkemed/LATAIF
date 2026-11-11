@@ -190,6 +190,14 @@ export function planCustomerChange(
     creditIds: creditRows.filter((r) => String(r.source_type) !== 'invoice_edit').map((r) => String(r.id)),
     offerIds: ids(query('SELECT id FROM offers WHERE invoice_id = ? AND customer_id = ?', [invoiceId, from])),
   };
+  // v0.8.101 S5 — ein Guthaben dieser Rechnung, das in einer wirksamen Verrechnung steckt (Settle Balance), zöge sonst zum neuen
+  // Kunden, während die Verrechnung beim alten bleibt. Erst die Verrechnung aufheben.
+  if (creditRows.length > 0 && query(
+    `SELECT 1 FROM party_offsets WHERE status = 'ACTIVE' AND payable_type = 'STORE_CREDIT' AND payable_id IN (${creditRows.map(() => '?').join(',')}) LIMIT 1`,
+    creditRows.map((r) => String(r.id)),
+  ).length > 0) {
+    throw new InvoiceActionRejected('INVOICE_HAS_OFFSET', 'store credit from this invoice is used in an active settlement (STL) — undo that settlement first. Nothing was changed.');
+  }
 
   // CUSTOM-ORDER Owner-Regel — Auftrag dieser Rechnung: er und seine Anzahlungen ziehen mit (nur der einfache Fall).
   const orderIds = [...new Set(query(
