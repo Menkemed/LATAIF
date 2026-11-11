@@ -14,6 +14,7 @@
 // Erfolg auf PC2 holen die Stores ihren Stand frisch vom Primary.
 // ════════════════════════════════════════════════════════════════════════════
 import { runOnPrimary } from '@/core/data/primary-action';
+import { localPermissionDenied } from '@/core/data/local-permission';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { useBankingStore } from '@/stores/bankingStore';
 import { usePartnerStore } from '@/stores/partnerStore';
@@ -138,6 +139,9 @@ export async function savePartnerTx(
 ): Promise<WriteOutcome<{ transactionId: string; transactionNumber: string }>> {
   let input: PartnerTxInput;
   try { input = partnerTxInput({ ...form, amount: amountFromField(form.amount) }); } catch (e) { return absage(e); }
+  // v0.8.101 S2 — Gesellschafter-Geld (Invest/Withdraw/Profit Share): dasselbe Zahlungsrecht wie am PC2.
+  const nein = localPermissionDenied<{ transactionId: string; transactionNumber: string }>(OP_PARTNERS_RECORD_TX);
+  if (nein) return nein;
   const r = await w.save<{ transactionId: string; transactionNumber: string }>(OP_PARTNERS_RECORD_TX, {
     local: async () => {
       const tx = await recordPartnerTxOnPrimary(input);

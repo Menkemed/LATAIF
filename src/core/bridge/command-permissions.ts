@@ -61,6 +61,13 @@ const PURCHASE_PAYMENTS = permOrAdmin('payments.*', 'PurchaseDetail Add Payment 
  * lokal und PC2). Das Anlegen OHNE Zahlung bleibt frei. Keine neue Rolle: dieselbe Ableitung `perm.canRecordPayments`.
  */
 const EXPENSE_PAYMENTS = permOrAdmin('payments.*', 'PayExpenseModal / ExpenseList Pay now: perm.canRecordPayments');
+/**
+ * v0.8.101 S2 (Owner 11.11.2026: „Partnerzahlungen, Beiträge und Auszahlungen serverseitig absichern"; SALES erfasst keine
+ * Zahlungen) — Geld zwischen LATAIF und einem Partner: Beitrag/Rückzahlung/Auszahlung an einem gemeinsamen Artikel, deren
+ * Storno (nimmt eine Kassen-/Bankbuchung zurück) und die Gesellschafterbuchungen (Invest, Withdraw, Profit Share). Dieselbe
+ * Ableitung `perm.canRecordPayments` wie jede andere Zahlung; Primary (Maske + Speicherfolge) und PC2 gleich. Keine neue Rolle.
+ */
+const PARTNER_PAYMENTS = permOrAdmin('payments.*', 'PartnerItemsPanel Pays in/Repays/Pay out/reverse, PartnersPage Invest/Withdraw/Profit Share: perm.canRecordPayments');
 
 /**
  * B2/B3 SICHERHEITSABSCHLUSS — Operationen, die mit UND ohne Zahlung vorkommen: das Anlegen bleibt frei, der ZAHLUNGSTEIL
@@ -190,9 +197,10 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   // `CustomerDetail` (Kundengold), `SettleGoldModal`, `MetalList` und die Schrotthandel-Seiten
   // fragen `usePermission` NICHT; `RepairDetail` bewacht „Add Material" und „Gold Used" nicht.
   // Am Primary darf jeder angemeldete Benutzer das — der Fernweg erfindet kein Recht.
+  // v0.8.101 S2: `PartnersPage` bewacht Invest/Withdraw/Profit Share seither mit `perm.canRecordPayments` (s. u.).
   'tax.record_payment': null,
   'banking.transfer': null,
-  'partners.record_tx': null,
+  'partners.record_tx': PARTNER_PAYMENTS,
   'debts.create': null,
   'debts.update': null,
   'debts.record_payment': null,
@@ -298,11 +306,12 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'tasks.update': null,
   'documents.upload': null,
   'documents.set_ocr': null,
-  // PARTNER-ITEMS — die Partnerseite fragt `usePermission` nicht (wie `partners.record_tx`).
-  'partner_items.record_movement': null,
+  // PARTNER-ITEMS — Geld (Beitrag, Rückzahlung, Auszahlung) und sein Storno: dasselbe Zahlungsrecht wie jede Zahlung
+  // (v0.8.101 S2). Abrechnen, Verrechnen zwischen Artikeln, Übernahme und Partnerwechsel bewegen kein Geld: ohne Tor.
+  'partner_items.record_movement': PARTNER_PAYMENTS,
   'partner_items.settle_sale': null,
   'partner_items.offset': null,
-  'partner_items.cancel_movement': null,
+  'partner_items.cancel_movement': PARTNER_PAYMENTS,
   'partner_items.take_over': null,
   'partner_items.change_partners': null,
 };

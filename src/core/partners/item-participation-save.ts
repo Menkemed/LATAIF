@@ -9,6 +9,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { currentBranchId, currentUserId } from '@/core/db/helpers';
 import { runOnPrimary } from '@/core/data/primary-action';
+import { localPermissionDenied } from '@/core/data/local-permission';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -96,6 +97,9 @@ export function changePartnersOnPrimary(input: OwnershipChangeInput): Promise<Ow
 export async function saveItemMovement(w: ItemWrite, raw: Record<string, unknown>): Promise<WriteOutcome<{ movementId: string }>> {
   let input: ItemMovementInput;
   try { input = itemMovementInput(raw); } catch (e) { return absage(e); }
+  // v0.8.101 S2 — Geld mit dem Partner: dasselbe Zahlungsrecht wie am PC2 (`executeCommand`).
+  const nein = localPermissionDenied<{ movementId: string }>(OP_RECORD_MOVEMENT);
+  if (nein) return nein;
   const r = await w.save<{ movementId: string }>(OP_RECORD_MOVEMENT, {
     local: async () => ({ movementId: (await recordItemMovementOnPrimary(input)).movementId }),
     remote: () => rumpf(input),
@@ -135,6 +139,9 @@ export async function saveItemOffset(w: ItemWrite, raw: Record<string, unknown>)
 export async function saveCancelMovement(w: ItemWrite, movementId: string): Promise<WriteOutcome<{ cancelled: string[] }>> {
   let id: string;
   try { id = requiredId(movementId, 'movementId'); } catch (e) { return absage(e); }
+  // v0.8.101 S2 — ein Storno nimmt eine Kassen-/Bankbuchung zurück: dasselbe Zahlungsrecht.
+  const nein = localPermissionDenied<{ cancelled: string[] }>(OP_CANCEL_MOVEMENT);
+  if (nein) return nein;
   const r = await w.save<{ cancelled: string[] }>(OP_CANCEL_MOVEMENT, {
     local: async () => cancelItemMovementOnPrimary(id),
     remote: () => ({ movementId: id }),

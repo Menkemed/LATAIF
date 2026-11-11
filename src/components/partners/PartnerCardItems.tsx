@@ -4,6 +4,7 @@
 // Dialog wie die Artikeltabelle darunter (PartnerItemsPanel) — gebucht und geprüft wird dort.
 import { useState } from 'react';
 import { Bhd } from '@/components/ui/Bhd';
+import { usePermission } from '@/hooks/usePermission';
 import type { PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 
 export interface PartnerItemAction {
@@ -22,7 +23,7 @@ function Pill({ text, tone }: { text: string; tone: 'grey' | 'amber' | 'green' |
   return <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: c[0], color: c[1], whiteSpace: 'nowrap' }}>{text}</span>;
 }
 
-function Row({ it, partnerId, onAction }: { it: PartnerItemView; partnerId: string; onAction: (a: PartnerItemAction) => void }) {
+function Row({ it, partnerId, onAction, canPay }: { it: PartnerItemView; partnerId: string; onAction: (a: PartnerItemAction) => void; canPay: boolean }) {
   const toSettle = it.sales.find((s) => s.settleable);
   let stage: [string, 'grey' | 'amber' | 'green' | 'red'];
   if (toSettle) stage = [toSettle.state === 'NEEDS_CORRECTION' ? 'Correction due' : 'Sold · to settle', 'amber'];
@@ -36,6 +37,7 @@ function Row({ it, partnerId, onAction }: { it: PartnerItemView; partnerId: stri
       : it.moneyAction === 'REPAYS' ? 'partner owes money back'
         : it.moneyAction === 'PAY_OUT' ? 'LATAIF owes partner' : 'nothing open';
   const act: [string, PartnerItemAction['kind']] | null = toSettle ? ['Settle', 'SETTLE']
+    : !canPay ? null
     : it.moneyAction === 'PAYS_IN' ? ['Pays in', 'PAYS_IN']
       : it.moneyAction === 'REPAYS' ? ['Repays', 'REPAYS']
         : it.moneyAction === 'PAY_OUT' ? ['Pay out', 'PAY_OUT'] : null;
@@ -72,6 +74,8 @@ export function PartnerCardItems({ data, partnerName, onAction }: {
   data: PartnerItemsOfPartner; partnerName: string; onAction: (a: PartnerItemAction) => void;
 }) {
   const [showDone, setShowDone] = useState(false);
+  // v0.8.101 S2 — „Pays in"/„Repays"/„Pay out" nur mit Zahlungsrecht; „Settle" bewegt kein Geld.
+  const { canRecordPayments: canPay } = usePermission();
   const running = data.items.filter((it) => !done(it));
   const finished = data.items.filter(done);
   const settled = finished.filter((it) => it.moneyStatus === 'SETTLED').length;
@@ -108,7 +112,7 @@ export function PartnerCardItems({ data, partnerName, onAction }: {
       {running.length > 0 && (
         <>
           <span className="text-overline" style={{ display: 'block', marginTop: 12, marginBottom: 2, fontSize: 10 }}>RUNNING · {running.length}</span>
-          {running.map((it) => <Row key={it.purchaseLineId} it={it} partnerId={data.partnerId} onAction={onAction} />)}
+          {running.map((it) => <Row key={it.purchaseLineId} it={it} partnerId={data.partnerId} onAction={onAction} canPay={canPay} />)}
         </>
       )}
       {finished.length > 0 && (

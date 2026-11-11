@@ -228,7 +228,10 @@ const OPS = ['tax.record_payment', 'banking.transfer', 'partners.record_tx', 'de
   ok(OPS.every((op) => registry.ALLOWED_MUTATIONS.includes(op)), 'SCOPE die sechs Geldaktionen sind namentlich freigegeben');
   ok(OPS.every((op) => registry.knownCommands().includes(op)), `SCOPE und registriert (${OPS.filter((op) => !registry.knownCommands().includes(op)).join(',') || 'alle'})`);
   ok(S([...cmd.MONEY_OPS].sort()) === S([...OPS].sort()), 'SCOPE die Befehlsdatei kennt genau diese sechs');
-  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && perms.OPERATION_PERMISSIONS[op] === null), 'SCOPE kein erfundenes Recht (die Masken des Primary haben kein Tor)');
+  // v0.8.101 S2 (Owner 11.11.2026): Gesellschafterbuchungen verlangen seither das Zahlungsrecht (PartnersPage + Speicherfolge + PC2).
+  ok(OPS.every((op) => op in perms.OPERATION_PERMISSIONS && (op === 'partners.record_tx'
+    ? (perms.OPERATION_PERMISSIONS[op] as { kind?: string; permission?: string } | null)?.permission === 'payments.*'
+    : perms.OPERATION_PERMISSIONS[op] === null)), 'SCOPE kein erfundenes Recht (die Masken des Primary haben kein Tor); Gesellschafterbuchung = Zahlungsrecht');
   ok(readOps.STORE_READ_OPS.includes('debts.payments.get') && registry.knownCommands().includes('debts.payments.get'), 'SCOPE die Rückzahlungen eines Darlehens sind eine Auskunft');
   ok(!registry.ALLOWED_MUTATIONS.some((op) => /^(debts\.(delete|cancel)|banking\.(delete|undo)|partners\.(delete_tx|mark_paid|delete_transaction)|tax\.(delete|reverse))/.test(op)),
     'SCOPE Löschen und Stornieren bleiben am Primary (nicht verdrahtet)');

@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/Input';
 import { Bhd } from '@/components/ui/Bhd';
 import { WriteError } from '@/components/shared/WriteError';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { usePermission } from '@/hooks/usePermission';
 import type { PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 import { saveCancelMovement, saveItemMovement, saveItemOffset } from '@/core/partners/item-participation-save';
 import type { Partner } from '@/core/models/types';
@@ -47,6 +48,8 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
   action?: PartnerItemAction | null; onActionDone?: () => void;
 }) {
   const w = useSharedWrites();
+  // v0.8.101 S2 — Geld mit dem Partner (Beitrag, Rückzahlung, Auszahlung, Storno) nur mit Zahlungsrecht; Abrechnen bleibt frei.
+  const { canRecordPayments: canPay } = usePermission();
   const [own, setOwn] = useState<{ mode: 'TAKEOVER' | 'CHANGE'; target: OwnershipTarget } | null>(null);
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
   const [form, setForm] = useState<MoveForm | null>(null);
@@ -67,7 +70,7 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
       if (action.kind === 'SETTLE') {
         const sale = it.sales.find((x) => x.invoiceLineId === action.invoiceLineId);
         if (sale) setSettleFor({ sale, itemLabel: it.productLabel, partnerName: p.name, sharePct: it.sharePct });
-      } else {
+      } else if (canPay) {
         openForm(it, p.partnerId, p.name, action.kind === 'PAY_OUT' ? 'PAYOUT' : 'CONTRIBUTION');
       }
     }
@@ -217,13 +220,16 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                       </div>)}
                       <div className="flex gap-2" style={{ marginBottom: 10 }}>
                         {/* Genau die Geldhandlung, die zum offenen Stand passt — dieselbe Regel prüft der Hauptrechner beim Buchen. */}
-                        {(it.moneyAction === 'PAYS_IN' || it.moneyAction === 'REPAYS') && (
+                        {!canPay && it.moneyAction !== 'NONE' && (
+                          <span style={{ fontSize: 12, color: '#6B7280' }} data-partner-item-no-pay-right>Recording money needs payment rights.</span>
+                        )}
+                        {canPay && (it.moneyAction === 'PAYS_IN' || it.moneyAction === 'REPAYS') && (
                           <Button variant="secondary" disabled={busy}
                             onClick={() => openForm(it, p.partnerId, p.name, 'CONTRIBUTION')} data-partner-item-contribute={it.purchaseLineId}>
                             {it.moneyAction === 'PAYS_IN' ? 'Partner pays in' : 'Partner repays'}
                           </Button>
                         )}
-                        {it.moneyAction === 'PAY_OUT' && (
+                        {canPay && it.moneyAction === 'PAY_OUT' && (
                           <Button variant="secondary" disabled={busy || it.correctionPending || it.refundPending}
                             onClick={() => openForm(it, p.partnerId, p.name, 'PAYOUT')} data-partner-item-payout={it.purchaseLineId}>
                             Pay out
@@ -296,7 +302,7 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                             {m.occurredAt} · {KIND_LABEL[m.kind] ?? m.kind}{m.invoiceNumber ? ` ${m.invoiceNumber}` : ''}
                             {m.method ? ` · ${m.method}` : ''} · <Bhd v={m.amount} /> BHD{m.detail ? ` · ${m.detail}` : ''}{m.note ? ` · ${m.note}` : ''}
                           </span>
-                          {!m.cancelled && m.kind !== 'SUPPLIER_RETURN' && m.kind !== 'TAKEOVER' && (
+                          {canPay && !m.cancelled && m.kind !== 'SUPPLIER_RETURN' && m.kind !== 'TAKEOVER' && (
                             <button type="button" disabled={busy} onClick={() => void cancelMove(it, m.id, m.kind)} className="cursor-pointer"
                               style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }} data-partner-item-cancel={m.id}>reverse (entry error)</button>
                           )}

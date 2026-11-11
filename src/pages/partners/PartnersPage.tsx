@@ -12,6 +12,7 @@ import { PhoneInput } from '@/components/ui/PhoneInput';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { usePartnerStore } from '@/stores/partnerStore';
+import { usePermission } from '@/hooks/usePermission';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Partner } from '@/core/models/types';
@@ -38,6 +39,7 @@ export function PartnersPage() {
   // `partners.create` / `partners.update`. R6D — die Partnerbewegungen (Einlage, Entnahme,
   // Gewinnausschüttung) ebenso: am Primary die Hausfolge, auf PC2 `partners.record_tx`.
   const w = useSharedWrites();
+  const { canRecordPayments: canPay } = usePermission();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useListState('search', '');
@@ -181,9 +183,12 @@ export function PartnersPage() {
               })()}
 
               <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
-                <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')} data-partner-tx-open="INVESTMENT"><TrendingUp size={12} /> Invest</Button>
-                <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')} data-partner-tx-open="WITHDRAWAL"><TrendingDown size={12} /> Withdraw</Button>
-                <Button variant="ghost" onClick={() => openTx(p.id, 'PROFIT_DISTRIBUTION')} data-partner-tx-open="PROFIT_DISTRIBUTION"><Gift size={12} /> Profit Share</Button>
+                {/* v0.8.101 S2 — Gesellschafter-Geld nur mit Zahlungsrecht (dieselbe Regel prüfen Speicherfolge und PC2). */}
+                {canPay && <>
+                  <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')} data-partner-tx-open="INVESTMENT"><TrendingUp size={12} /> Invest</Button>
+                  <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')} data-partner-tx-open="WITHDRAWAL"><TrendingDown size={12} /> Withdraw</Button>
+                  <Button variant="ghost" onClick={() => openTx(p.id, 'PROFIT_DISTRIBUTION')} data-partner-tx-open="PROFIT_DISTRIBUTION"><Gift size={12} /> Profit Share</Button>
+                </>}
                 <Button variant="ghost" onClick={() => { setEditPartner(p); setEditForm({ ...p }); }}>Edit</Button>
                 <Button variant="ghost" onClick={() => setHistoryId(p.id)}>History</Button>
               </div>
