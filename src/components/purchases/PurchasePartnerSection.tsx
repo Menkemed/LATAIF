@@ -13,6 +13,8 @@ import {
 export interface PartnerSectionLine {
   label: string;
   lineTotal: number;
+  /** v0.8.101 S1 — wirtschaftliche Kostenbasis (Brutto − abziehbare Vorsteuer); ohne Vorsteuer = lineTotal. */
+  costBasis?: number;
   partnerShares?: PartnerShareInput[];
 }
 
@@ -180,12 +182,17 @@ export function PurchasePartnerSection({ partners, lines, onApply }: Props) {
             {lines.map((l, i) => {
               if (!l.partnerShares || l.partnerShares.length === 0) return null;
               let plan: ReturnType<typeof planLineParticipation> = [];
-              try { plan = planLineParticipation(l.partnerShares, Math.round(l.lineTotal * 1000)); } catch { plan = []; }
+              // Der Kostenanteil (wie gespeichert): auf der wirtschaftlichen Basis ohne abziehbare Vorsteuer.
+              const basis = l.costBasis ?? l.lineTotal;
+              try { plan = planLineParticipation(l.partnerShares, Math.round(basis * 1000)); } catch { plan = []; }
               return (
                 <div key={i} className="flex items-center justify-between" style={{ fontSize: 12, padding: '6px 0', borderTop: '1px solid #F0F1F3' }}>
-                  <span>
+                  <span data-purchase-partner-line-plan={i}>
                     <strong>Line {i + 1}</strong> · {l.label || 'Item'} —{' '}
                     {plan.map((p) => `${nameOf(p.partnerId)} ${pct(p.shareBp / 100)} (${(p.costShareF / 1000).toFixed(3)} BHD)`).join(' · ')}
+                    {basis < l.lineTotal - 0.0005 && (
+                      <span style={{ color: '#9CA3AF' }}> · cost share on {basis.toFixed(3)} BHD (input VAT {(l.lineTotal - basis).toFixed(3)} is reclaimed by LATAIF)</span>
+                    )}
                   </span>
                   <button type="button" onClick={() => onApply([i], undefined)} className="cursor-pointer"
                     style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }} data-purchase-partner-remove={i}>

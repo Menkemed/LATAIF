@@ -468,7 +468,7 @@ function insertPurchaseLineRows(
   // PARTNER-ITEMS — Beteiligung je gemeinsam gekaufter Zeile, in derselben Klammer wie Beleg und
   // Zeilen (scheitert sie, gibt es den Einkauf nicht). Zeilen ohne Partner: nichts, wie bisher.
   insertLineParticipations({ branchId, userId, now }, purchaseId, lineRecords.map((l) => ({
-    lineId: l.id, productId: l.productId || null, lineTotal: l.lineTotal, quantity: l.qty, partnerShares: l.partnerShares,
+    lineId: l.id, productId: l.productId || null, lineTotal: l.lineTotal, vatAmount: l.vatAmount, quantity: l.qty, partnerShares: l.partnerShares,
   })));
 
   // Phase 2 — Stock-Lots: Pro Purchase-Line ein Lot mit dem TATSAECHLICHEN

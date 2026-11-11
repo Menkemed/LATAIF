@@ -40,6 +40,7 @@ import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSuppl
 // PARTNER-ITEMS — gemeinsamer Einkauf (optional, nur mit aktiven Partnern sichtbar).
 import { usePartnerStore } from '@/stores/partnerStore';
 import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSection';
+import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 // BULK METAL V1 — Bulk-Zeile: Gesamtgewicht + Gesamtkosten; Lot, Lot-Nummer und Wert rechnet das Haus.
@@ -736,11 +737,12 @@ export function PurchaseCreate() {
         {/* PARTNER-ITEMS — optional, geschlossen; ohne aktive Partner gar nicht sichtbar. */}
         <PurchasePartnerSection
           partners={partners}
-          lines={lines.map((l) => ({
-            label: productDisplayName(l),
-            lineTotal: (l.quantity || 0) * (l.unitPrice || 0),
-            partnerShares: l.partnerShares,
-          }))}
+          lines={lines.map((l) => {
+            const lineTotal = (l.quantity || 0) * (l.unitPrice || 0);
+            // v0.8.101 S1 — dieselbe Zerlegung wie createPurchase: Vorsteuer = Brutto × Satz / (100 + Satz).
+            const vat = inputVatRate > 0 ? lineTotal * inputVatRate / (100 + inputVatRate) : 0;
+            return { label: productDisplayName(l), lineTotal, costBasis: capitalizedLineCost(lineTotal, vat), partnerShares: l.partnerShares };
+          })}
           onApply={(idx, shares) => setLines((prev) => prev.map((l, i) => (idx.includes(i) ? { ...l, partnerShares: shares } : l)))}
         />
 

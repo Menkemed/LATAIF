@@ -190,7 +190,8 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                       <span style={{ color: '#9CA3AF', fontSize: 11 }}>· {it.purchaseNumber}{it.quantity > 1 ? ` · ${it.quantity} pcs` : ''}</span>
                     </button>
                     <span>{it.sharePct} %</span>
-                    <span className="font-mono"><Bhd v={it.costShare + it.extraCostShare} />{it.extraCostShare !== 0 && <span style={{ fontSize: 10, color: '#9CA3AF' }}> incl. <Bhd v={it.extraCostShare} /> added cost</span>}</span>
+                    {/* v0.8.101 S1 — Altbestand: die enthaltene Vorsteuer ist keine „added cost"; nur echte Zusatzkosten (Reparatur …) heißen so. */}
+                    <span className="font-mono" data-partner-item-cost={(it.costShare + it.extraCostShare).toFixed(3)}><Bhd v={it.costShare + it.extraCostShare} />{(it.extraCostShare + it.inputVatInCostShare) !== 0 && <span style={{ fontSize: 10, color: '#9CA3AF' }}> incl. <Bhd v={it.extraCostShare + it.inputVatInCostShare} /> added cost</span>}</span>
                     <span className="font-mono"><Bhd v={it.contributed} /></span>
                     <span className="font-mono"><Bhd v={it.paidOut} /></span>
                     <span className="font-mono"><Bhd v={it.profitComputed} /></span>
@@ -204,6 +205,11 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                   )}
                   {expanded && (
                     <div style={{ padding: '4px 0 12px 18px', fontSize: 12 }} data-partner-item-expanded={it.purchaseLineId}>
+                      {it.purchaseInputVat > 0 && (
+                        <div style={{ color: '#6B7280', marginBottom: 6 }} data-partner-item-input-vat={it.purchaseInputVat.toFixed(3)}>
+                          Purchase <Bhd v={it.purchaseGross} /> BHD incl. input VAT <Bhd v={it.purchaseInputVat} /> — LATAIF reclaims the input VAT; the cost share is on <Bhd v={it.purchaseGross - it.purchaseInputVat} /> BHD.
+                        </div>
+                      )}
                       {it.moneyAction !== 'NONE' && (<div style={{ color: '#6B7280', marginBottom: 6 }}>
                         {openText(it.open, p.name)}
                         {it.owedCost > 0 && <> · still to fund for unsold pieces: <Bhd v={it.owedCost} /> BHD</>}

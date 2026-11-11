@@ -37,7 +37,8 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import type { PurchaseLineParticipation } from '@/core/models/types';
-import { hasLedgerEntries, hasReversalFor, postItemPartnerMovement, reverseSource } from '@/core/ledger/posting';
+import { getPurchaseLineInputSplit, hasLedgerEntries, hasReversalFor, postItemPartnerMovement, reverseSource } from '@/core/ledger/posting';
+import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import { productDisplayName } from '../products/display-name.ts';
 import {
   B, F, FULL_BP, PartnerItemRejected, itemMovementInput, itemOffsetInput, openBalanceF, owedCostF, ownershipChangeInput,
@@ -101,16 +102,23 @@ function insertEpoch(
  * Legt je beteiligter Einkaufszeile LATAIF + Partner mit Anteil und Kostenanteil an (erster Abschnitt).
  * Aufgerufen von `createPurchase` in derselben Transaktion wie Beleg, Zeilen und Lose. Zeilen ohne
  * Partner bleiben genau wie bisher — es entsteht keine Zeile.
+ *
+ * v0.8.101 S1 — Kostenbasis ist der WIRTSCHAFTLICHE Einstand: Brutto − abziehbare Vorsteuer, genau der Wert,
+ * den die Einkaufsbuchung auf INVENTORY aktiviert und das Los trägt (`capitalizedLineCost`). Die Vorsteuer
+ * holt LATAIF vom Staat zurück; sie gehört weder zum Kostenanteil noch zum Gewinn. Ohne Vorsteuer (ZERO)
+ * ist das wie bisher der Zeilenbetrag. Vorher stand hier brutto; der Saldo stimmte nur über eine negative
+ * „Zusatzkosten"-Korrektur (Los − Abschnitt), und die Lieferantenrückgabe schrieb die Vorsteuer als Gewinn gut.
  */
 export function insertLineParticipations(
   ctx: PartnerItemCtx, purchaseId: string,
-  lines: ReadonlyArray<{ lineId: string; productId: string | null; lineTotal: number; quantity: number; partnerShares?: readonly PartnerShareInput[] }>,
+  lines: ReadonlyArray<{ lineId: string; productId: string | null; lineTotal: number; vatAmount?: number | null; quantity: number; partnerShares?: readonly PartnerShareInput[] }>,
 ): number {
   let n = 0;
   for (const l of lines) {
     if (!l.partnerShares || l.partnerShares.length === 0) continue;
     const qty = Math.max(1, l.quantity || 1);
-    insertEpoch(ctx, purchaseId, l.lineId, l.productId, l.lineId, F(l.lineTotal), qty, Math.round(F(l.lineTotal) / qty), 0, l.partnerShares);
+    const basisF = F(capitalizedLineCost(l.lineTotal, l.vatAmount));
+    insertEpoch(ctx, purchaseId, l.lineId, l.productId, l.lineId, basisF, qty, Math.round(basisF / qty), 0, l.partnerShares);
     n++;
   }
   return n;
@@ -222,6 +230,23 @@ function stockValueF(plId: string, qty: number): number {
     if (left <= 0) break;
   }
   return f;
+}
+
+/** Die Einkaufszeile selbst: Brutto (an den Lieferanten) und die abziehbare Vorsteuer darin, in Fils. */
+function purchaseLineGrossVatF(plId: string): { grossF: number; vatF: number } {
+  const r = query('SELECT line_total, vat_amount FROM purchase_lines WHERE id = ?', [plId])[0];
+  return { grossF: F(r?.line_total), vatF: F(r?.vat_amount) };
+}
+
+/**
+ * v0.8.101 S1 — Altbestand: Ein Einkaufsabschnitt, der vor v0.8.101 BRUTTO gespeichert wurde, enthält die Vorsteuer
+ * in Kostenbasis und Kostenanteil. Der Saldo stimmt trotzdem (die Los-Korrektur zieht sie wieder ab) und wird NICHT
+ * umgerechnet — hier steht nur, wie viel Vorsteuer darin steckt, damit die Anzeige sie nicht „Zusatzkosten" nennt.
+ */
+function grossBaselineVatF(e: Epoch): number {
+  if (e.key !== e.purchaseLineId || e.fromRowid !== 0) return 0;
+  const pl = purchaseLineGrossVatF(e.purchaseLineId);
+  return pl.vatF > 0 && e.valueF === pl.grossF ? pl.vatF : 0;
 }
 
 // ── Die Grundlage eines Verkaufs ────────────────────────────────────────────
@@ -790,7 +815,14 @@ export function settleSupplierReturnForPartners(
     if (q > inStockOfEpoch) {
       throw nein(PARTNER_OWNERSHIP_BLOCKED, `only ${inStockOfEpoch} piece(s) of this item belong to the partnership and are in stock — return at most that`);
     }
-    const valueF = F(q * (Number(l.unitPrice) || 0));
+    // v0.8.101 S1 — der Erstattungswert ist NETTO: die Rückgabebuchung nimmt die Vorsteuer anteilig zurück
+    // (Haben VAT_INPUT), LATAIF bekommt wirtschaftlich nur den Nettoanteil zurück. Dieselbe Rechnung wie dort
+    // (`confirmPurchaseReturnInHouse`): Vorsteuer × min(1, Rückgabe brutto / Zeile brutto), auf Fils gerundet.
+    const grossF = F(q * (Number(l.unitPrice) || 0));
+    const split = getPurchaseLineInputSplit(l.purchaseLineId);
+    const origGross = split.net + split.vat;
+    const vatBackF = split.vat > 0 && origGross > 0 ? F(Math.round(split.vat * Math.min(1, B(grossF) / origGross) * 1000) / 1000) : 0;
+    const valueF = grossF - vatBackF;
     const costF = stockValueF(l.purchaseLineId, q);
     const profitF = valueF - costF;
     const groupId = uuid();
@@ -1054,12 +1086,15 @@ export function participationsOfPurchase(purchaseId: string, branchId: string): 
     const shown = current ?? epochs[epochs.length - 1];
     const parties: PurchaseLineParticipation['parties'] = [];
     if (shown) {
+      // v0.8.101 S1 — angezeigt wird der wirtschaftliche Kostenanteil (ohne abziehbare Vorsteuer), auch beim Altbestand.
+      const vatF = grossBaselineVatF(shown);
+      const econ = (p: { costShareF: number; shareBp: number }): number => p.costShareF - Math.round(vatF * p.shareBp / FULL_BP);
       parties.push({ party: 'HOUSE', partnerId: null, name: 'LATAIF', active: true, sharePct: shown.houseBp / 100,
-        costShare: B(shown.valueF - shown.parties.reduce((a, p) => a + p.costShareF, 0)) });
+        costShare: B(shown.valueF - vatF - shown.parties.reduce((a, p) => a + econ(p), 0)) });
       for (const p of shown.parties) {
         const n = names.get(p.partnerId);
         parties.push({ party: 'PARTNER', partnerId: p.partnerId, name: n?.name ?? p.partnerId, active: n?.active ?? false,
-          sharePct: p.shareBp / 100, costShare: B(p.costShareF) });
+          sharePct: p.shareBp / 100, costShare: B(econ(p)) });
       }
     }
     out.push({
@@ -1158,6 +1193,11 @@ export interface PartnerItemView {
   lineTotal: number;
   sharePct: number;
   costShare: number;
+  /** v0.8.101 S1 — die Einkaufszeile brutto (an den Lieferanten) und die abziehbare Vorsteuer darin (LATAIF holt sie zurück). */
+  purchaseGross: number;
+  purchaseInputVat: number;
+  /** Altbestand (vor v0.8.101 brutto gespeichert): Vorsteueranteil des Partners in `costShare`; die Los-Korrektur zieht ihn ab. Sonst 0. */
+  inputVatInCostShare: number;
   /** Der Partner ist am laufenden Abschnitt beteiligt (sonst: früher beteiligt, Verlauf). */
   participating: boolean;
   /** Ende der letzten Beteiligung dieses Partners (Übernahme/Wechsel). */
@@ -1237,6 +1277,7 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
     const last = current ?? mine[mine.length - 1];
     const party = last?.parties.find((p) => p.partnerId === partnerId);
     const st = lineStateOf(purchaseLineId, partnerId, branchId);
+    const lineGV = purchaseLineGrossVatF(purchaseLineId);
     const sales = mine.flatMap((e) => salesView(e, partnerId, branchId));
     const computedF = sales.filter((s) => s.invoiceStatus === 'FINAL').reduce((a, s) => a + F(s.partnerShare), 0);
     const movements: PartnerItemMovementView[] = query(
@@ -1269,7 +1310,10 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
       productId: r.product_id ? String(r.product_id) : null,
       productLabel: productDisplayName({ brand: r.brand as string, name: r.product_name as string, categoryId: r.product_category_id as string, attributes: r.product_attributes as string }) || 'Item',
       sku: String(r.sku ?? ''), quantity: last?.qty ?? 0, lineTotal: B(last?.valueF ?? 0), sharePct: (party?.shareBp ?? 0) / 100,
-      costShare: B(party?.costShareF ?? 0), participating: !!current,
+      costShare: B(party?.costShareF ?? 0),
+      purchaseGross: B(lineGV.grossF), purchaseInputVat: B(lineGV.vatF),
+      inputVatInCostShare: B(last && party ? Math.round(grossBaselineVatF(last) * party.shareBp / FULL_BP) : 0),
+      participating: !!current,
       endedReason: current ? undefined : (last?.endedReason ?? undefined),
       extraCosts: B(st.extraUnsettledF), extraCostShare: B(st.extraCostShareF),
       contributed: B(st.contributedF), paidOut: B(st.paidOutF), offsets: B(st.offsetF),
