@@ -2626,6 +2626,27 @@ export function postPartnerDirectCost(m: {
   ], { occurredAt: m.occurredAt, sourceModule: 'PARTNER_ITEM', sourceId: m.id });
 }
 
+/**
+ * v0.8.101 S5 (Owner E3) — eine GEBUCHTE Partnerforderung (Soll-Saldo auf PARTNER_ITEM_BALANCE, z. B. Rückforderung nach einer
+ * Abrechnung) wird mit einer Verbindlichkeit von LATAIF gegenüber DERSELBEN Person verrechnet:
+ *   Soll LOAN_PAYABLE (Kunde, „We Borrowed") bzw. ACCOUNTS_PAYABLE (Lieferant, offener Einkauf)
+ *   Haben PARTNER_ITEM_BALANCE (Partner) — die Forderung an den Partner sinkt.
+ * Kein Geldkonto. Quelle: die Partnerbewegung (Rückgängig = reverseSource).
+ */
+export function postPartnerReceivableOffset(m: {
+  id: string; partnerId: string; amount: number; occurredAt: string; purchaseLineId: string;
+  counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string };
+}): PostingResult {
+  const amount = ROUND(m.amount);
+  if (amount <= 0) throw new Error(`postPartnerReceivableOffset: amount must be > 0 (got ${m.amount})`);
+  if (!m.partnerId || !m.counter.counterpartyId) throw new Error('postPartnerReceivableOffset: partner and counterparty are required — nothing was booked');
+  const meta = { kind: 'CONTRIBUTION', method: 'offset', purchaseLineId: m.purchaseLineId, offset: true, noCash: true };
+  return postEntries([
+    { account: m.counter.account, direction: 'DEBIT', amount, counterpartyType: m.counter.counterpartyType, counterpartyId: m.counter.counterpartyId, metadata: meta },
+    { account: 'PARTNER_ITEM_BALANCE', direction: 'CREDIT', amount, counterpartyType: 'PARTNER', counterpartyId: m.partnerId, metadata: meta },
+  ], { occurredAt: m.occurredAt, sourceModule: 'PARTNER_ITEM', sourceId: m.id });
+}
+
 // ── Repair Payment (Customer-Charge ohne Invoice) ────────────
 //
 // Anwendungsfall: Kunde zahlt direkt für die Reparatur, OHNE dass eine Invoice

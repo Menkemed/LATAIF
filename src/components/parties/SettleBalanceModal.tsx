@@ -198,13 +198,22 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
               const used = usedInv(i.id);
               const after = F(i.open) - used;
               return (
-                <label key={i.id} data-settle-invoice={i.number} data-settle-on={on ? '1' : '0'} className="flex cursor-pointer"
+                <label key={i.id} data-settle-invoice={i.number} data-settle-invoice-kind={i.kind ?? 'INVOICE'} data-settle-on={on ? '1' : '0'} className="flex cursor-pointer"
                   style={{ gap: 8, padding: '7px 8px', borderBottom: `1px solid ${LINE}`, background: on ? '#FAFBFC' : '#FFF', alignItems: 'flex-start' }}>
                   <input type="checkbox" checked={on} onChange={() => toggle(invSel, i.id, setInvSel)} style={{ marginTop: 3 }} />
                   <span style={{ flex: 1, minWidth: 0 }}>
-                    <b>{i.number}</b> <span style={{ color: GREY }}>· {fmtDate(i.date)}</span>
+                    <b>{i.number}</b>{' '}
+                    {/* v0.8.101 S5 — eine GEBUCHTE Forderung an den verknüpften Partner (z. B. Rückforderung nach Abrechnung), keine Rechnung. */}
+                    {i.kind === 'PARTNER_ITEM' && (
+                      <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 999, marginRight: 4, background: 'rgba(220,38,38,0.08)', color: '#B91C1C' }}>
+                        Partner owes{i.partnerName ? ` · ${i.partnerName}` : ''}
+                      </span>
+                    )}
+                    <span style={{ color: GREY }}>· {fmtDate(i.date)}</span>
                     <div style={{ fontSize: 11, color: GREY }}>
-                      total <Bhd v={i.total} /> · paid <Bhd v={i.paid} /> · open <Bhd v={i.open} />
+                      {i.kind === 'PARTNER_ITEM'
+                        ? <>{i.productLabel ? `${i.productLabel} · ` : ''}booked partner receivable · open <Bhd v={i.open} /> · only against We Borrowed or open purchases</>
+                        : <>total <Bhd v={i.total} /> · paid <Bhd v={i.paid} /> · open <Bhd v={i.open} /></>}
                     </div>
                     <div style={{ fontSize: 11, color: on && used > 0 ? (after <= 5 ? GREEN : INK) : GREY }}>
                       {!on ? 'excluded' : used === 0 ? 'nothing left to offset' : after <= 5 ? '→ fully paid' : `→ ${fmt(after)} stays open`}

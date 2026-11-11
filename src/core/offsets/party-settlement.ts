@@ -37,6 +37,7 @@ import { roleMayRunOp } from '@/core/bridge/command-permissions';
 import { createDebtOffsetInHouse } from './party-offsets';
 import { createPurchaseOffsetInHouse } from './purchase-offsets';
 import { createPartnerOffsetInHouse } from './partner-offsets';
+import { createPartnerReceivableOffsetInHouse, OFFSET_RECEIVABLE_PARTNER_ITEM, reversePartnerReceivableOffsetInHouse } from './partner-receivable-offsets';
 import { OFFSET_PAYABLE_STORE_CREDIT, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 export { OFFSET_HAS_LATER_RETURN, assertOffsetUndoSafe } from './party-offset-restore';
 import {
@@ -211,7 +212,16 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
     const quelle = read.sources.find((s) => s.id === p.sourceId)!;
     useInvoiceStore.getState().loadInvoices();
     let paymentId: string;
-    if (p.sourceKind === 'STORE_CREDIT') {
+    const links = read.invoices.find((i) => i.id === p.invoiceId);
+    if (links?.kind === 'PARTNER_ITEM') {
+      // v0.8.101 S5 — linke Seite ist eine gebuchte Partnerforderung: gegen „We Borrowed" bzw. einen offenen Einkauf.
+      if (p.sourceKind !== 'LOAN_BORROWED' && p.sourceKind !== 'PURCHASE') throw nein(SETTLE_SELECTION_INVALID, 'a partner receivable is offset only against "We Borrowed" or an open purchase');
+      const r = createPartnerReceivableOffsetInHouse(
+        { customerId: req.customerId, purchaseLineId: p.invoiceId, counterKind: p.sourceKind, counterId: p.sourceId, amount: B(p.amountF), offsetDate: tag },
+        { branchId: ctx.branchId, userId }, { settlementNumber, line },
+      );
+      paymentId = r.movementId;
+    } else if (p.sourceKind === 'STORE_CREDIT') {
       // Die vorhandene Anrechnung — GENAU dieses Guthaben, dieser Betrag, dieser Tag, diese Zahlungskennung.
       paymentId = uuid();
       const applied = useInvoiceStore.getState().applyCreditToInvoice(
@@ -273,13 +283,20 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
   // ── Nachher: Status und Rest beider Seiten; die vorhergesagten Vollzahlungen sind genau die eingetretenen.
   const nach = settleBalanceFor(ctx, req.customerId);
   for (const l of lines) {
+    if (read.invoices.find((i) => i.id === l.invoiceId)?.kind === 'PARTNER_ITEM') {
+      l.invoiceStatus = 'PARTNER_RECEIVABLE';
+      l.invoiceNumber = read.invoices.find((i) => i.id === l.invoiceId)?.number ?? '';
+      l.invoiceOpenAfter = nach.invoices.find((i) => i.id === l.invoiceId)?.open ?? 0;
+      l.sourceOpenAfter = nach.sources.find((s) => s.id === l.sourceId)?.open ?? 0;
+      continue;
+    }
     const inv = query('SELECT invoice_number, status, special_mark, number_finalized_at FROM invoices WHERE id = ?', [l.invoiceId])[0];
     l.invoiceStatus = String(inv?.status ?? '');
     l.invoiceNumber = String(inv?.invoice_number ?? '');
     l.invoiceOpenAfter = nach.invoices.find((i) => i.id === l.invoiceId)?.open ?? 0;
     l.sourceOpenAfter = nach.sources.find((s) => s.id === l.sourceId)?.open ?? 0;
   }
-  for (const i of read.invoices.filter((x) => pairs.some((p) => p.invoiceId === x.id))) {
+  for (const i of read.invoices.filter((x) => x.kind !== 'PARTNER_ITEM' && pairs.some((p) => p.invoiceId === x.id))) {
     const voll = String(query('SELECT status FROM invoices WHERE id = ?', [i.id])[0]?.status ?? '') === 'FINAL';
     if (voll !== finalizing.some((f) => f.id === i.id)) {
       throw new OffsetRestoreError('SETTLE_STATUS_MISMATCH', `${i.number}: the payment status after the settlement is not the expected one — nothing was offset`);
@@ -327,6 +344,12 @@ export function reverseSettlementInHouse(req: SettlementReverseRequest, ctx: { b
   const reason = (req.reason ?? '').trim().slice(0, 500) || `settlement ${nr} undone`;
   let amountF = 0;
   for (const o of aktiv) {
+    // v0.8.101 S5 — eine Partnerforderung als linke Seite: eigener Rückweg (Partnerbewegung + Gegenposten), keine Rechnungszahlung.
+    if (String(o.receivable_type) === OFFSET_RECEIVABLE_PARTNER_ITEM) {
+      reversePartnerReceivableOffsetInHouse(o, reason, { branchId: ctx.branchId });
+      amountF += F(o.amount);
+      continue;
+    }
     const paymentId = String(o.receivable_payment_id);
     if (!query('SELECT 1 FROM payments WHERE id = ?', [paymentId])[0]) {
       throw new InvoiceActionRejected('OFFSET_NOT_FOUND', `the invoice payment of ${String(o.offset_number)} is gone — nothing was changed`);

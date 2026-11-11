@@ -35,6 +35,7 @@ import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
 import { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 import { invoiceOpenFils, isBorrowedDirection as borrowed, isDebtClosed as debtClosed, OFFSET_CLOSED_INVOICE } from './party-offset-reads';
+import { reversePartnerReceivableOffsetInHouse } from './partner-receivable-offsets';
 
 export { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE } from './party-offset-restore';
 export { debtOffsetCandidatesFor, invoiceOpenFils, offsetForPayment, offsetsOfDebt, offsetsOfInvoice, type DebtOffsetCandidate, type DebtOffsetChoice, type OffsetRef } from './party-offset-reads';
@@ -213,6 +214,11 @@ export function reverseDebtOffsetInHouse(input: { offsetId: string; reason?: str
   const o = query('SELECT * FROM party_offsets WHERE id = ? AND branch_id = ?', [String(input.offsetId ?? ''), ctx.branchId])[0];
   if (!o) throw new InvoiceActionRejected(OFFSET_NOT_FOUND, 'no such offset in this branch');
   if (String(o.status) !== 'ACTIVE') throw new InvoiceActionRejected(OFFSET_ALREADY_REVERSED, `${String(o.offset_number)} is already reversed`);
+  // v0.8.101 S5 — eine Partnerforderung als linke Seite hat keine Rechnungszahlung: eigener Rückweg.
+  if (String(o.receivable_type) === 'PARTNER_ITEM') {
+    reversePartnerReceivableOffsetInHouse(o, (input.reason ?? '').trim() || 'offset removed', ctx);
+    return { offsetId: String(o.id), offsetNumber: String(o.offset_number), amount: F(o.amount) / 1000 } as unknown as DebtOffsetReversed;
+  }
   // CUSTOMER ACCOUNT C — keine doppelte Erstattung: eine spätere Rückgabe/Gutschrift an der Rechnung zuerst stornieren.
   assertOffsetUndoSafe(o);
   const paymentId = String(o.receivable_payment_id);

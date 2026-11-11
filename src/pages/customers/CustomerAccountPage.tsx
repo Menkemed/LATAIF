@@ -77,7 +77,9 @@ function Settlements({ list, canUndo, busy, onUndo }: { list: SettlementView[]; 
                       : l.sourceKind === 'PARTNER_ITEM'
                         ? <>Partner balance <Link to={l.partnerId ? partnerItemHref(l.partnerId, l.sourceId) : '/partners'} style={{ color: INK }} data-settlement-line-source="PARTNER_ITEM">{l.sourceNumber}</Link></>
                       : <>We Borrowed <Link to={`/debts?filter=all&loan=${encodeURIComponent(l.sourceNumber)}`} style={{ color: INK }}>{l.sourceNumber}</Link></>}</td>
-                  <td style={{ ...td, fontSize: 12 }}>→ <Link to={`/invoices/${l.invoiceId}`} style={{ color: INK }}>{l.invoiceNumber}</Link></td>
+                  <td style={{ ...td, fontSize: 12 }}>→ {l.receivableKind === 'PARTNER_ITEM'
+                    ? <>Partner owes <Link to={l.receivablePartnerId ? partnerItemHref(l.receivablePartnerId, l.invoiceId) : '/partners'} style={{ color: INK }} data-settlement-line-receivable="PARTNER_ITEM">{l.invoiceNumber}</Link></>
+                    : <Link to={`/invoices/${l.invoiceId}`} style={{ color: INK }}>{l.invoiceNumber}</Link>}</td>
                   <td style={{ ...td, fontSize: 12, color: GREY }}>{l.status === 'ACTIVE' ? 'Offset – no cash' : `removed${l.reverseReason ? ` (${l.reverseReason})` : ''}`}</td>
                   <td style={{ ...num, fontSize: 12, textDecoration: l.status === 'ACTIVE' ? 'none' : 'line-through', color: l.status === 'ACTIVE' ? INK : GREY }}><Bhd v={l.amount} /></td>
                 </tr>

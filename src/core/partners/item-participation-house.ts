@@ -37,7 +37,7 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import type { PurchaseLineParticipation } from '@/core/models/types';
-import { getPurchaseLineInputSplit, hasLedgerEntries, hasReversalFor, postItemPartnerMovement, postPartnerDirectCost, reverseSource } from '@/core/ledger/posting';
+import { getPurchaseLineInputSplit, hasLedgerEntries, hasReversalFor, postItemPartnerMovement, postPartnerDirectCost, postPartnerReceivableOffset, reverseSource } from '@/core/ledger/posting';
 import { computeExpenseSettlement, creditPaidForExpense } from '@/core/finance/expenseSettlement';
 import { trackDelete, trackUpdate } from '@/core/sync/track';
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
@@ -722,6 +722,60 @@ export function cancelOffsetPayoutInHouse(movementId: string, now: string, userI
   }
 }
 
+// ── Partnerforderung per Verrechnung (v0.8.101 S5, Owner E3) ─────────────────
+
+/**
+ * Die GEBUCHTE Forderung an den Partner an dieser Zeile: nur der Teil eines negativen Saldos, der aus Bewegungen stammt
+ * (Beiträge − Auszahlungen ± Gewinn-/Verlustanteile ± Verrechnungen < 0, z. B. Rückforderung nach einer Abrechnung) — er
+ * steht als Soll auf PARTNER_ITEM_BALANCE. NIE ein nur berechneter offener Kostenanteil (owedCost, nicht im Hauptbuch).
+ * Gesperrt, solange eine Nachabrechnung, eine Lieferantengutschrift oder eine Reparatur offen ist (der Betrag kann sich ändern).
+ */
+export function partnerReceivableNow(purchaseLineId: string, partnerId: string, branchId: string): { receivableF: number; blocker: { code: string; message: string } | null } {
+  assertParticipates(purchaseLineId, partnerId, branchId);
+  const st = lineStateOf(purchaseLineId, partnerId, branchId);
+  const bookedF = Math.max(0, -(st.openF + st.owedCostF));
+  return { receivableF: Math.min(Math.max(0, -st.openF), bookedF), blocker: payoutBlocker(st) };
+}
+
+/**
+ * Die Partnerseite: eine Rückzahlung per Verrechnung (CONTRIBUTION, Methode 'offset'), gebucht EINMAL hier —
+ * Soll Gegenkonto (LOAN_PAYABLE / ACCOUNTS_PAYABLE) / Haben PARTNER_ITEM_BALANCE. Höchstens die gebuchte Forderung.
+ */
+export function recordOffsetRepaymentInHouse(
+  v: { purchaseLineId: string; partnerId: string; amountF: number; date: string; offsetNumber: string; counterLabel: string;
+    counter: { account: 'LOAN_PAYABLE' | 'ACCOUNTS_PAYABLE'; counterpartyType: 'CUSTOMER' | 'SUPPLIER'; counterpartyId: string } },
+  ctx: PartnerItemCtx,
+): { movementId: string; receivableAfterF: number } {
+  assertItemBooksHere();
+  const purchaseId = assertParticipates(v.purchaseLineId, v.partnerId, ctx.branchId);
+  const now = partnerReceivableNow(v.purchaseLineId, v.partnerId, ctx.branchId);
+  if (now.blocker) throw nein(now.blocker.code, now.blocker.message);
+  if (!Number.isInteger(v.amountF) || v.amountF <= 0) throw nein(PARTNER_ITEM_AMOUNT_INVALID, 'the offset amount must be above 0');
+  if (v.amountF > now.receivableF) {
+    throw nein(PARTNER_ITEM_OVERFUNDED, now.receivableF > 0
+      ? `the partner owes LATAIF ${bhd(now.receivableF)} BHD (booked) on this item — offset at most that`
+      : 'the partner owes LATAIF nothing booked on this item (a cost share that is only calculated is never offset)');
+  }
+  const movementId = insertMovement(ctx, {
+    purchaseId, purchaseLineId: v.purchaseLineId, partnerId: v.partnerId, kind: 'CONTRIBUTION', amountF: v.amountF,
+    method: PARTNER_OFFSET_METHOD, occurredAt: v.date,
+    basis: { offsetNumber: v.offsetNumber, counter: v.counterLabel, counterAccount: v.counter.account, noCash: true },
+    note: `Offset ${v.offsetNumber} · ${v.counterLabel} · no cash`,
+  });
+  postPartnerReceivableOffset({ id: movementId, partnerId: v.partnerId, amount: B(v.amountF), occurredAt: v.date, purchaseLineId: v.purchaseLineId, counter: v.counter });
+  return { movementId, receivableAfterF: partnerReceivableNow(v.purchaseLineId, v.partnerId, ctx.branchId).receivableF };
+}
+
+/** Rückgängig der Partnerseite: Bewegung storniert (nie gelöscht), Buchung gegengebucht. */
+export function cancelOffsetRepaymentInHouse(movementId: string, now: string, userId: string | null): void {
+  getDatabase().run(
+    `UPDATE item_partner_movements SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND kind = 'CONTRIBUTION' AND method = ? AND cancelled_at IS NULL`,
+    [now, userId, movementId, PARTNER_OFFSET_METHOD],
+  );
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw nein(PARTNER_MOVEMENT_CANCELLED, 'the partner side of this offset changed meanwhile — nothing was changed');
+  if (hasLedgerEntries('PARTNER_ITEM', movementId) && !hasReversalFor('PARTNER_ITEM', movementId)) reverseSource('PARTNER_ITEM', movementId, now);
+}
+
 // ── Partner bezahlt eine Kostenstelle direkt (v0.8.101 S3, Owner E1) ──────────
 
 /** Zahlweg einer Ausgabe, die ein beteiligter Partner DIREKT an die Werkstatt bezahlt hat (kein Geld von LATAIF). */
@@ -1258,7 +1312,8 @@ export function cancelItemMovementInHouse(movementId: string, ctx: PartnerItemCt
     throw nein(PARTNER_MOVEMENT_CANCELLED, 'this booking belongs to a supplier return or an ownership change — it is not reversed on its own');
   }
   // v0.8.101 S4 — eine Auszahlung per Verrechnung (Settle Balance) hängt an ihrer Rechnungszahlung: nur dort aufheben.
-  if (m.kind === 'PAYOUT' && String(query('SELECT method FROM item_partner_movements WHERE id = ?', [movementId])[0]?.method ?? '') === PARTNER_OFFSET_METHOD) {
+  // v0.8.101 S5 — ebenso eine Rückzahlung per Verrechnung (CONTRIBUTION 'offset'): nur über das Rückgängig der STL.
+  if ((m.kind === 'PAYOUT' || m.kind === 'CONTRIBUTION') && String(query('SELECT method FROM item_partner_movements WHERE id = ?', [movementId])[0]?.method ?? '') === PARTNER_OFFSET_METHOD) {
     throw nein(PARTNER_MOVEMENT_IS_OFFSET, 'this payout was an offset with a client invoice — remove the offset at the invoice or undo the settlement (STL) instead');
   }
   const targets = m.kind === 'PROFIT_SHARE'
