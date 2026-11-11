@@ -69,7 +69,10 @@ function Settlements({ list, canUndo, busy, onUndo }: { list: SettlementView[]; 
                   <td style={{ ...td, fontSize: 12, color: l.status === 'ACTIVE' ? INK : GREY }}>{l.offsetNumber}</td>
                   <td style={{ ...td, fontSize: 12 }}>{l.sourceKind === 'STORE_CREDIT'
                     ? (l.sourceNumber === 'Store credit' ? 'Store credit' : `Store credit ${l.sourceNumber}`)
-                    : <>We Borrowed <Link to={`/debts?filter=all&loan=${encodeURIComponent(l.sourceNumber)}`} style={{ color: INK }}>{l.sourceNumber}</Link></>}</td>
+                    // v0.8.101 S0 — eine Einkaufsverrechnung ist kein Darlehen: Gegenbeleg ist der Einkauf selbst.
+                    : l.sourceKind === 'PURCHASE'
+                      ? <>Purchase <Link to={`/purchases/${encodeURIComponent(l.sourceId)}`} style={{ color: INK }} data-settlement-line-source="PURCHASE">{l.sourceNumber}</Link></>
+                      : <>We Borrowed <Link to={`/debts?filter=all&loan=${encodeURIComponent(l.sourceNumber)}`} style={{ color: INK }}>{l.sourceNumber}</Link></>}</td>
                   <td style={{ ...td, fontSize: 12 }}>→ <Link to={`/invoices/${l.invoiceId}`} style={{ color: INK }}>{l.invoiceNumber}</Link></td>
                   <td style={{ ...td, fontSize: 12, color: GREY }}>{l.status === 'ACTIVE' ? 'Offset – no cash' : `removed${l.reverseReason ? ` (${l.reverseReason})` : ''}`}</td>
                   <td style={{ ...num, fontSize: 12, textDecoration: l.status === 'ACTIVE' ? 'none' : 'line-through', color: l.status === 'ACTIVE' ? INK : GREY }}><Bhd v={l.amount} /></td>

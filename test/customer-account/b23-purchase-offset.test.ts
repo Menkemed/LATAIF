@@ -389,6 +389,21 @@ let STL = '';
   ok(o.length === 2 && o.every((x) => /^consignment purchase /.test(x.sourceLabel)), 'B23-B15 die Rechnung zeigt den Gegenbeleg „consignment purchase …"');
   const kd = konto(K).docs.find((d) => d.key === `purchase:${PN}`);
   ok(!!kd && kd.open < 0.0045 && konto(K).statement.some((r) => r.docKey === `purchase:${PN}` && /Settled by offset STL-/.test(r.text)), 'B23-B16 Kundenkonto: Einkauf beglichen, Ereignis „Settled by offset STL-…"');
+  // ── S0 (v0.8.101) Anzeige: nie Darlehen, Gegenbeleg = Einkauf, nie der Rohwert, Druck „Offset" ──
+  const pnNr = s(DB, 'SELECT purchase_number FROM purchases WHERE id = ?', [PN]);
+  const iaZeilen = konto(K).statement.filter((r) => r.docKey === `invoice:${IA}` && /Offset/.test(r.text));
+  ok(iaZeilen.length > 0 && iaZeilen.every((r) => /· purchase \S+ · no cash$/.test(r.text))
+    && iaZeilen.some((r) => r.text.includes(`purchase ${pnNr}`)),
+    `S0-1 Kontoauszug: Verrechnungszeile der Rechnung nennt den Einkauf ${pnNr} (${S(iaZeilen.map((r) => r.text))})`);
+  ok(!konto(K).statement.some((r) => /purchase_offset|debt_offset/.test(r.text)), 'S0-2 Kontoauszug: nie der technische Rohwert purchase_offset');
+  const sv = sr.settlementsOf(K, 'branch-main').flatMap((x) => x.lines).filter((l) => l.sourceKind === 'PURCHASE');
+  ok(sv.length === 3 && sv.some((l) => l.sourceId === PN && l.sourceNumber === pnNr), `S0-3 Verrechnungsliste: Quelle PURCHASE mit Einkaufsnummer (${S(sv.map((l) => [l.sourceKind, l.sourceNumber]))})`);
+  const a5 = await import('../../src/core/pdf/invoice-a5.ts');
+  ok(a5.paymentModeText(['purchase_offset'], 100, 0) === 'Offset' && a5.paymentModeText(['cash', 'purchase_offset'], 100, 50) === 'Cash / Offset / Credit',
+    `S0-4 gedruckte Rechnung: Zahlungsweg „Offset", nie „Purchase_offset" (${a5.paymentModeText(['purchase_offset'], 100, 0)})`);
+  const seite = codeOf(src('src/pages/customers/CustomerAccountPage.tsx'));
+  ok(/l\.sourceKind === 'PURCHASE'\s*\?\s*<>Purchase <Link to=\{`\/purchases\/\$\{encodeURIComponent\(l\.sourceId\)\}`\}/.test(seite),
+    'S0-5 Kundenkonto-Seite: Einkaufsverrechnung als „Purchase <Einkauf>" mit Link auf den Einkauf, nicht „We Borrowed"');
 }
 marker('B23_PURCHASE_BOOKING_PROVED');
 

@@ -476,6 +476,12 @@ try {
     await syncRuhe();
     client = await lade(client, `/clients/${K}/account`);
     await waitFor(client, `[data-settlement-undo="${stl2}"]`, 45000);
+    // S0 (v0.8.101): eine Einkaufsverrechnung steht als „Purchase <Nummer>" mit Link auf den Einkauf — nie als „We Borrowed".
+    const quellen = await client.ev(`return [...document.querySelectorAll('[data-settlement-line]')].map((tr) => (tr.children[1]?.textContent || '').replace(/\\s+/g, ' ').trim());`);
+    const links = await client.ev(`return [...document.querySelectorAll('[data-settlement-line-source="PURCHASE"]')].map((a) => a.getAttribute('href'));`);
+    ok(quellen.length > 0 && quellen.every((q) => /^Purchase \S+/.test(q)) && !quellen.some((q) => /We Borrowed/.test(q))
+      && links.length === quellen.length && links.every((h) => /\/purchases\/./.test(String(h))),
+      `E S0: Verrechnungsliste zeigt „Purchase …" mit Link auf den Einkauf (${S(quellen)} ${S(links)})`);
     ok(await mausKlick(client, `[data-settlement-undo="${stl2}"]`) === 'OK', `E PC2: Maus auf „Undo settlement" (${stl2})`);
     await waitFor(client, '[data-app-confirm]', 15000);
     ok(await mausKlick(client, '[data-app-confirm-ok]') === 'OK', 'E Maus auf „OK"');
