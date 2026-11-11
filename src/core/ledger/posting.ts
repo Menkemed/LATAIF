@@ -1203,7 +1203,14 @@ export function postCreditNote(cn: CreditNote, opts: { occurredAt?: string } = {
  * wirkt so periodengerecht: an jedem Stichtag zwischen Original und Korrektur stehen weder doppelte noch
  * fehlende Werte. Ohne die Option bleibt alles wie bisher (ein Datum für alles, z. B. Storno heute).
  */
-export interface ReverseOptions { mirrorOriginalDates?: boolean }
+export interface ReverseOptions {
+  mirrorOriginalDates?: boolean;
+  /**
+   * v0.8.101 — zusätzliche Kennzeichnung der Gegenbuchung (z. B. Erfassungsfehler oder echte Rückzahlung beim Storno einer
+   * Lieferantenrückgabe). Wird zu `{ reversal: true }` hinzugefügt; die Felder `reversal`/`mirroredAt` bleiben die der Engine.
+   */
+  metadata?: Record<string, unknown>;
+}
 
 /** R5F.1 — auch ein gescheiterter Storno zählt (er schreibt ohne `postEntries` direkt). */
 export function reverseSource(
@@ -1332,7 +1339,7 @@ function reverseSourceOnce(
           row[idIdx],                     // reverses_entry_id → Original
           row[tsIdx],
           row[vrIdx],
-          JSON.stringify(opts.mirrorOriginalDates ? { reversal: true, mirroredAt: recordedAt } : { reversal: true }),
+          JSON.stringify({ ...(opts.metadata ?? {}), ...(opts.mirrorOriginalDates ? { reversal: true, mirroredAt: recordedAt } : { reversal: true }) }),
           userId,
           recordedAt,
         ]

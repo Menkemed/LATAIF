@@ -689,7 +689,7 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
  * Vertrag (`supplier_credits` kennt keinen Storno-Status, die Leser zählen jede Zeile); die
  * finanzielle Wahrheit bleibt die stornierte PURCHASE_RETURN-Buchung.
  */
-export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: string): void {
+export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: string, ledgerMark?: Record<string, unknown>): void {
   const ret = query('SELECT * FROM purchase_returns WHERE id = ?', [returnId])[0];
   if (!ret) return;
   const purchaseId = String(ret.purchase_id ?? '');
@@ -710,7 +710,8 @@ export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: str
 
   // 2. Ledger-Storno (INVENTORY/AP/Cash der PURCHASE_RETURN-Buchung). Guarded + idempotent, STRIKT.
   if (hasLedgerEntries('PURCHASE_RETURN', returnId) && !hasReversalFor('PURCHASE_RETURN', returnId)) {
-    reverseSource('PURCHASE_RETURN', returnId, now);
+    // v0.8.101 — „Cancel return" kennzeichnet die Gegenbuchung (Erfassungsfehler oder echte Rückzahlung); der Einkaufs-Storno nicht.
+    reverseSource('PURCHASE_RETURN', returnId, now, ledgerMark ? { metadata: ledgerMark } : {});
   }
 
   // 3. Lots zurueck: je Line die beim Confirm konsumierte Menge wieder freigeben (restoreLot cappt).
@@ -773,9 +774,14 @@ export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: str
 // Partnerbuchungen der Rückgabe gegengebucht, die Rückgabebuchung storniert (Lagerwert inkl. Zusatzkosten, Verlust,
 // Vorsteuer, A/P, Erstattung), die Stücke zurück ins Los, Einkaufssummen, ungenutztes Guthaben der Rückgabe entfernt.
 // Diese Folge prüft VORHER — nichts wird geschrieben, solange etwas offen ist — und nennt den konkreten offenen Ausgleich:
-//   • Geld (Kasse/Bank/Benefit), das der Lieferant mit der Rückgabe zurückgezahlt hat, geht beim Storno an ihn zurück.
-//     Das ist eine ECHTE Zahlung — nur mit ausdrücklicher Bestätigung (`refundRepaid`), sonst Nein mit Betrag und Weg.
-//     Die Rückgabe vermerkt sie (`refund_repaid_amount`, `cancelled_at`); Banking zeigt Eingang UND Rückzahlung.
+//   • ZWEI ARTEN (Owner 11.11.2026), Pflichtangabe `kind`:
+//     A `entry_error` — die Rückgabe wurde versehentlich erfasst, der Lieferant hat NICHTS erstattet. Die Gegenbuchung
+//       korrigiert auch die falsch gebuchte Erstattung (Kasse/Bank/Benefit) — als Korrektur gekennzeichnet, KEINE Zahlung.
+//       Banking blendet den falschen Eingang aus (wie eine stornierte Zahlung); Hauptbuch und Protokoll behalten beides.
+//     B `reversed` — die Rückgabe war echt und wird rückgängig gemacht. Hat der Lieferant Geld gezahlt, geht es an ihn
+//       zurück: eine ECHTE Zahlung, nur nachgewiesen (`refundRepaid` + Beleg `repaymentReference`), sonst Nein mit Betrag
+//       und Weg. Die Rückgabe vermerkt sie (`refund_repaid_amount`, `refund_repaid_reference`, `cancelled_at`); Banking
+//       zeigt den Eingang UND die Rückzahlung. Eine Rückzahlung wird genau einmal erfasst (Status, Auftragskennung).
 //   • Ein Lieferantenguthaben aus der Rückgabe darf nicht verbraucht oder ausgezahlt sein (wo und wieviel, steht im Nein).
 //   • Partnerbuchungen NACH der Rückgabe (Auszahlung, Verrechnung …) zuerst zurücknehmen — keine doppelte Auszahlung.
 //   • Der Einstand des Loses muss derselbe sein wie bei der Rückgabe (sonst kämen die Stücke zum falschen Wert zurück).
@@ -794,6 +800,15 @@ export const PURCHASE_RETURN_COST_CHANGED = 'PURCHASE_RETURN_COST_CHANGED';
 export const PURCHASE_RETURN_COST_UNKNOWN = 'PURCHASE_RETURN_COST_UNKNOWN';
 export const PURCHASE_RETURN_CONSIGNMENT = 'PURCHASE_RETURN_CONSIGNMENT';
 export const PURCHASE_RETURN_STOCK_MISSING = 'PURCHASE_RETURN_STOCK_MISSING';
+export const PURCHASE_RETURN_CANCEL_KIND_REQUIRED = 'PURCHASE_RETURN_CANCEL_KIND_REQUIRED';
+export const PURCHASE_RETURN_KIND_CONFLICT = 'PURCHASE_RETURN_KIND_CONFLICT';
+export const PURCHASE_RETURN_NOTHING_TO_REPAY = 'PURCHASE_RETURN_NOTHING_TO_REPAY';
+
+/** Die zwei Arten eines Stornos (Owner 11.11.2026): versehentlich erfasst oder echte Rückgabe rückgängig. */
+export const PURCHASE_RETURN_CANCEL_KINDS = ['entry_error', 'reversed'] as const;
+export type PurchaseReturnCancelKind = typeof PURCHASE_RETURN_CANCEL_KINDS[number];
+export const isPurchaseReturnCancelKind = (v: unknown): v is PurchaseReturnCancelKind =>
+  (PURCHASE_RETURN_CANCEL_KINDS as readonly unknown[]).includes(v);
 
 const GELD_WEGE = ['cash', 'bank', 'benefit'];
 const wegName = (m: string): string => (m === 'benefit' ? 'Benefit' : m);
@@ -803,8 +818,12 @@ export interface PurchaseReturnCancelRequest {
   purchaseId: string;
   returnId: string;
   reason: string;
-  /** Pflicht, wenn der Lieferant mit der Rückgabe Geld gezahlt hat: es ging an ihn zurück (echte Zahlung). */
+  /** A `entry_error`: versehentlich erfasst, nichts erstattet. B `reversed`: echte Rückgabe wird rückgängig gemacht. */
+  kind: PurchaseReturnCancelKind;
+  /** Nur B, nur wenn der Lieferant Geld gezahlt hat: es ging nachweislich an ihn zurück (echte Zahlung). */
   refundRepaid?: boolean;
+  /** Nur B mit Geld: der Beleg der Rückzahlung (Überweisungsreferenz, Quittungsnummer). */
+  repaymentReference?: string;
 }
 
 export interface PurchaseReturnCancelled {
@@ -812,8 +831,11 @@ export interface PurchaseReturnCancelled {
   returnNumber: string;
   purchaseId: string;
   previousStatus: string;
-  /** Echte Rückzahlung an den Lieferanten (Kasse/Bank/Benefit) — 0, wenn kein Geld geflossen war. */
+  kind: PurchaseReturnCancelKind;
+  /** Echte Rückzahlung an den Lieferanten (Kasse/Bank/Benefit) — nur B; 0, wenn kein Geld geflossen war. */
   moneyRepaid: number;
+  /** A: die falsch gebuchte Erstattung, die korrigiert wurde (keine Zahlung) — 0 sonst. */
+  entryErrorCorrected: number;
   repaidMethod: string | null;
   /** Ungenutztes Lieferantenguthaben der Rückgabe, das entfernt wurde. */
   supplierCreditRemoved: number;
@@ -866,6 +888,10 @@ export function cancelPurchaseReturnInHouse(
   if (String(p.status) === 'CANCELLED') throw nein('PURCHASE_CANCELLED', 'this purchase is cancelled — its returns were undone with it');
   const grund = typeof req.reason === 'string' ? req.reason.trim() : '';
   if (!grund) throw nein(PURCHASE_RETURN_REASON_REQUIRED, 'A reason is required to cancel a supplier return.');
+  if (!isPurchaseReturnCancelKind(req.kind)) {
+    throw nein(PURCHASE_RETURN_CANCEL_KIND_REQUIRED,
+      'say what happened: "entry error" (the return was recorded by mistake, the supplier refunded nothing) or "reversed" (a real return is undone). Nothing was changed.');
+  }
   if (purchaseHasActiveOffsets(req.purchaseId)) throw nein(PURCHASE_HAS_OFFSET, purchaseHasOffsetMessage('Cancelling a supplier return'));
   const kommission = !!p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))
     || query(`SELECT 1 FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
@@ -878,20 +904,36 @@ export function cancelPurchaseReturnInHouse(
   const tagNein = correctionDateIssue(ctx.branchId, [{ iso: ctx.now, what: 'the cancellation of this supplier return' }]);
   if (tagNein) throw nein(tagNein.code, tagNein.message);
 
-  // 1. Geld: was der Lieferant mit der Rückgabe gezahlt hat, geht an ihn zurück — nur bestätigt (keine fiktive Zahlung).
+  // 1. Geld (Kasse/Bank/Benefit), das mit der Rückgabe als erstattet gebucht wurde:
+  //    A — war nie da: die Gegenbuchung korrigiert die falsche Buchung, keine Zahlung, kein Rückzahlungsvermerk.
+  //    B — kam wirklich: es geht an den Lieferanten zurück — nur nachgewiesen (Bestätigung + Beleg), keine fiktive Zahlung.
   const weg = (ret.refund_method as string | null) || null;
   const refundF = F(ret.refund_amount);
   const addedF = F(ret.added_cost_refund);
   const geldF = weg && GELD_WEGE.includes(weg) ? refundF + addedF : 0;
-  if (geldF > 0 && req.refundRepaid !== true) {
+  const beleg = typeof req.repaymentReference === 'string' ? req.repaymentReference.trim() : '';
+  if (req.kind === 'entry_error' && (req.refundRepaid === true || beleg)) {
+    throw nein(PURCHASE_RETURN_KIND_CONFLICT,
+      'an entry error has no repayment — the supplier refunded nothing, so nothing goes back. Choose "reversed" if money really came and went back. Nothing was changed.');
+  }
+  if (req.kind === 'reversed' && geldF === 0 && (req.refundRepaid === true || beleg)) {
+    throw nein(PURCHASE_RETURN_NOTHING_TO_REPAY,
+      `with ${nummer} the supplier paid no money (${weg === 'credit' ? 'the refund was a supplier credit' : 'the return only reduced what we owed'}) — there is no repayment to record. Nothing was changed.`);
+  }
+  if (req.kind === 'reversed' && geldF > 0 && (req.refundRepaid !== true || !beleg)) {
     throw nein(PURCHASE_RETURN_REFUND_NOT_REPAID,
       `with ${nummer} the supplier paid ${bhd(geldF)} back by ${wegName(weg!)}`
       + (addedF > 0 ? ` (refund ${bhd(refundF)} + added costs ${bhd(addedF)})` : '')
-      + `. Cancelling the return sends this money back to the supplier — repay ${bhd(geldF)} by ${wegName(weg!)} and confirm the repayment. Nothing was changed.`);
+      + `. Undoing the return sends this money back to the supplier — repay ${bhd(geldF)} by ${wegName(weg!)}, then confirm the repayment with its reference`
+      + (req.refundRepaid === true && !beleg ? ' (the reference is missing)' : '')
+      + '. If the supplier never paid this money, cancel it as an entry error instead. Nothing was changed.');
   }
+  const rueckzahlungF = req.kind === 'reversed' ? geldF : 0;
+  const korrekturF = req.kind === 'entry_error' ? geldF : 0;
   // 2. Guthaben aus der Rückgabe: unbenutzt (sonst wo und wieviel).
   let guthabenF = 0;
-  for (const c of query('SELECT id, amount, used_amount FROM supplier_credits WHERE source_return_id = ?', [returnId])) {
+  const guthabenZeilen: Array<Record<string, unknown>> = [];
+  for (const c of query('SELECT id, amount, used_amount, status, created_at, note FROM supplier_credits WHERE source_return_id = ?', [returnId])) {
     const usedF = F(c.used_amount);
     if (usedF > 5) {
       const wo = guthabenVerwendung(String(c.id));
@@ -900,6 +942,10 @@ export function cancelPurchaseReturnInHouse(
         + 'Undo that first, then cancel the return. Nothing was changed.');
     }
     guthabenF += F(c.amount);
+    // Die bestehende Umkehr entfernt die UNGENUTZTE Guthabenzeile (bestehender Vertrag, `supplier_credits` kennt keinen
+    // Storno-Status); die Buchung dazu bleibt mit ihrer Gegenbuchung im Hauptbuch. Das Protokoll hält die Zeile vollständig fest.
+    guthabenZeilen.push({ id: String(c.id), amount: Number(c.amount) || 0, usedAmount: Number(c.used_amount) || 0,
+      status: String(c.status ?? ''), createdAt: String(c.created_at ?? ''), note: c.note ?? null });
   }
   // 3. Partner: keine Partnerbuchung NACH der Rückgabe (sonst würde eine Auszahlung/Verrechnung doppelt).
   const partnerZeilen = query(
@@ -963,12 +1009,19 @@ export function cancelPurchaseReturnInHouse(
   const vorherEinkauf = { total: Number(p.total_amount) || 0, paid: Number(p.paid_amount) || 0, remaining: Number(p.remaining_amount) || 0, status: String(p.status) };
 
   // 5. Die bestehende Umkehr (Partner, Hauptbuch, Lose, Artikelstatus, Einkaufssummen, Guthaben, Overpay).
-  reverseConfirmedPurchaseReturnInHouse(returnId, ctx.now);
+  const kennung = req.kind === 'entry_error' ? 'ENTRY_ERROR' : 'REVERSED';
+  reverseConfirmedPurchaseReturnInHouse(returnId, ctx.now, {
+    purchaseReturnCancel: kennung, returnNumber: nummer,
+    // Die Gegenbuchung der Geldzeile ist bei A eine KORREKTUR (nie geflossen), bei B die ECHTE Rückzahlung.
+    ...(geldF > 0 ? { money: req.kind === 'entry_error' ? 'entry-error-correction' : 'repaid-to-supplier', moneyAmount: B(geldF), moneyMethod: weg } : {}),
+    ...(rueckzahlungF > 0 ? { repaymentReference: beleg } : {}),
+  });
 
   const db = getDatabase();
   db.run(
-    `UPDATE purchase_returns SET status = 'CANCELLED', cancelled_at = ?, cancelled_by = ?, cancel_reason = ?, refund_repaid_amount = ? WHERE id = ?`,
-    [ctx.now, ctx.userId || null, grund, B(geldF), returnId],
+    `UPDATE purchase_returns SET status = 'CANCELLED', cancelled_at = ?, cancelled_by = ?, cancel_reason = ?, refund_repaid_amount = ?,
+       cancel_kind = ?, refund_repaid_reference = ? WHERE id = ?`,
+    [ctx.now, ctx.userId || null, grund, B(rueckzahlungF), kennung, rueckzahlungF > 0 ? beleg : null, returnId],
   );
   trackChange('purchase_returns', returnId, 'update', {});
   const nachher = query('SELECT status, total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [req.purchaseId])[0] ?? {};
@@ -976,10 +1029,12 @@ export function cancelPurchaseReturnInHouse(
     module: 'Purchase', entityType: 'purchase_returns', entityId: returnId, action: 'STATUS_CHANGE', field: 'status',
     oldValue: vorher,
     newValue: {
-      status: 'CANCELLED', reason: grund, purchaseId: req.purchaseId, returnNumber: nummer,
-      // Echte Geldbewegung (bestätigt) getrennt von den buchhalterischen Gegenbuchungen:
-      moneyRepaid: geldF > 0 ? { amount: B(geldF), method: weg, refund: B(refundF), addedCosts: B(addedF) } : null,
-      supplierCreditRemoved: B(guthabenF),
+      status: 'CANCELLED', kind: kennung, reason: grund, purchaseId: req.purchaseId, returnNumber: nummer,
+      // Echte Geldbewegung (B, nachgewiesen) getrennt von der Korrektur einer falsch gebuchten Erstattung (A) und den
+      // buchhalterischen Gegenbuchungen:
+      moneyRepaid: rueckzahlungF > 0 ? { amount: B(rueckzahlungF), method: weg, reference: beleg, refund: B(refundF), addedCosts: B(addedF) } : null,
+      entryErrorCorrected: korrekturF > 0 ? { amount: B(korrekturF), method: weg, refund: B(refundF), addedCosts: B(addedF), note: 'booked refund never received — corrected, no payment' } : null,
+      supplierCreditRemoved: B(guthabenF), supplierCreditRows: guthabenZeilen,
       restoredBookValue: B(buchwertF), reversedLoss: B(verlustF), reversedAddedCostRefund: B(addedF),
       partnerMovementsReversed: partnerZeilen.length,
       purchaseBefore: vorherEinkauf,
@@ -989,8 +1044,8 @@ export function cancelPurchaseReturnInHouse(
     actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },
   });
   return {
-    returnId, returnNumber: nummer, purchaseId: req.purchaseId, previousStatus: vorher,
-    moneyRepaid: B(geldF), repaidMethod: geldF > 0 ? weg : null, supplierCreditRemoved: B(guthabenF),
+    returnId, returnNumber: nummer, purchaseId: req.purchaseId, previousStatus: vorher, kind: req.kind,
+    moneyRepaid: B(rueckzahlungF), repaidMethod: rueckzahlungF > 0 ? weg : null, entryErrorCorrected: B(korrekturF), supplierCreditRemoved: B(guthabenF),
     restoredBookValue: B(buchwertF), reversedLoss: B(verlustF), partnerMovementsReversed: partnerZeilen.length,
     purchaseStatus: String(nachher.status ?? '') as PurchaseStatus, remainingAmount: Number(nachher.remaining_amount) || 0,
   };

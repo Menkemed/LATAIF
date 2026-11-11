@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-// v0.8.101 — Storno einer gebuchten Lieferantenrückgabe (Geld, Guthaben, Partner, Lager, PC2)
+// v0.8.101 — Storno einer Lieferantenrückgabe: Erfassungsfehler und echte Rückgabe (Geld, Guthaben, Partner, Lager, Perioden, PC2)
 // Harness aus partner-ownership.test.ts.
 // Run: node test/partner-items/supplier-return-cancel.test.ts
 /* eslint-disable @typescript-eslint/no-unused-vars -- übernommener Harness (nicht jeder Helfer wird hier gebraucht). */
@@ -200,9 +200,11 @@ const { runExclusive } = await import('../../src/core/bridge/command-scheduler.t
 void CTX; void cmd; void loadPartnersFor; void bankTransactionsFor; void purchaseRules;
 
 // ════════════════════════════════════════════════════════════════════════════
-// „Cancel return" (Owner 11.11.2026): eine gebuchte Lieferantenrückgabe vollständig zurücknehmen, der Einkauf bleibt.
-// Nach jedem Storno gilt: jeder Hauptbuchsaldo, der Lagerwert der Lose, die Einkaufssummen und die Partneransprüche stehen
-// wieder genau wie VOR der Rückgabe (Geld: Eingang beim Rückgeben, bestätigte Rückzahlung beim Storno).
+// „Cancel return" (Owner 11.11.2026): zwei Arten.
+//   A entry_error — versehentlich erfasst, nichts erstattet: die falsch gebuchte Erstattung wird KORRIGIERT, keine Zahlung.
+//   B reversed    — echte Rückgabe rückgängig: Geld nur mit nachgewiesener Rückzahlung (Bestätigung + Beleg), genau einmal.
+// Nach jedem Storno: alle Hauptbuchsalden, Lose, Einkaufssummen und Partneransprüche wie VOR der Rückgabe; Banking zeigt nur
+// echte Geldbewegungen; Original und Gegenbuchung bleiben im Hauptbuch (nichts gelöscht).
 // ════════════════════════════════════════════════════════════════════════════
 const repairs = await import('../../src/core/repairs/repair-house.ts');
 const payables = await import('../../src/core/payables/payables-house.ts');
@@ -210,7 +212,7 @@ const lifecycle = await import('../../src/core/purchases/purchase-lifecycle-hous
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const purchaseSave = await import('../../src/core/purchases/purchase-house.ts');
 const DB = freshDb();
-for (let i = 6; i <= 40; i++) {
+for (let i = 6; i <= 45; i++) {
   const pid = 'pw' + i;
   DB.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
       scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
@@ -220,16 +222,19 @@ for (let i = 6; i <= 40; i++) {
 }
 reload();
 type Shares = Array<{ partnerId: string; sharePct: number }>;
+type Art = { kind?: string; repaid?: boolean; ref?: string };
 const kauf = async (pid: string, price: number, shares: Shares | undefined, qty = 1, pay = 0, scheme: 'ZERO' | 'VAT_10' = 'ZERO') => {
   const id = (await purchaseHouse.createPurchaseOnPrimary({ ...EINKAUF([ZEILE(pid, price, shares, qty)], pay), taxScheme: scheme })).id;
   return { id, line: lineOf(DB, id, pid) };
 };
 const ret = (purchaseId: string, line: string, qty: number, unitPrice: number, addedCostRefund = 0, refundMethod = 'bank') =>
   imHaus(() => returnToSupplierInHouse({ purchaseId, refundMethod: refundMethod as never, lines: [{ purchaseLineId: line, quantity: qty, unitPrice, ...(addedCostRefund ? { addedCostRefund } : {}) }] }, localHouseCtx()));
-const storno = (purchaseId: string, returnId: string, refundRepaid = false, reason = 'supplier sent the item back') =>
-  imHaus(() => lifecycle.cancelPurchaseReturnInHouse({ purchaseId, returnId, reason, refundRepaid }, localHouseCtx()));
-const stornoNein = async (purchaseId: string, returnId: string, refundRepaid = false): Promise<{ code: string; msg: string }> => {
-  try { storno(purchaseId, returnId, refundRepaid); return { code: '', msg: '' }; } catch (e) {
+const FEHLER: Art = { kind: 'entry_error' };
+const ZURUECK = (ref = 'TRX-4711'): Art => ({ kind: 'reversed', repaid: true, ref });
+const storno = (purchaseId: string, returnId: string, art: Art, reason = 'supplier sent the item back') =>
+  imHaus(() => lifecycle.cancelPurchaseReturnInHouse({ purchaseId, returnId, reason, kind: art.kind as never, refundRepaid: art.repaid, repaymentReference: art.ref }, localHouseCtx()));
+const stornoNein = async (purchaseId: string, returnId: string, art: Art): Promise<{ code: string; msg: string }> => {
+  try { storno(purchaseId, returnId, art); return { code: '', msg: '' }; } catch (e) {
     return { code: String((e as { code?: unknown }).code ?? 'THROWN'), msg: String((e as Error).message) };
   }
 };
@@ -244,129 +249,130 @@ const einkauf = (id: string) => S(DB.exec('SELECT status, total_amount, paid_amo
 const nichts = () => S({ le: n(DB, 'SELECT COUNT(*) FROM ledger_entries'), au: n(DB, 'SELECT COUNT(*) FROM audit_log'),
   st: DB.exec('SELECT id, status FROM purchase_returns ORDER BY id')[0]?.values ?? [], lo: lagerBestand(),
   pm: n(DB, 'SELECT COUNT(*) FROM item_partner_movements WHERE cancelled_at IS NULL'), sc: n(DB, 'SELECT COUNT(*) FROM supplier_credits') });
+const BT = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'ADMIN' } as never, []) as Array<{ id: string; amount: number; flow: string; description?: string }>;
 const abgleich = (tag: string) => {
   const hb = lagerHB(), be = lagerBestand();
-  const row = reconciliationSnapshotFor({ branchId: 'branch-main' } as never).rows.find((x) => x.account === 'PARTNER_ITEM_BALANCE');
-  ok(Math.abs(hb - be) < 0.0015 && ausgeglichen() && (!row || Math.abs(Number(row.ledger) - Number(row.domain)) < 0.0005),
-    `${tag} Abgleich: Hauptbuch INVENTORY ${hb} = Lose ${be}, Partnerkonto = Domäne, Hauptbuch ausgeglichen`);
+  const rows = reconciliationSnapshotFor({ branchId: 'branch-main' } as never).rows;
+  const diff = (acc: string) => { const r = rows.find((x) => x.account === acc); return r ? Math.abs(Number(r.ledger) - Number(r.domain)) : 0; };
+  ok(Math.abs(hb - be) < 0.0015 && ausgeglichen() && diff('PARTNER_ITEM_BALANCE') < 0.0005 && diff('ACCOUNTS_PAYABLE') < 0.0015 && diff('SUPPLIER_CREDIT') < 0.0015,
+    `${tag} Abgleich: INVENTORY ${hb} = Lose ${be}; Partnerkonto, A/P und Lieferantenguthaben = Domäne; Hauptbuch ausgeglichen`);
 };
-async function reparaturFertig(pid: string, lot: string, kosten: number, partnerZahlt?: string): Promise<void> {
+async function reparaturFertig(pid: string, lot: string, kosten: number): Promise<void> {
   const id = (await repairs.createRepairOnPrimary({ repairScope: 'OWN', productId: pid, lotId: lot, issueDescription: 'Service',
     repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: kosten } as never)).id;
   await repairs.updateRepairStatusOnPrimary(id, 'in_progress' as never);
   const ex = s(DB, "SELECT expense_id FROM repair_lines WHERE repair_id = ? LIMIT 1", [id]);
-  imHaus(() => payables.recordExpensePaymentInHouse(ex, kosten, partnerZahlt ? 'partner' : 'bank', localHouseCtx(), partnerZahlt ? { partnerId: partnerZahlt } : {}));
+  imHaus(() => payables.recordExpensePaymentInHouse(ex, kosten, 'bank', localHouseCtx(), {}));
   await repairs.updateRepairStatusOnPrimary(id, 'ready' as never);
 }
 const retStatus = (rid: string): string => s(DB, 'SELECT status FROM purchase_returns WHERE id = ?', [rid]);
+const originale = (rid: string): number => n(DB, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND reverses_entry_id IS NULL", [rid]);
+const gegen = (rid: string): Array<Record<string, unknown>> => (DB.exec(
+  "SELECT account, direction, amount, metadata_json, occurred_at FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND reverses_entry_id IS NOT NULL", [rid],
+)[0]?.values ?? []).map((v) => ({ account: v[0], direction: v[1], amount: v[2], meta: JSON.parse(String(v[3] ?? '{}')), at: v[4] }));
 
-// ── C1 Rückgabe ohne Reparatur, Erstattung per Bank: ohne bestätigte Rückzahlung Nein mit offenem Betrag; dann vollständig ──
+// ── 1 Erfassungsfehler ohne echte Geldbewegung (als Bank-Erstattung gebucht) → korrigiert, keine Zahlung ──────────
 {
   const a = await kauf('pw6', 1000, undefined, 1, 1000);
   const s0 = stand(), p0 = einkauf(a.id);
   const r = ret(a.id, a.line, 1, 1000);
-  ok(r.status === 'COMPLETED' && s(DB, 'SELECT unit_cost_at_return FROM purchase_return_lines WHERE return_id = ?', [r.returnId]) !== '',
-    'C1 Rückgabe gebucht, Einstand je Stück festgehalten');
-  const v = nichts();
-  const nein = await stornoNein(a.id, r.returnId, false);
-  ok(nein.code === 'PURCHASE_RETURN_REFUND_NOT_REPAID' && /1000\.000 BHD back by bank/.test(nein.msg) && nichts() === v,
-    `C1 ohne bestätigte Rückzahlung: Nein mit Betrag und Weg, nichts geschrieben (${nein.msg.slice(0, 120)})`);
-  const out = storno(a.id, r.returnId, true);
-  ok(out.moneyRepaid === 1000 && out.repaidMethod === 'bank' && out.restoredBookValue === 1000 && out.reversedLoss === 0,
-    `C1 Storno: Rückzahlung 1000 per Bank, Buchwert 1000 zurück (${S(out)})`);
-  ok(stand() === s0 && einkauf(a.id) === p0, `C1 alle Konten, Lose und der Einkauf wie vor der Rückgabe (${einkauf(a.id)})`);
-  const row = DB.exec('SELECT status, refund_repaid_amount, cancel_reason, cancelled_at IS NOT NULL, total_amount, refund_amount FROM purchase_returns WHERE id = ?', [r.returnId])[0].values[0];
-  ok(row[0] === 'CANCELLED' && Number(row[1]) === 1000 && row[2] === 'supplier sent the item back' && row[3] === 1 && Number(row[4]) === 1000 && Number(row[5]) === 1000,
-    `C1 Rückgabe bleibt als CANCELLED mit Nummer und Beträgen (Historie), Rückzahlung vermerkt (${S(row)})`);
-  const bt = bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'ADMIN' } as never, []) as Array<{ id: string; amount: number; flow: string }>;
-  const ein = bt.find((t) => t.id === 'pret-' + r.returnId), aus = bt.find((t) => t.id === 'pret-repay-' + r.returnId);
-  ok(ein?.amount === 1000 && ein.flow === 'in' && aus?.amount === 1000 && aus.flow === 'out',
-    'C1 Banking: der echte Eingang bleibt sichtbar, die Rückzahlung steht als eigener Ausgang');
+  const orig = originale(r.returnId);
+  const out = storno(a.id, r.returnId, FEHLER, 'recorded on the wrong purchase');
+  ok(out.kind === 'entry_error' && out.moneyRepaid === 0 && out.repaidMethod === null && out.entryErrorCorrected === 1000,
+    `1 Erfassungsfehler: keine Rückzahlung, die gebuchte Erstattung 1000 korrigiert (${S(out)})`);
+  ok(stand() === s0 && einkauf(a.id) === p0, '1 alle Konten (auch Bank), Lose und der Einkauf wie vor der Rückgabe');
+  const bt = BT();
+  ok(!bt.some((t) => t.id === 'pret-' + r.returnId) && !bt.some((t) => t.id === 'pret-repay-' + r.returnId),
+    '1 Banking: weder ein Eingang noch eine Rückzahlung (nie geflossen; wie eine stornierte Zahlung)');
+  const g = gegen(r.returnId);
+  ok(originale(r.returnId) === orig && g.length === orig && g.every((e) => e.meta.reversal === true && e.meta.purchaseReturnCancel === 'ENTRY_ERROR')
+    && g.some((e) => e.account === 'BANK' && e.direction === 'CREDIT' && Number(e.amount) === 1000 && e.meta.money === 'entry-error-correction'),
+    `1 Hauptbuch: Original bleibt (${orig}), jede Gegenbuchung als ENTRY_ERROR gekennzeichnet, die Bankzeile als Korrektur`);
+  const row = DB.exec('SELECT status, cancel_kind, refund_repaid_amount, refund_repaid_reference, refund_amount, total_amount FROM purchase_returns WHERE id = ?', [r.returnId])[0].values[0];
+  ok(S(row) === S(['CANCELLED', 'ENTRY_ERROR', 0, null, 1000, 1000]), `1 Rückgabe: CANCELLED, ENTRY_ERROR, keine Rückzahlung, Beträge bleiben (${S(row)})`);
   const au = s(DB, "SELECT new_value FROM audit_log WHERE entity_type = 'purchase_returns' AND entity_id = ? AND new_value LIKE '%CANCELLED%' ORDER BY rowid DESC LIMIT 1", [r.returnId]);
-  ok(/"moneyRepaid":\{"amount":1000,"method":"bank"/.test(au) && /"restoredBookValue":1000/.test(au) && /"reason":"supplier sent the item back"/.test(au),
-    'C1 Protokoll: Geldbewegung getrennt von den Gegenbuchungen, Grund, Buchwert');
-  ok(n(DB, 'SELECT qty_remaining FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)]) === 1 && s(DB, 'SELECT stock_status FROM products WHERE id = ?', ['pw6']) === 'in_stock',
-    'C1 die Uhr ist wieder im Lager');
-  abgleich('C1');
-  // Wiederholter Storno: Nein, nichts geschrieben. Danach ist eine neue Rückgabe wieder möglich.
-  const v2 = nichts();
-  const zwei = await stornoNein(a.id, r.returnId, true);
-  ok(zwei.code === 'PURCHASE_RETURN_ALREADY_CANCELLED' && nichts() === v2, `C1 zweiter Storno: ${zwei.code}, nichts geschrieben`);
-  const r2 = ret(a.id, a.line, 1, 1000);
-  ok(r2.status === 'COMPLETED' && r2.returnId !== r.returnId, 'C1 nach dem Storno ist eine neue Rückgabe möglich (der Einkauf blieb)');
-  abgleich('C1 neue Rückgabe');
+  ok(/"kind":"ENTRY_ERROR"/.test(au) && /"moneyRepaid":null/.test(au) && /"entryErrorCorrected":\{"amount":1000,"method":"bank"/.test(au) && /"reason":"recorded on the wrong purchase"/.test(au),
+    '1 Protokoll: Art, Korrektur der falschen Erstattung (keine Zahlung), Grund');
+  abgleich('1');
 }
 
-// ── C2 Owner-Beispiel: Einkauf 1000 + Reparatur 100 = 1100; Erstattung 1050 per Bank (Verlust 50) → Storno ──────
+// ── 2 Tatsächliche Erstattung mit anschließender Rückzahlung (Bank, Beleg) ─────────────────────────────────────
 {
   const a = await kauf('pw7', 1000, undefined, 1, 1000);
-  await reparaturFertig('pw7', lotOf(DB, a.line), 100);
   const s0 = stand(), p0 = einkauf(a.id);
-  const r = ret(a.id, a.line, 1, 1000, 50);
-  ok(r3(soll('INVENTORY_LOSS')) > 0 && n(DB, 'SELECT qty_remaining FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)]) === 0, 'C2 Rückgabe: Verlust gebucht, Los leer');
-  const out = storno(a.id, r.returnId, true);
-  ok(out.restoredBookValue === 1100 && out.reversedLoss === 50 && out.moneyRepaid === 1050,
-    `C2 Storno: Rolex wieder mit 1100 im Lager, Verlust 50 gegengebucht, Rückzahlung 1050 (${S(out)})`);
-  ok(r3(n(DB, 'SELECT qty_remaining * unit_cost FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)])) === 1100, 'C2 das Los trägt wieder 1100');
-  ok(stand() === s0 && einkauf(a.id) === p0, 'C2 Hauptbuch (Lager, Verlust, Bank), Lose und Einkauf wie vor der Rückgabe');
-  abgleich('C2');
+  const r = ret(a.id, a.line, 1, 1000);
+  const out = storno(a.id, r.returnId, ZURUECK('TRX-0815'));
+  ok(out.kind === 'reversed' && out.moneyRepaid === 1000 && out.repaidMethod === 'bank' && out.entryErrorCorrected === 0, `2 echte Rückzahlung 1000 per Bank (${S(out)})`);
+  ok(stand() === s0 && einkauf(a.id) === p0, '2 alle Konten, Lose und der Einkauf wie vor der Rückgabe');
+  const bt = BT();
+  const ein = bt.find((t) => t.id === 'pret-' + r.returnId), aus = bt.find((t) => t.id === 'pret-repay-' + r.returnId);
+  ok(ein?.amount === 1000 && ein.flow === 'in' && aus?.amount === 1000 && aus.flow === 'out' && /ref TRX-0815/.test(String(aus.description)),
+    '2 Banking: echter Eingang bleibt, Rückzahlung als eigener Ausgang mit Beleg');
+  const g = gegen(r.returnId);
+  ok(g.every((e) => e.meta.purchaseReturnCancel === 'REVERSED') && g.some((e) => e.account === 'BANK' && e.direction === 'CREDIT' && e.meta.money === 'repaid-to-supplier' && e.meta.repaymentReference === 'TRX-0815'),
+    '2 Hauptbuch: Gegenbuchung als REVERSED, die Bankzeile als echte Rückzahlung mit Beleg');
+  ok(S(DB.exec('SELECT cancel_kind, refund_repaid_amount, refund_repaid_reference FROM purchase_returns WHERE id = ?', [r.returnId])[0].values[0]) === S(['REVERSED', 1000, 'TRX-0815']),
+    '2 Rückgabe vermerkt REVERSED, 1000, Beleg');
+  // Eine Rückzahlung wird genau einmal erfasst.
+  const v = nichts();
+  const zwei = await stornoNein(a.id, r.returnId, ZURUECK('TRX-0816'));
+  ok(zwei.code === 'PURCHASE_RETURN_ALREADY_CANCELLED' && nichts() === v, `2 zweite Rückzahlung: ${zwei.code}, nichts geschrieben`);
+  abgleich('2');
 }
 
-// ── C3 Volle Zusatzkosten-Erstattung (1000 + 100) per Kasse → Storno ─────────────────────────────────────────
+// ── 3 Erstattung erfolgt, Rückzahlung noch nicht → sichere Ablehnung; widersprüchliche Angaben ebenso ─────────────
 {
   const a = await kauf('pw8', 1000, undefined, 1, 1000);
-  await reparaturFertig('pw8', lotOf(DB, a.line), 100);
-  const s0 = stand(), p0 = einkauf(a.id), kasse0 = soll('CASH');
-  const r = ret(a.id, a.line, 1, 1000, 100, 'cash');
-  ok(r3(soll('CASH') - kasse0) === 1100, 'C3 Rückgabe: Kasse +1100');
-  const out = storno(a.id, r.returnId, true);
-  ok(out.moneyRepaid === 1100 && out.repaidMethod === 'cash' && out.reversedLoss === 0 && stand() === s0 && einkauf(a.id) === p0,
-    `C3 Storno: 1100 per Kasse zurück, kein Verlust, alles wie vorher (${S(out)})`);
-  abgleich('C3');
+  const r = ret(a.id, a.line, 1, 1000, 0, 'cash');
+  const v = nichts();
+  const ohne = await stornoNein(a.id, r.returnId, { kind: 'reversed' });
+  ok(ohne.code === 'PURCHASE_RETURN_REFUND_NOT_REPAID' && /paid 1000\.000 BHD back by cash/.test(ohne.msg) && /entry error instead/.test(ohne.msg) && nichts() === v,
+    `3 ohne Rückzahlung: Nein mit Betrag, Weg und Hinweis auf Erfassungsfehler, nichts geschrieben (${ohne.msg.slice(0, 100)})`);
+  const ohneBeleg = await stornoNein(a.id, r.returnId, { kind: 'reversed', repaid: true });
+  ok(ohneBeleg.code === 'PURCHASE_RETURN_REFUND_NOT_REPAID' && /reference is missing/.test(ohneBeleg.msg) && nichts() === v, '3 Rückzahlung ohne Beleg: Nein, nichts geschrieben');
+  const ohneArt = await stornoNein(a.id, r.returnId, {});
+  ok(ohneArt.code === 'PURCHASE_RETURN_CANCEL_KIND_REQUIRED' && nichts() === v, '3 ohne Angabe der Art: Nein, nichts geschrieben');
+  const widerspruch = await stornoNein(a.id, r.returnId, { kind: 'entry_error', repaid: true, ref: 'X' });
+  ok(widerspruch.code === 'PURCHASE_RETURN_KIND_CONFLICT' && nichts() === v, '3 Erfassungsfehler mit Rückzahlung: Widerspruch, nichts geschrieben');
+  ok(retStatus(r.returnId) === 'COMPLETED', '3 die Rückgabe bleibt gebucht');
+  abgleich('3');
 }
 
-// ── C4 Teilrückgabe (1 von 2) mit Lieferantenguthaben: Guthaben unbenutzt → entfernt; Restlos und Rückgabestück stimmen ──
+// ── 4 Reparierter Artikel mit Verlust: 1000 + 100 = 1100, Erstattung 1050 — einmal als Erfassungsfehler, einmal echt ──
+for (const [pid, art, tag] of [['pw9', FEHLER, '4a Erfassungsfehler'], ['pw10', ZURUECK('BEN-77'), '4b echte Rückgabe']] as Array<[string, Art, string]>) {
+  const a = await kauf(pid, 1000, undefined, 1, 1000);
+  await reparaturFertig(pid, lotOf(DB, a.line), 100);
+  const s0 = stand(), p0 = einkauf(a.id);
+  const r = ret(a.id, a.line, 1, 1000, 50, 'benefit');
+  const out = storno(a.id, r.returnId, art);
+  ok(out.restoredBookValue === 1100 && out.reversedLoss === 50 && (art.kind === 'entry_error' ? out.entryErrorCorrected === 1050 && out.moneyRepaid === 0 : out.moneyRepaid === 1050),
+    `${tag}: Rolex wieder mit 1100, Verlust 50 gegengebucht, Geld ${art.kind === 'entry_error' ? 'korrigiert' : 'zurückgezahlt'} (${S(out)})`);
+  ok(stand() === s0 && einkauf(a.id) === p0 && r3(n(DB, 'SELECT qty_remaining * unit_cost FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)])) === 1100,
+    `${tag}: Hauptbuch (Lager, Verlust, Benefit), Lose und Einkauf wie vorher`);
+  abgleich(tag);
+}
+
+// ── 5 Teilrückgabe (1 von 2) mit Lieferantenguthaben → unbenutzt entfernt, vollständig im Protokoll ───────────────
 {
-  const a = await kauf('pw9', 500, undefined, 2, 1000);
-  await reparaturFertig('pw9', lotOf(DB, a.line), 100);
+  const a = await kauf('pw11', 500, undefined, 2, 1000);
+  await reparaturFertig('pw11', lotOf(DB, a.line), 100);
   const s0 = stand(), p0 = einkauf(a.id);
   const r = ret(a.id, a.line, 1, 500, 20, 'credit');
   const cid = String(r.supplierCreditId);
-  ok(r3(n(DB, 'SELECT amount FROM supplier_credits WHERE id = ?', [cid])) === 520, 'C4 Teilrückgabe: Guthaben 520, Verlust 30');
-  const v = nichts();
-  const out = storno(a.id, r.returnId, false);
-  ok(out.moneyRepaid === 0 && out.supplierCreditRemoved === 520 && out.restoredBookValue === 550 && out.reversedLoss === 30 && v !== nichts(),
-    `C4 Storno ohne Geld: Guthaben 520 entfernt, Stück mit 550 zurück, Verlust 30 gegengebucht (${S(out)})`);
-  ok(n(DB, 'SELECT COUNT(*) FROM supplier_credits WHERE id = ?', [cid]) === 0 && n(DB, 'SELECT qty_remaining FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)]) === 2,
-    'C4 Guthaben weg, beide Stücke im Los');
-  ok(stand() === s0 && einkauf(a.id) === p0, 'C4 alle Konten (auch Lieferantenguthaben), Lose und Einkauf wie vor der Rückgabe');
-  abgleich('C4');
+  const ja = await stornoNein(a.id, r.returnId, { kind: 'reversed', repaid: true, ref: 'X' });
+  ok(ja.code === 'PURCHASE_RETURN_NOTHING_TO_REPAY', '5 Guthaben-Erstattung: es gibt keine Rückzahlung zu erfassen (Nein)');
+  const out = storno(a.id, r.returnId, { kind: 'reversed' });
+  ok(out.moneyRepaid === 0 && out.supplierCreditRemoved === 520 && out.restoredBookValue === 550 && out.reversedLoss === 30,
+    `5 Storno ohne Geld: Guthaben 520 entfernt, Stück mit 550 zurück, Verlust 30 gegengebucht (${S(out)})`);
+  ok(stand() === s0 && einkauf(a.id) === p0 && n(DB, 'SELECT qty_remaining FROM stock_lots WHERE id = ?', [lotOf(DB, a.line)]) === 2, '5 alles wie vorher, beide Stücke im Los');
+  const au = s(DB, "SELECT new_value FROM audit_log WHERE entity_type = 'purchase_returns' AND entity_id = ? AND new_value LIKE '%CANCELLED%' ORDER BY rowid DESC LIMIT 1", [r.returnId]);
+  ok(au.includes(`"supplierCreditRows":[{"id":"${cid}","amount":520,"usedAmount":0`), '5 Protokoll hält die entfernte, ungenutzte Guthabenzeile vollständig fest');
+  ok(n(DB, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND account = 'SUPPLIER_CREDIT'", [r.returnId]) === 4,
+    '5 die Guthabenbuchung und ihre Gegenbuchung bleiben im Hauptbuch (nichts gelöscht)');
+  abgleich('5');
 }
 
-// ── C5 Einstand nach einer Teilrückgabe geändert (Reparatur am Reststück) → Nein mit damals/jetzt, nichts geschrieben ──
-{
-  const a = await kauf('pw10', 500, undefined, 2, 0);
-  const r = ret(a.id, a.line, 1, 500, 0, 'bank');
-  await reparaturFertig('pw10', lotOf(DB, a.line), 100);
-  const v = nichts();
-  const nein = await stornoNein(a.id, r.returnId, false);
-  ok(nein.code === 'PURCHASE_RETURN_COST_CHANGED' && /then 500\.000, now 600\.000/.test(nein.msg) && nichts() === v,
-    `C5 Kostenänderung nach der Rückgabe: ${nein.code}, nichts geschrieben (${nein.msg.slice(0, 110)})`);
-  abgleich('C5');
-}
-
-// ── C6 Unbezahlter Einkauf (Rückgabe senkte nur die Schuld): kein Geld, Storno stellt A/P her ───────────────────
-{
-  const a = await kauf('pw11', 800, undefined, 1, 0);
-  const s0 = stand(), p0 = einkauf(a.id);
-  const r = ret(a.id, a.line, 1, 800, 0, 'bank');
-  ok(n(DB, 'SELECT refund_amount FROM purchase_returns WHERE id = ?', [r.returnId]) === 0, 'C6 Rückgabe ohne Erstattung (nur Schuld gesenkt)');
-  const out = storno(a.id, r.returnId, false);
-  ok(out.moneyRepaid === 0 && stand() === s0 && einkauf(a.id) === p0, `C6 Storno ohne Geld: A/P und Einkauf wieder offen 800 (${einkauf(a.id)})`);
-  abgleich('C6');
-}
-
-// ── C7 Gemeinsamer Artikel mit zwei Partnern (B 30 %, C 20 %): Verlust 50 geteilt, Storno setzt alle Anteile zurück ──
+// ── 6 Mehrere Partner (B 30 %, C 20 %): Verlust geteilt; spätere Auszahlung sperrt beide Arten; danach Erfassungsfehler ──
 {
   const a = await kauf('pw12', 1000, [{ partnerId: 'pa-b', sharePct: 30 }, { partnerId: 'pa-c', sharePct: 20 }], 1, 1000);
   await move(a.line, 'CONTRIBUTION', 300, 'pa-b');
@@ -376,25 +382,22 @@ const retStatus = (rid: string): string => s(DB, 'SELECT status FROM purchase_re
   await move(a.line, 'CONTRIBUTION', 20, 'pa-c');
   const s0 = stand(), p0 = einkauf(a.id), b0 = open(a.line, 'pa-b'), c0 = open(a.line, 'pa-c');
   const r = ret(a.id, a.line, 1, 1000, 50);
-  ok(open(a.line, 'pa-b') === r3(b0 + 330 - 15) && open(a.line, 'pa-c') === r3(c0 + 220 - 10),
-    `C7 Rückgabe: B trägt 15, C trägt 10 vom Verlust 50 (B ${open(a.line, 'pa-b')}, C ${open(a.line, 'pa-c')})`);
-  // Später ausgezahlt → Storno gesperrt (keine doppelte Auszahlung), konkret genannt.
+  ok(open(a.line, 'pa-b') === r3(b0 + 315) && open(a.line, 'pa-c') === r3(c0 + 210), `6 Rückgabe: B trägt 15, C trägt 10 (B ${open(a.line, 'pa-b')}, C ${open(a.line, 'pa-c')})`);
   await move(a.line, 'PAYOUT', 315, 'pa-b', 'bank');
   const v = nichts();
-  const nein = await stornoNein(a.id, r.returnId, true);
-  ok(nein.code === 'PURCHASE_RETURN_PARTNER_LATER' && /Bashir payout 315\.000 BHD/.test(nein.msg) && nichts() === v,
-    `C7 nach Auszahlung an B: Nein mit Partner, Art und Betrag, nichts geschrieben (${nein.msg.slice(0, 120)})`);
-  // Die Auszahlung zurücknehmen (Erfassungsfehler), dann geht der Storno.
+  for (const art of [FEHLER, ZURUECK()]) {
+    const nein = await stornoNein(a.id, r.returnId, art);
+    ok(nein.code === 'PURCHASE_RETURN_PARTNER_LATER' && /Bashir payout 315\.000 BHD/.test(nein.msg) && nichts() === v, `6 nach Auszahlung an B (${art.kind}): Nein mit Partner und Betrag, nichts geschrieben`);
+  }
   const pay = s(DB, "SELECT id FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'PAYOUT' AND cancelled_at IS NULL", [a.line]);
   await save.cancelItemMovementOnPrimary(pay);
-  const out = storno(a.id, r.returnId, true);
-  ok(out.partnerMovementsReversed === 2 && open(a.line, 'pa-b') === b0 && open(a.line, 'pa-c') === c0,
-    `C7 Storno: beide Partnerbuchungen (B, C) gegengebucht, Ansprüche wie vorher (B ${open(a.line, 'pa-b')}, C ${open(a.line, 'pa-c')})`);
-  ok(stand() === s0 && einkauf(a.id) === p0, 'C7 Hauptbuch inkl. Partnerkonto, Lose und Einkauf wie vor der Rückgabe');
-  abgleich('C7');
+  const out = storno(a.id, r.returnId, FEHLER);
+  ok(out.partnerMovementsReversed === 2 && open(a.line, 'pa-b') === b0 && open(a.line, 'pa-c') === c0 && stand() === s0 && einkauf(a.id) === p0,
+    `6 Erfassungsfehler: beide Partnerbuchungen gegengebucht, Ansprüche, Hauptbuch und Einkauf wie vorher (B ${open(a.line, 'pa-b')}, C ${open(a.line, 'pa-c')})`);
+  abgleich('6');
 }
 
-// ── C8 Bereits ausgeglichene Erstattung: Guthaben auf einen anderen Einkauf verrechnet → Nein mit Einkauf und Betrag ──
+// ── 7 Bereits verwendetes Lieferantenguthaben → beide Arten gesperrt, mit Einkauf und Betrag ─────────────────────
 {
   const a = await kauf('pw13', 1000, undefined, 1, 1000);
   const r = ret(a.id, a.line, 1, 1000, 0, 'credit');
@@ -402,98 +405,119 @@ const retStatus = (rid: string): string => s(DB, 'SELECT status FROM purchase_re
   imHaus(() => payables.applyCreditToPurchaseInHouse(b.id, 400, localHouseCtx()));
   const pn = s(DB, 'SELECT purchase_number FROM purchases WHERE id = ?', [b.id]);
   const v = nichts();
-  const nein = await stornoNein(a.id, r.returnId, false);
-  ok(nein.code === 'PURCHASE_RETURN_CREDIT_USED' && nein.msg.includes(`400.000 BHD applied to ${pn}`) && nichts() === v,
-    `C8 Guthaben verrechnet: Nein nennt ${pn} und 400, nichts geschrieben (${nein.msg.slice(0, 120)})`);
-  abgleich('C8');
+  for (const art of [FEHLER, { kind: 'reversed' }]) {
+    const nein = await stornoNein(a.id, r.returnId, art);
+    ok(nein.code === 'PURCHASE_RETURN_CREDIT_USED' && nein.msg.includes(`400.000 BHD applied to ${pn}`) && nichts() === v, `7 Guthaben verrechnet (${art.kind}): Nein nennt ${pn} und 400`);
+  }
+  abgleich('7');
 }
 
-// ── C9 VAT_10: Vorsteuerkorrektur der Rückgabe bleibt in ihrem Tag, der Storno bucht heute zurück ──────────────
+// ── 8 Wiederholte PC2-Aufträge: Recht nur Owner (ADMIN); dieselbe Kennung wirkt einmal; neue Kennung danach: schon storniert ──
 {
-  const a = await kauf('pw15', 110, undefined, 1, 110, 'VAT_10');
-  await reparaturFertig('pw15', lotOf(DB, a.line), 10);
-  const s0 = stand(), p0 = einkauf(a.id);
-  const r = ret(a.id, a.line, 1, 110, 0, 'benefit');
-  const vatTag = s(DB, "SELECT occurred_at FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND account = 'VAT_INPUT' AND direction = 'CREDIT' ORDER BY rowid LIMIT 1", [r.returnId]);
-  const out = storno(a.id, r.returnId, true);
-  ok(out.moneyRepaid === 110 && out.repaidMethod === 'benefit' && out.reversedLoss === 10 && stand() === s0 && einkauf(a.id) === p0,
-    `C9 VAT_10 per Benefit: Vorsteuer, Verlust, Geld und Einkauf wie vorher (${S(out)})`);
-  ok(n(DB, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND account = 'VAT_INPUT' AND direction = 'CREDIT' AND occurred_at = ?", [r.returnId, vatTag]) === 1,
-    'C9 die ursprüngliche Vorsteuerkorrektur bleibt unverändert an ihrem Tag');
-  abgleich('C9');
-}
-
-// ── C10 Geschützte Fälle: Kommission, ältere Rückgabe ohne Einstand, eingereichtes Quartal ──────────────────────
-{
-  // Ältere Rückgabe eines reparierten Stücks ohne festgehaltenen Einstand → nicht beweisbar, gesperrt.
-  const a = await kauf('pw16', 1000, undefined, 1, 0);
-  await reparaturFertig('pw16', lotOf(DB, a.line), 100);
-  const r = ret(a.id, a.line, 1, 1000, 100, 'bank');
-  DB.run('UPDATE purchase_return_lines SET unit_cost_at_return = NULL WHERE return_id = ?', [r.returnId]);
-  const v = nichts();
-  const nein = await stornoNein(a.id, r.returnId, true);
-  ok(nein.code === 'PURCHASE_RETURN_COST_UNKNOWN' && nichts() === v, `C10 ältere Rückgabe eines reparierten Stücks: ${nein.code}, nichts geschrieben`);
-  // Ältere Rückgabe ohne Zusatzkosten → sicher (Los trägt den Einkaufseinstand), Storno geht.
-  const b = await kauf('pw17', 600, undefined, 1, 0);
-  const s0 = stand(), p0 = einkauf(b.id);
-  const rb = ret(b.id, b.line, 1, 600, 0, 'bank');
-  DB.run('UPDATE purchase_return_lines SET unit_cost_at_return = NULL WHERE return_id = ?', [rb.returnId]);
-  storno(b.id, rb.returnId, false);
-  ok(stand() === s0 && einkauf(b.id) === p0, 'C10 ältere Rückgabe ohne Zusatzkosten: Storno vollständig');
-  // Kommission → beim Kommissionsweg.
-  const c = await kauf('pw18', 500, undefined, 1, 0);
-  const rc = ret(c.id, c.line, 1, 500, 0, 'bank');
-  DB.run("UPDATE purchases SET source_consignment_id = 'con-x' WHERE id = ?", [c.id]);
-  const nk = await stornoNein(c.id, rc.returnId, false);
-  ok(nk.code === 'PURCHASE_RETURN_CONSIGNMENT', `C10 Kommissionsrückgabe: ${nk.code}`);
-  DB.run('UPDATE purchases SET source_consignment_id = NULL WHERE id = ?', [c.id]);
-  // Das heutige Quartal ist eingereicht → die Gegenbuchung heute ginge in ein geschlossenes Quartal: Nein.
-  const d = new Date();
-  DB.run("INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, snapshot_json, created_at) VALUES ('vf-heute', 'branch-main', ?, ?, ?, '{}', ?)",
-    [d.getFullYear(), Math.floor(d.getMonth() / 3) + 1, NOW, NOW]);
-  const nv = await stornoNein(c.id, rc.returnId, false);
-  ok(nv.code === 'VAT_PERIOD_FILED', `C10 eingereichtes Quartal: ${nv.code} (${nv.msg.slice(0, 80)})`);
-  DB.run("DELETE FROM vat_filings WHERE id = 'vf-heute'");
-  ok(await stornoNein(c.id, rc.returnId, false).then((x) => x.code === ''), 'C10 nach Öffnen des Quartals: Storno geht');
-  abgleich('C10');
-}
-
-// ── C11 Primary und PC2: Recht nur Owner; Fernweg mit Fassung; Wiederholung wirkt einmal; Rumpf ohne fremde Felder ──
-{
-  const a = await kauf('pw19', 900, undefined, 1, 900);
+  const a = await kauf('pw15', 900, undefined, 1, 900);
   const s0 = stand(), p0 = einkauf(a.id);
   const r = ret(a.id, a.line, 1, 900);
   const rev = n(DB, 'SELECT revision FROM purchases WHERE id = ?', [a.id]);
-  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000c1`;
+  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000d2`;
   const ACT = (role: string | undefined, k: number) => ({ commandId: ID(k), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role, payloadHash: 'h' + k });
-  const body = { purchaseId: a.id, returnId: r.returnId, expectedRevision: rev, reason: 'supplier sent it back', refundRepaid: true };
+  const body = { purchaseId: a.id, returnId: r.returnId, expectedRevision: rev, reason: 'booked twice by mistake', kind: 'entry_error' };
   for (const role of ['SALES', 'MANAGER', 'ACCOUNTANT', undefined]) {
     const v = nichts();
-    const x = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT(role, 900 + (role?.length ?? 0)) as never);
-    ok(x.kind === 'business_error' && (x as { code: string }).code === 'PERMISSION_DENIED' && nichts() === v, `C11 PC2 als ${role ?? 'ohne Rolle'}: PERMISSION_DENIED, nichts geschrieben`);
+    const x = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT(role, 700 + (role?.length ?? 0)) as never);
+    ok(x.kind === 'business_error' && (x as { code: string }).code === 'PERMISSION_DENIED' && nichts() === v, `8 PC2 als ${role ?? 'ohne Rolle'}: PERMISSION_DENIED`);
   }
-  const f = await registry.executeCommand('purchases.cancel_return', { input: { ...body, refundAmount: 0 } }, ACT('ADMIN', 950) as never);
-  ok(f.kind === 'business_error' && /primary decides refundAmount/.test(S(f)), 'C11 PC2: ein Rumpf mit Beträgen wird abgewiesen');
-  const ohne = await registry.executeCommand('purchases.cancel_return', { input: { ...body, refundRepaid: false } }, ACT('ADMIN', 951) as never);
-  ok(ohne.kind === 'business_error' && (ohne as { code: string }).code === 'PURCHASE_RETURN_REFUND_NOT_REPAID', 'C11 PC2 ohne bestätigte Rückzahlung: dasselbe Nein');
-  const x1 = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT('ADMIN', 952) as never);
+  const ohneArt = await registry.executeCommand('purchases.cancel_return', { input: { ...body, kind: undefined } }, ACT('ADMIN', 760) as never);
+  ok(ohneArt.kind === 'business_error' && (ohneArt as { code: string }).code === 'PURCHASE_RETURN_CANCEL_KIND_REQUIRED', '8 PC2 ohne Art: Nein');
+  const f = await registry.executeCommand('purchases.cancel_return', { input: { ...body, refundAmount: 0 } }, ACT('ADMIN', 761) as never);
+  ok(f.kind === 'business_error' && /primary decides refundAmount/.test(S(f)), '8 PC2: ein Rumpf mit Beträgen wird abgewiesen');
+  const x1 = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT('ADMIN', 762) as never);
   const nachEins = nichts();
-  const x2 = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT('ADMIN', 952) as never);
+  const x2 = await registry.executeCommand('purchases.cancel_return', { input: body }, ACT('ADMIN', 762) as never);
   ok(x1.kind === 'ok' && x2.kind === 'ok' && (x2 as { value?: { replayed?: boolean } }).value?.replayed === true && nichts() === nachEins,
-    `C11 PC2 als Owner: Storno, dieselbe Auftragskennung wirkt nur einmal (${S(x2).slice(0, 100)})`);
-  ok(stand() === s0 && einkauf(a.id) === p0 && retStatus(r.returnId) === 'CANCELLED', 'C11 PC2: alles wie vor der Rückgabe');
-  // Primary: die Speicherfolge prüft das Recht der Sitzung (wie PC2).
-  const b = await kauf('pw20', 400, undefined, 1, 0);
+    '8 PC2 als Owner: Erfassungsfehler gebucht; dieselbe Kennung erneut: nur die eingefrorene Antwort');
+  const x3 = await registry.executeCommand('purchases.cancel_return', { input: { ...body, expectedRevision: n(DB, 'SELECT revision FROM purchases WHERE id = ?', [a.id]) } }, ACT('ADMIN', 763) as never);
+  ok(x3.kind === 'business_error' && (x3 as { code: string }).code === 'PURCHASE_RETURN_ALREADY_CANCELLED' && nichts() === nachEins, '8 neue Kennung danach: schon storniert, nichts geschrieben');
+  ok(stand() === s0 && einkauf(a.id) === p0 && !BT().some((t) => t.id === 'pret-' + r.returnId), '8 alles wie vor der Rückgabe, Banking ohne Geldzeile');
+  // Primary: Speicherfolge mit dem Recht der Sitzung.
+  const b = await kauf('pw16', 400, undefined, 1, 0);
   const rb = ret(b.id, b.line, 1, 400, 0, 'bank');
   const lokal = { remote: false, save: async (ad: { local: () => Promise<unknown> }) => ({ kind: 'ok', value: await ad.local() }) };
   useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'SALES' } as never });
   const v = nichts();
-  const ns = await purchaseSave.savePurchaseReturnCancel(lokal as never, { id: b.id }, { returnId: rb.returnId, reason: 'x', refundRepaid: false });
-  ok(ns.kind === 'business_error' && (ns as { code: string }).code === 'PERMISSION_DENIED' && nichts() === v, 'C11 Primary als SALES: PERMISSION_DENIED, nichts geschrieben');
+  const ns = await purchaseSave.savePurchaseReturnCancel(lokal as never, { id: b.id }, { returnId: rb.returnId, reason: 'x', kind: 'entry_error', refundRepaid: false });
+  ok(ns.kind === 'business_error' && (ns as { code: string }).code === 'PERMISSION_DENIED' && nichts() === v, '8 Primary als SALES: PERMISSION_DENIED');
   useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
-  const ja = await purchaseSave.savePurchaseReturnCancel(lokal as never, { id: b.id }, { returnId: rb.returnId, reason: 'entry error', refundRepaid: false });
-  ok(ja.kind === 'ok' && retStatus(rb.returnId) === 'CANCELLED', `C11 Primary als Owner: Storno (${S(ja).slice(0, 80)})`);
-  abgleich('C11');
+  const ja = await purchaseSave.savePurchaseReturnCancel(lokal as never, { id: b.id }, { returnId: rb.returnId, reason: 'entry error', kind: 'entry_error', refundRepaid: false });
+  ok(ja.kind === 'ok' && retStatus(rb.returnId) === 'CANCELLED', '8 Primary als Owner (ADMIN): Storno');
+  abgleich('8');
+}
+
+// ── 9 Banking, Hauptbuch und Lager zusammen: Kasse-Erfassungsfehler und Bank-Rückgabe nebeneinander ──────────────
+{
+  const geld0 = (acc: string) => soll(acc);
+  const k0 = geld0('CASH'), b0 = geld0('BANK');
+  const a = await kauf('pw17', 300, undefined, 1, 0);
+  const ra = ret(a.id, a.line, 1, 300, 0, 'cash');          // unbezahlt: nur Schuld gesenkt → kein Geld
+  const b = await kauf('pw18', 400, undefined, 1, 400);
+  const rb = ret(b.id, b.line, 1, 400, 0, 'bank');
+  storno(a.id, ra.returnId, FEHLER);
+  storno(b.id, rb.returnId, ZURUECK('TRX-9'));
+  const bt = BT();
+  const zeilen = bt.filter((t) => [ra.returnId, rb.returnId].some((id) => t.id.endsWith(id)));
+  ok(S(zeilen.map((t) => [t.id.replace(/-[0-9a-f-]{36}$/, ''), t.flow, t.amount]).sort()) === S([['pret', 'in', 400], ['pret-repay', 'out', 400]].sort()),
+    `9 Banking zeigt nur die echte Bewegung der Bank-Rückgabe (Eingang + Rückzahlung) (${S(zeilen.map((t) => t.id.slice(0, 12)))})`);
+  ok(soll('CASH') === k0 && r3(soll('BANK') - b0) === -400, '9 Hauptbuch: Kasse unverändert, Bank −400 (Kauf), Rückgabe und Rückzahlung heben sich auf');
+  abgleich('9');
+}
+
+// ── 10 Getrennte Buchungsperioden: Rückgabe in Q3 (eingereicht), Storno heute → Q3 bleibt unberührt; heutiges Quartal zu → Nein ──
+{
+  const a = await kauf('pw19', 1100, undefined, 1, 1100, 'VAT_10');
+  const r = ret(a.id, a.line, 1, 1100, 0, 'bank');
+  const q3 = '2026-08-15T10:00:00.000Z';
+  DB.run("UPDATE ledger_entries SET occurred_at = ? WHERE source_module = 'PURCHASE_RETURN' AND source_id = ?", [q3, r.returnId]);
+  DB.run('UPDATE purchase_returns SET return_date = ? WHERE id = ?', ['2026-08-15', r.returnId]);
+  DB.run("INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, snapshot_json, created_at) VALUES ('vf-q3', 'branch-main', 2026, 3, ?, '{}', ?)", [NOW, NOW]);
+  const q3vor = S(DB.exec("SELECT account, direction, amount, occurred_at FROM ledger_entries WHERE occurred_at < '2026-10-01' ORDER BY id")[0]?.values ?? []);
+  const out = storno(a.id, r.returnId, FEHLER);
+  const heute = new Date().toISOString().slice(0, 10);
+  ok(out.entryErrorCorrected === 1100 && gegen(r.returnId).every((e) => String(e.at).slice(0, 10) === heute),
+    `10 Q3 eingereicht: Storno erlaubt, die Gegenbuchung steht heute (${heute})`);
+  ok(S(DB.exec("SELECT account, direction, amount, occurred_at FROM ledger_entries WHERE occurred_at < '2026-10-01' ORDER BY id")[0]?.values ?? []) === q3vor,
+    '10 das eingereichte Q3 bleibt unverändert (Vorsteuerkorrektur und Bank am Ursprungstag)');
+  // Heutiges Quartal eingereicht → die Gegenbuchung ginge in ein geschlossenes Quartal: Nein.
+  const c = await kauf('pw20', 500, undefined, 1, 500);
+  const rc = ret(c.id, c.line, 1, 500, 0, 'bank');
+  const d = new Date();
+  DB.run("INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, snapshot_json, created_at) VALUES ('vf-heute', 'branch-main', ?, ?, ?, '{}', ?)",
+    [d.getFullYear(), Math.floor(d.getMonth() / 3) + 1, NOW, NOW]);
+  const v = nichts();
+  for (const art of [FEHLER, ZURUECK()]) {
+    const nv = await stornoNein(c.id, rc.returnId, art);
+    ok(nv.code === 'VAT_PERIOD_FILED' && nichts() === v, `10 heutiges Quartal eingereicht (${art.kind}): ${nv.code}, nichts geschrieben`);
+  }
+  DB.run("DELETE FROM vat_filings WHERE id IN ('vf-heute', 'vf-q3')");
+  abgleich('10');
+}
+
+// ── 11 Geschützte Altfälle (unverändert): ältere Rückgabe mit Zusatzkosten ohne Einstand, Kommission, Kostenänderung ──
+{
+  const a = await kauf('pw21', 1000, undefined, 1, 0);
+  await reparaturFertig('pw21', lotOf(DB, a.line), 100);
+  const r = ret(a.id, a.line, 1, 1000, 100, 'bank');
+  DB.run('UPDATE purchase_return_lines SET unit_cost_at_return = NULL WHERE return_id = ?', [r.returnId]);
+  ok((await stornoNein(a.id, r.returnId, FEHLER)).code === 'PURCHASE_RETURN_COST_UNKNOWN', '11 ältere Rückgabe eines reparierten Stücks: COST_UNKNOWN');
+  const c = await kauf('pw22', 500, undefined, 2, 0);
+  const rc = ret(c.id, c.line, 1, 500, 0, 'bank');
+  await reparaturFertig('pw22', lotOf(DB, c.line), 100);
+  const nk = await stornoNein(c.id, rc.returnId, FEHLER);
+  ok(nk.code === 'PURCHASE_RETURN_COST_CHANGED' && /then 500\.000, now 600\.000/.test(nk.msg), '11 Kostenänderung nach Teilrückgabe: COST_CHANGED mit damals/jetzt');
+  const k = await kauf('pw23', 500, undefined, 1, 0);
+  const rk = ret(k.id, k.line, 1, 500, 0, 'bank');
+  DB.run("UPDATE purchases SET source_consignment_id = 'con-x' WHERE id = ?", [k.id]);
+  ok((await stornoNein(k.id, rk.returnId, FEHLER)).code === 'PURCHASE_RETURN_CONSIGNMENT', '11 Kommission: beim Kommissionsweg');
+  DB.run('UPDATE purchases SET source_consignment_id = NULL WHERE id = ?', [k.id]);
+  abgleich('11');
 }
 
 console.log(`\nsupplier-return-cancel: ${PASS} passed, ${fails.length} failed`);

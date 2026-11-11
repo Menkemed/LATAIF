@@ -232,6 +232,8 @@ function rowToReturn(row: Record<string, unknown>): PurchaseReturn {
     cancelledAt: (row.cancelled_at as string | null) || undefined,
     cancelReason: (row.cancel_reason as string | null) || undefined,
     refundRepaidAmount: Number(row.refund_repaid_amount) || 0,
+    cancelKind: (row.cancel_kind as 'ENTRY_ERROR' | 'REVERSED' | null) || undefined,
+    refundRepaidReference: (row.refund_repaid_reference as string | null) || undefined,
     notes: row.notes as string | undefined,
     lines: [],
     createdAt: row.created_at as string,

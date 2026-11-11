@@ -48,11 +48,24 @@ Eine gebuchte Rückgabe wird einzeln zurückgenommen; der Einkauf bleibt. Der Kn
   - Die Rückgabebuchung wird mit heutigem Datum storniert: Lagerwert inklusive Zusatzkosten, Verlust, Vorsteuer, A/P und Erstattung. Die ursprüngliche VAT-Korrektur bleibt an ihrem Tag; heute muss das VAT-Quartal offen sein.
   - Die Stücke kommen ins Los zurück, zum Einstand, mit dem sie gingen. Er wird seit diesem Stand je Rückgabezeile festgehalten (`unit_cost_at_return`).
   - Partnerbuchungen der Rückgabe werden gegengebucht; ungenutztes Guthaben der Rückgabe wird entfernt.
-- **Geld:**
-  - Hat der Lieferant per Kasse, Bank oder Benefit erstattet, geht das Geld beim Storno an ihn zurück. Das ist eine echte Zahlung und geht nur mit ausdrücklicher Bestätigung im Dialog. Ohne Bestätigung kommt ein Nein mit Betrag und Weg (`PURCHASE_RETURN_REFUND_NOT_REPAID`).
-  - Die Rückzahlung läuft über denselben Weg wie die Erstattung und wird an der Rückgabe vermerkt (`refund_repaid_amount`, `cancelled_at`).
-  - Banking zeigt den Eingang weiter und die Rückzahlung als eigenen Ausgang.
-  - Lief die Erstattung als Lieferantenguthaben, fließt kein Geld; das ungenutzte Guthaben wird entfernt.
+- **Geldpfad (nachgewiesen):**
+  - Die Rückgabe bucht unter `PURCHASE_RETURN` die Erstattung Soll Kasse, Bank, Benefit oder `SUPPLIER_CREDIT`, dazu Lager, Vorsteuer, A/P, Zusatzkosten und Verlust. Bei Guthaben legt sie eine Zeile in `supplier_credits` an.
+  - Banking liest nicht das Hauptbuch, sondern `purchase_returns` und `supplier_credit_refunds`.
+  - Der Storno läuft über `reverseConfirmedPurchaseReturnInHouse` → `reverseSource`: Gegenbuchungen mit `reverses_entry_id`, das Original bleibt.
+- **Zwei Arten, Pflichtangabe im Dialog „What happened?“:**
+  - **A, Erfassungsfehler (`entry_error`):** Die Rückgabe wurde versehentlich erfasst, der Lieferant hat nichts erstattet.
+    - Die Gegenbuchung korrigiert auch die falsch gebuchte Erstattung. Im Hauptbuch ist sie gekennzeichnet (`purchaseReturnCancel: ENTRY_ERROR`, `money: entry-error-correction`). Das ist keine Zahlung, es gibt keinen Rückzahlungsvermerk.
+    - Banking zeigt weder Eingang noch Rückzahlung, wie bei einer stornierten Zahlung.
+    - Ursprüngliche Buchung, Korrektur und Protokoll (`entryErrorCorrected`) bleiben nachvollziehbar.
+    - Bestätigt jemand bei A eine Rückzahlung, ist das ein Widerspruch: Nein (`PURCHASE_RETURN_KIND_CONFLICT`).
+  - **B, echte Rückgabe rückgängig (`reversed`):** Hat der Lieferant per Kasse, Bank oder Benefit erstattet, geht das Geld an ihn zurück.
+    - Das ist eine echte Zahlung und geht nur nachgewiesen: Bestätigung plus Beleg (`repaymentReference`, etwa Überweisungsreferenz oder Quittung). Sonst Nein mit Betrag, Weg und Hinweis auf den Erfassungsfehler (`PURCHASE_RETURN_REFUND_NOT_REPAID`).
+    - Vermerk an der Rückgabe: `refund_repaid_amount`, `refund_repaid_reference`, `cancelled_at`. Im Hauptbuch: `REVERSED`, `money: repaid-to-supplier` mit Beleg.
+    - Banking zeigt den Eingang weiter und die Rückzahlung als eigenen Ausgang mit Beleg.
+    - Eine Rückzahlung wird genau einmal erfasst: Status plus PC2-Auftragskennung.
+    - Ohne Geld (Guthaben oder nur Schuld gesenkt) gibt es nichts zurückzuzahlen (`PURCHASE_RETURN_NOTHING_TO_REPAY`).
+  - **Lieferantenguthaben:** bei beiden Arten kein Geld. Das ungenutzte Guthaben wird entfernt (bestehender Vertrag der Umkehr); das Protokoll hält die Zeile vollständig fest, die Guthabenbuchung bleibt mit ihrer Gegenbuchung im Hauptbuch.
+  - **Datum:** Beide Arten buchen heute, wie „Void payment“. Ein eingereichtes früheres Quartal bleibt unberührt; ist das heutige Quartal eingereicht: Nein.
 - **Kontrolliert gesperrt, nichts geschrieben, mit konkretem offenem Ausgleich:**
   - Guthaben schon verrechnet oder vom Lieferanten ausgezahlt (`PURCHASE_RETURN_CREDIT_USED`, nennt Einkauf oder Ausgabe und Betrag);
   - Partnerbuchung nach der Rückgabe, etwa Auszahlung oder Verrechnung (`PURCHASE_RETURN_PARTNER_LATER`, nennt Partner, Art und Betrag);
@@ -62,12 +75,12 @@ Eine gebuchte Rückgabe wird einzeln zurückgenommen; der Einkauf bleibt. Der Kn
   - heutiges Quartal eingereicht (`VAT_PERIOD_FILED`);
   - Rückgabe schon storniert (`PURCHASE_RETURN_ALREADY_CANCELLED`).
 - **Historie:** Die Rückgabe bleibt als CANCELLED stehen, mit Nummer, Zeilen und Beträgen. Das Protokoll trennt die Geldbewegung (`moneyRepaid`) von den Gegenbuchungen (Buchwert, Verlust, Zusatzkosten, Partner) und hält den Einkauf vorher und nachher fest. Danach ist eine neue Rückgabe möglich.
-- **Neue Spalten:** `purchase_returns.cancelled_at`, `cancelled_by`, `cancel_reason`, `refund_repaid_amount` und `purchase_return_lines.unit_cost_at_return`. Alle additiv; bestehende Rückgaben bleiben unverändert.
+- **Neue Spalten:** `purchase_returns.cancelled_at`, `cancelled_by`, `cancel_reason`, `cancel_kind`, `refund_repaid_amount`, `refund_repaid_reference` und `purchase_return_lines.unit_cost_at_return`. Alle additiv; bestehende Rückgaben bleiben unverändert.
 
 ### Zur Entscheidung vorgelegt (nicht umgesetzt)
 
 1. **Gewinn bei der Rückgabe** (Erstattung über dem Buchwert): Dafür gibt es kein Konto. Heute wird die Rückgabe abgewiesen. Nötig wäre zum Beispiel ein Ertragskonto „Gewinn aus Lieferantenrückgabe“.
-2. **Storno einer falsch erfassten Rückgabe, bei der nie Geld kam:** Heute verlangt der Storno bei Kasse, Bank oder Benefit immer die bestätigte Rückzahlung. Ein eigener Weg „Erfassungsfehler, Geld kam nie“ würde den Eingang ohne Gegenzahlung aus Banking nehmen. Er ist nicht gebaut.
+2. **Guthaben beim Storno als „storniert“ kennzeichnen statt entfernen:** Heute entfernt die bestehende Umkehr die ungenutzte Guthabenzeile; Buchung und Protokoll bleiben. Ein Storno-Status bräuchte Anpassungen an 38 Lesestellen in 18 Dateien.
 3. **VAT auf getrennt erstattete Zusatzkosten:** Heute ohne VAT, weil die aktivierten Kosten keine Vorsteuer trugen. Weist ein echter Lieferantenbeleg VAT auf die Erstattung aus, braucht es dafür eine Regel. Die NBR-Regeln sind nicht geändert.
 
 ## Noch offen

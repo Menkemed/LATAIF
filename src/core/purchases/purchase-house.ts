@@ -42,7 +42,7 @@ import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
   returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse, cancelPurchaseReturnInHouse, PURCHASE_LIFECYCLE_OP,
   type PurchaseReturnRequest, type PurchaseReturned, type PurchaseCancelled, type PurchaseInboxDismissed, type RefundMethod,
-  type PurchaseReturnCancelRequest, type PurchaseReturnCancelled,
+  type PurchaseReturnCancelRequest, type PurchaseReturnCancelled, type PurchaseReturnCancelKind,
 } from './purchase-lifecycle-house';
 import { localPermissionDenied } from '@/core/data/local-permission';
 
@@ -305,11 +305,15 @@ export function savePurchaseCancel(write: PurchaseLifecycleWrite<Result>, purcha
 }
 
 /** Was die Maske „Cancel return" den Menschen wählen lässt: Grund und — bei Geld — die bestätigte Rückzahlung. */
-export interface PurchaseReturnCancelForm { returnId: string; reason: string; refundRepaid: boolean }
+export interface PurchaseReturnCancelForm {
+  returnId: string; reason: string; kind: PurchaseReturnCancelKind; refundRepaid: boolean; repaymentReference?: string;
+}
 
 /** Der Rumpf für `purchases.cancel_return` — Beträge, Guthaben, Lager und Partner findet der Primary selbst. */
 export function purchaseReturnCancelBody(purchase: { id: string }, form: PurchaseReturnCancelForm): Record<string, unknown> {
-  return { purchaseId: purchase.id, returnId: form.returnId, expectedRevision: fassungVon(purchase), reason: form.reason.trim(), refundRepaid: form.refundRepaid === true };
+  const ref = typeof form.repaymentReference === 'string' && form.repaymentReference.trim() ? form.repaymentReference.trim() : undefined;
+  return { purchaseId: purchase.id, returnId: form.returnId, expectedRevision: fassungVon(purchase), reason: form.reason.trim(), kind: form.kind,
+    refundRepaid: form.refundRepaid === true, ...(ref ? { repaymentReference: ref } : {}) };
 }
 
 /** „Cancel return": EINE Buchung — am Primary die Hausfolge (mit dem Owner-Recht der Sitzung), auf PC2 der geprüfte Befehl. */
@@ -324,7 +328,8 @@ export function savePurchaseReturnCancel(
     if (nein) return Promise.resolve(nein);
   }
   return speichern(write, {
-    local: () => cancelPurchaseReturnOnPrimary({ purchaseId: purchase.id, returnId: form.returnId, reason: form.reason, refundRepaid: form.refundRepaid }, rev) as unknown as Promise<Result>,
+    local: () => cancelPurchaseReturnOnPrimary({ purchaseId: purchase.id, returnId: form.returnId, reason: form.reason, kind: form.kind,
+      refundRepaid: form.refundRepaid, repaymentReference: form.repaymentReference }, rev) as unknown as Promise<Result>,
     remote: () => purchaseReturnCancelBody(purchase, form),
   });
 }

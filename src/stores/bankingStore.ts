@@ -595,8 +595,9 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     // v0.8.101 — dazu die getrennt erstatteten Zusatzkosten (Reparatur …): auch sie kommen als Geld vom Lieferanten zurück.
     `SELECT id, refund_amount + COALESCE(added_cost_refund, 0) AS refund_amount, refund_method, return_date, return_number, purchase_id, created_at
      FROM purchase_returns WHERE branch_id = ? AND refund_amount + COALESCE(added_cost_refund, 0) > 0
-       -- v0.8.101 „Cancel return": war das Geld echt geflossen und ging beim Storno an den Lieferanten zurück, bleibt der
-       -- Eingang stehen (Historie) und die Rückzahlung erscheint unten als eigener Ausgang. Sonst wie bisher: storniert = weg.
+       -- v0.8.101 „Cancel return": war das Geld echt geflossen und ging beim Storno an den Lieferanten zurück (REVERSED), bleibt
+       -- der Eingang stehen (Historie) und die Rückzahlung erscheint unten als eigener Ausgang. Ein ERFASSUNGSFEHLER (ENTRY_ERROR,
+       -- nie geflossen) erscheint wie eine stornierte Zahlung gar nicht als Geld; Hauptbuch und Protokoll behalten Buchung und Korrektur.
        AND (status != 'CANCELLED' OR COALESCE(refund_repaid_amount, 0) > 0)
        AND COALESCE(refund_method, '') != 'credit'`,
     [branchId]
@@ -621,7 +622,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
 
   // v0.8.101 — REFUND_OUT: die bestätigte Rückzahlung an den Lieferanten beim Storno einer Lieferantenrückgabe (Tag, Weg, Betrag).
   const purchRetRepaid = safeQuery('purchase_returns',
-    `SELECT id, refund_repaid_amount, refund_method, cancelled_at, return_number, purchase_id
+    `SELECT id, refund_repaid_amount, refund_repaid_reference, refund_method, cancelled_at, return_number, purchase_id
        FROM purchase_returns WHERE branch_id = ? AND status = 'CANCELLED' AND COALESCE(refund_repaid_amount, 0) > 0`,
     [branchId]
   );
@@ -637,7 +638,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
       flow: 'out',
       relatedModule: 'purchase_return',
       relatedEntityId: r.id as string,
-      description: `Refund repaid to supplier · ${r.return_number || ''} cancelled`,
+      description: `Refund repaid to supplier · ${r.return_number || ''} cancelled${r.refund_repaid_reference ? ` · ref ${r.refund_repaid_reference}` : ''}`,
       link: (r.purchase_id as string) ? `/purchases/${r.purchase_id}` : undefined,
     });
   }

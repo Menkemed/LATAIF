@@ -2674,6 +2674,10 @@ function runMigrations(database: Database): void {
     `ALTER TABLE purchase_returns ADD COLUMN cancelled_by TEXT`,
     `ALTER TABLE purchase_returns ADD COLUMN cancel_reason TEXT`,
     `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_amount REAL NOT NULL DEFAULT 0`,
+    // v0.8.101 (Owner 11.11.2026) — die Art des Stornos (ENTRY_ERROR: versehentlich erfasst, nichts erstattet; REVERSED: echte
+    // Rückgabe rückgängig) und der Beleg der echten Rückzahlung (Überweisungsreferenz, Quittung).
+    `ALTER TABLE purchase_returns ADD COLUMN cancel_kind TEXT`,
+    `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_reference TEXT`,
     // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order: die Goldkosten der Order-Zeile, gebucht Soll
     // INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist (Tag der Buchung daneben). NULL = noch nicht bewertet
     // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.

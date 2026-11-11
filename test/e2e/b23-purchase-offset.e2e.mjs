@@ -864,41 +864,49 @@ try {
     await foto(client, 'b23-k-pc2-after-return');
   }
 
-  // ── L PC2 (v0.8.101 „Cancel return", Owner 11.11.): die Rückgabe aus K vollständig zurücknehmen; der Einkauf bleibt.
-  //    Erst ohne bestätigte Rückzahlung (Nein mit Betrag und Weg, nichts geschrieben), dann bestätigt: Rolex wieder mit 1100
-  //    im Lager, Verlust 50 gegengebucht, 1050 per Bank an den Lieferanten zurück, Partneranteil −25 storniert. ──
+  // ── L PC2 (v0.8.101 „Cancel return", Art B „Return undone"): die echte Rückgabe aus K zurücknehmen; der Einkauf bleibt.
+  //    Erst ohne nachgewiesene Rückzahlung (Nein mit Betrag und Weg, nichts geschrieben), dann bestätigt mit Beleg: Rolex wieder
+  //    mit 1100 im Lager, Verlust 50 gegengebucht, 1050 per Bank an den Lieferanten zurück (echte Zahlung), Partneranteil storniert. ──
+  const soll = (acc) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0) AS s
+    FROM ledger_entries WHERE account = ?`, [acc])[0]?.s || 0)) / 1000;
+  const r3 = (x) => Math.round(x * 1000) / 1000;
+  const lose = () => Math.round(1000 * Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(qty_remaining * unit_cost), 0) AS s FROM stock_lots WHERE status != 'CANCELLED'")[0]?.s || 0)) / 1000;
+  const gegenMeta = (rid, konto) => dbQ(BIZ_DB, "SELECT metadata_json FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND account = ? AND reverses_entry_id IS NOT NULL", [rid, konto])
+    .map((x) => JSON.parse(String(x.metadata_json || '{}')));
   {
     await syncRuhe();
-    const soll = (acc) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0) AS s
-      FROM ledger_entries WHERE account = ?`, [acc])[0]?.s || 0)) / 1000;
-    const r3 = (x) => Math.round(x * 1000) / 1000;
-    const lose = () => Math.round(1000 * Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(qty_remaining * unit_cost), 0) AS s FROM stock_lots WHERE status != 'CANCELLED'")[0]?.s || 0)) / 1000;
     const retK = dbQ(BIZ_DB, "SELECT id, return_number FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K])[0] || {};
     const inv0 = soll('INVENTORY'), los0 = soll('INVENTORY_LOSS'), bank0 = soll('BANK'), lager0 = lose(), led0 = zahl('SELECT COUNT(*) AS n FROM ledger_entries');
     client = await lade(client, `/purchases/${PUR_K}`);
     await waitFor(client, `[data-purchase-return-cancel="${retK.id}"]`, 45000);
     ok(await mausKlick(client, `[data-purchase-return-cancel="${retK.id}"]`) === 'OK', `L PC2: Maus auf „Cancel return" an ${retK.return_number}`);
     await waitFor(client, '[data-purchase-return-cancel-dialog]', 15000);
+    ok(await tippe(client, '[data-purchase-return-cancel-reason]', 'supplier sent the watch back') === 'OK', 'L Tastatur: Grund');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-kind="reversed"]') === 'OK', 'L Maus: „Return undone" (echte Rückgabe)');
+    await sleep(400);
     const dlg = await text(client, '[data-purchase-return-cancel-dialog]');
     ok(/1,?050\.000 BHD back by bank/.test(dlg.replace(/\s+/g, ' ')), `L Dialog nennt die Erstattung 1050 per Bank zur Bestätigung (${dlg.slice(0, 160)})`);
-    ok(await tippe(client, '[data-purchase-return-cancel-reason]', 'supplier sent the watch back') === 'OK', 'L Tastatur: Grund');
     const vor = (await kommandos(client)).filter((x) => x.op === 'purchases.cancel_return').length;
-    ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'L Maus auf „Cancel Return" (ohne Bestätigung der Rückzahlung)');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'L Maus auf „Cancel Return" (ohne nachgewiesene Rückzahlung)');
     await sleep(2500);
     const nein = await text(client, '[data-purchase-return-cancel-dialog] [data-save-error]').catch(() => '');
     ok(/paid 1050\.000 BHD back by bank/.test(nein) && zahl('SELECT COUNT(*) AS n FROM ledger_entries') === led0
       && dbQ(BIZ_DB, 'SELECT status FROM purchase_returns WHERE id = ?', [retK.id])[0]?.status === 'COMPLETED',
-      `L ohne Bestätigung: Nein mit offenem Betrag, nichts gebucht (${nein.slice(0, 160)})`);
+      `L ohne Nachweis: Nein mit offenem Betrag, nichts gebucht (${nein.slice(0, 160)})`);
     await foto(client, 'b23-l-pc2-cancel-blocked', '[data-purchase-return-cancel-dialog]');
     ok(await mausKlick(client, '[data-purchase-return-cancel-repaid]') === 'OK', 'L Maus: „I have repaid 1,050.000 BHD to the supplier by bank" angehakt');
+    ok(await tippe(client, '[data-purchase-return-cancel-ref]', 'TRX-20261111') === 'OK', 'L Tastatur: Beleg der Rückzahlung');
     ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'L Maus auf „Cancel Return"');
     await dateiBis(() => dbQ(BIZ_DB, 'SELECT status FROM purchase_returns WHERE id = ?', [retK.id])[0]?.status === 'CANCELLED');
-    const rk = dbQ(BIZ_DB, 'SELECT status, refund_repaid_amount, cancel_reason, refund_amount, added_cost_refund FROM purchase_returns WHERE id = ?', [retK.id])[0] || {};
-    ok(rk.status === 'CANCELLED' && Number(rk.refund_repaid_amount) === 1050 && rk.cancel_reason === 'supplier sent the watch back'
-      && Number(rk.refund_amount) === 1000 && Number(rk.added_cost_refund) === 50,
-      `L Rückgabe CANCELLED, Beträge bleiben (Historie), Rückzahlung 1050 vermerkt (${S(rk)})`);
+    const rk = dbQ(BIZ_DB, 'SELECT status, cancel_kind, refund_repaid_amount, refund_repaid_reference, cancel_reason, refund_amount, added_cost_refund FROM purchase_returns WHERE id = ?', [retK.id])[0] || {};
+    ok(rk.status === 'CANCELLED' && rk.cancel_kind === 'REVERSED' && Number(rk.refund_repaid_amount) === 1050 && rk.refund_repaid_reference === 'TRX-20261111'
+      && rk.cancel_reason === 'supplier sent the watch back' && Number(rk.refund_amount) === 1000 && Number(rk.added_cost_refund) === 50,
+      `L Rückgabe CANCELLED (REVERSED), Beträge bleiben, Rückzahlung 1050 mit Beleg vermerkt (${S(rk)})`);
     ok(r3(soll('INVENTORY') - inv0) === 1100 && r3(lose() - lager0) === 1100 && r3(los0 - soll('INVENTORY_LOSS')) === 50 && r3(bank0 - soll('BANK')) === 1050,
       `L Hauptbuch: Lager +1100 (= Lose), Verlust −50, Bank −1050 (${r3(soll('INVENTORY') - inv0)}/${r3(lose() - lager0)}/${r3(los0 - soll('INVENTORY_LOSS'))}/${r3(bank0 - soll('BANK'))})`);
+    const bm = gegenMeta(retK.id, 'BANK');
+    ok(bm.length === 2 && bm.every((m) => m.purchaseReturnCancel === 'REVERSED' && m.money === 'repaid-to-supplier' && m.repaymentReference === 'TRX-20261111'),
+      `L Hauptbuch kennzeichnet die Bankzeilen als echte Rückzahlung mit Beleg (${S(bm[0] || {})})`);
     const pk = dbQ(BIZ_DB, 'SELECT status, total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [PUR_K])[0] || {};
     ok(pk.status === 'PAID' && Number(pk.total_amount) === 1000 && Number(pk.paid_amount) === 1000 && Number(pk.remaining_amount) === 0,
       `L Einkauf wie vor der Rückgabe: 1000 bezahlt (${S(pk)})`);
@@ -906,12 +914,60 @@ try {
       && dbQ(BIZ_DB, "SELECT stock_status FROM products WHERE id = 'b23-prod-k'")[0]?.stock_status === 'in_stock',
       'L Partneranteil am Verlust storniert, die Rolex ist wieder im Lager');
     const cmds = (await kommandos(client)).filter((x) => x.op === 'purchases.cancel_return');
-    ok(cmds.length === vor + 2 && cmds.at(-1)?.payload?.refundRepaid === true && cmds.at(-1)?.payload?.returnId === retK.id,
-      `L PC2 schickt purchases.cancel_return (erst ohne, dann mit bestätigter Rückzahlung; ${cmds.length - vor} Versuche)`);
+    ok(cmds.length === vor + 2 && cmds.at(-1)?.payload?.kind === 'reversed' && cmds.at(-1)?.payload?.refundRepaid === true
+      && cmds.at(-1)?.payload?.repaymentReference === 'TRX-20261111' && cmds.at(-1)?.payload?.returnId === retK.id,
+      `L PC2 schickt purchases.cancel_return (erst ohne, dann mit nachgewiesener Rückzahlung; ${cmds.length - vor} Versuche)`);
     await waitFor(client, `[data-purchase-return-repaid-shown="${retK.id}"]`, 30000).catch(() => null);
     const gezeigt = await text(client, `[data-purchase-return-repaid-shown="${retK.id}"]`);
-    ok(/repaid 1,?050\.000 bank/.test(gezeigt), `L Einkauf zeigt an der stornierten Rückgabe „repaid 1,050.000 bank" (${gezeigt})`);
+    ok(/repaid 1,?050\.000 bank/.test(gezeigt) && /ref TRX-20261111/.test(gezeigt), `L Einkauf zeigt „repaid 1,050.000 bank · ref …" (${gezeigt})`);
     await foto(client, 'b23-l-pc2-after-cancel');
+  }
+
+  // ── M PC2 (Art A „Entry error"): dieselbe Rolex wird versehentlich erneut als zurückgegeben erfasst (1000 + 50 per Bank) und
+  //    als Erfassungsfehler storniert: keine Rückzahlung, die falsch gebuchte Erstattung wird korrigiert, alles wie vorher. ──
+  {
+    await syncRuhe();
+    const inv0 = soll('INVENTORY'), los0 = soll('INVENTORY_LOSS'), bank0 = soll('BANK'), lager0 = lose(), pib0 = soll('PARTNER_ITEM_BALANCE');
+    client = await lade(client, `/purchases/${PUR_K}`);
+    await waitFor(client, '[data-purchase-return-open]', 45000);
+    ok(await mausKlick(client, '[data-purchase-return-open]') === 'OK', 'M PC2: Maus auf „Return to Supplier" (versehentlich)');
+    await waitFor(client, `[data-purchase-return-line="${PL_K}"]`, 15000);
+    ok(await mausKlick(client, `[data-purchase-return-line="${PL_K}"]`) === 'OK', 'M Maus: Zeile K auswählen');
+    ok(await tippe(client, `[data-purchase-return-added="${PL_K}"]`, '50') === 'OK', 'M Tastatur: Zusatzkosten erstattet 50');
+    ok(await mausKlick(client, '[data-purchase-return-method="bank"]') === 'OK', 'M Maus: Erstattung „Bank"');
+    ok(await mausKlick(client, '[data-purchase-return-confirm]') === 'OK', 'M Maus auf „Confirm Return"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K]) === 1);
+    const retM = dbQ(BIZ_DB, "SELECT id, return_number FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K])[0] || {};
+    ok(r3(soll('BANK') - bank0) === 1050 && r3(soll('INVENTORY_LOSS') - los0) === 50, `M die falsche Rückgabe ist gebucht (Bank +1050, Verlust 50): ${retM.return_number}`);
+    client = await lade(client, `/purchases/${PUR_K}`);
+    await waitFor(client, `[data-purchase-return-cancel="${retM.id}"]`, 45000);
+    ok(await mausKlick(client, `[data-purchase-return-cancel="${retM.id}"]`) === 'OK', `M PC2: Maus auf „Cancel return" an ${retM.return_number}`);
+    await waitFor(client, '[data-purchase-return-cancel-dialog]', 15000);
+    ok(await tippe(client, '[data-purchase-return-cancel-reason]', 'recorded by mistake, nothing was returned') === 'OK', 'M Tastatur: Grund');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-kind="entry_error"]') === 'OK', 'M Maus: „Entry error"');
+    await sleep(400);
+    ok(!(await attrs(client, '[data-purchase-return-cancel-repaid]', 'type')).length && !(await attrs(client, '[data-purchase-return-cancel-ref]', 'type')).length,
+      'M beim Erfassungsfehler gibt es weder Rückzahlungsbestätigung noch Beleg');
+    await foto(client, 'b23-m-pc2-entry-error-dialog', '[data-purchase-return-cancel-dialog]');
+    ok(await mausKlick(client, '[data-purchase-return-cancel-confirm]') === 'OK', 'M Maus auf „Cancel Return"');
+    await dateiBis(() => dbQ(BIZ_DB, 'SELECT status FROM purchase_returns WHERE id = ?', [retM.id])[0]?.status === 'CANCELLED');
+    const rm = dbQ(BIZ_DB, 'SELECT cancel_kind, refund_repaid_amount, refund_repaid_reference, refund_amount, added_cost_refund FROM purchase_returns WHERE id = ?', [retM.id])[0] || {};
+    ok(rm.cancel_kind === 'ENTRY_ERROR' && Number(rm.refund_repaid_amount) === 0 && rm.refund_repaid_reference === null && Number(rm.refund_amount) === 1000,
+      `M Rückgabe CANCELLED als ENTRY_ERROR, keine Rückzahlung, Beträge bleiben (${S(rm)})`);
+    ok(soll('INVENTORY') === inv0 && lose() === lager0 && soll('INVENTORY_LOSS') === los0 && soll('BANK') === bank0 && soll('PARTNER_ITEM_BALANCE') === pib0,
+      'M Lager (= Lose), Verlust, Bank und Partnerkonto wie vor der falschen Rückgabe');
+    const bm = gegenMeta(retM.id, 'BANK');
+    ok(bm.length === 2 && bm.every((m) => m.purchaseReturnCancel === 'ENTRY_ERROR' && m.money === 'entry-error-correction' && !m.repaymentReference),
+      `M Hauptbuch: die Bankzeilen sind als Korrektur eines Erfassungsfehlers gekennzeichnet, keine Rückzahlung (${S(bm[0] || {})})`);
+    ok(zahl("SELECT COUNT(*) AS n FROM ledger_entries WHERE source_module = 'PURCHASE_RETURN' AND source_id = ? AND reverses_entry_id IS NULL", [retM.id]) > 0,
+      'M die falsche Buchung bleibt im Hauptbuch stehen (nichts gelöscht), mit ihrer Korrektur');
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'purchases.cancel_return');
+    ok(cmds.at(-1)?.payload?.kind === 'entry_error' && cmds.at(-1)?.payload?.refundRepaid === false && !cmds.at(-1)?.payload?.repaymentReference,
+      'M PC2 schickt purchases.cancel_return als Erfassungsfehler ohne Rückzahlung');
+    await waitFor(client, `[data-purchase-return-entry-error-shown="${retM.id}"]`, 30000).catch(() => null);
+    const gezeigt = await text(client, `[data-purchase-return-entry-error-shown="${retM.id}"]`);
+    ok(/entry error — no money moved/.test(gezeigt), `M Einkauf zeigt „entry error — no money moved" (${gezeigt})`);
+    await foto(client, 'b23-m-pc2-after-entry-error');
   }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));

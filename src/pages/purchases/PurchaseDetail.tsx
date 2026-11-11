@@ -91,6 +91,8 @@ export function PurchaseDetail() {
   const [cancelRet, setCancelRet] = useState<{ id: string; number: string; geld: number; weg: string; guthaben: number } | null>(null);
   const [cancelRetGrund, setCancelRetGrund] = useState('');
   const [cancelRetRepaid, setCancelRetRepaid] = useState(false);
+  const [cancelRetArt, setCancelRetArt] = useState<'entry_error' | 'reversed' | ''>('');
+  const [cancelRetBeleg, setCancelRetBeleg] = useState('');
   const [cancelRetFehler, setCancelRetFehler] = useState('');
   const perm = usePermission();
 
@@ -233,7 +235,8 @@ export function PurchaseDetail() {
     if (!purchase || !cancelRet || w.busy) return;
     setCancelRetFehler('');
     const r = await savePurchaseReturnCancel(viaWrites(w, PURCHASE_LIFECYCLE_OP.CANCEL_RETURN), purchase,
-      { returnId: cancelRet.id, reason: cancelRetGrund, refundRepaid: cancelRetRepaid });
+      { returnId: cancelRet.id, reason: cancelRetGrund, kind: cancelRetArt as 'entry_error' | 'reversed',
+        refundRepaid: cancelRetArt === 'reversed' && cancelRetRepaid, repaymentReference: cancelRetArt === 'reversed' ? cancelRetBeleg : undefined });
     if (r.kind !== 'ok') { setCancelRetFehler(fehlertext(r)); return; }
     setCreditTick((t) => t + 1);
     setCancelRet(null);
@@ -580,7 +583,12 @@ export function PurchaseDetail() {
                     )}
                     {r.status === 'CANCELLED' && (r.refundRepaidAmount ?? 0) > 0 && (
                       <span className="font-mono" style={{ fontSize: 12, color: '#DC2626' }} data-purchase-return-repaid-shown={r.id}>
-                        repaid <Bhd v={r.refundRepaidAmount ?? 0}/> {r.refundMethod}{r.cancelledAt ? ` · ${r.cancelledAt.slice(0, 10)}` : ''}
+                        repaid <Bhd v={r.refundRepaidAmount ?? 0}/> {r.refundMethod}{r.cancelledAt ? ` · ${r.cancelledAt.slice(0, 10)}` : ''}{r.refundRepaidReference ? ` · ref ${r.refundRepaidReference}` : ''}
+                      </span>
+                    )}
+                    {r.status === 'CANCELLED' && r.cancelKind === 'ENTRY_ERROR' && (
+                      <span style={{ fontSize: 11, color: '#B45309' }} data-purchase-return-entry-error-shown={r.id}>
+                        entry error — no money moved{r.cancelledAt ? ` · corrected ${r.cancelledAt.slice(0, 10)}` : ''}
                       </span>
                     )}
                     {r.status === 'CANCELLED' && r.cancelReason && (
@@ -594,7 +602,7 @@ export function PurchaseDetail() {
                           setCancelRet({ id: r.id, number: r.returnNumber, weg: r.refundMethod || '',
                             geld: geldweg ? (r.refundAmount || 0) + (r.addedCostRefund ?? 0) : 0,
                             guthaben: r.refundMethod === 'credit' ? (r.refundAmount || 0) + (r.addedCostRefund ?? 0) : 0 });
-                          setCancelRetGrund(''); setCancelRetRepaid(false); setCancelRetFehler('');
+                          setCancelRetGrund(''); setCancelRetRepaid(false); setCancelRetFehler(''); setCancelRetArt(''); setCancelRetBeleg('');
                         }}>
                         Cancel return
                       </button>
@@ -781,20 +789,39 @@ export function PurchaseDetail() {
         </div>
       </Modal>
 
-      {/* v0.8.101 — „Cancel return": eine gebuchte Lieferantenrückgabe zurücknehmen; der Einkauf bleibt. Geld, das der Lieferant
-          zurückgezahlt hat, geht an ihn zurück — nur mit ausdrücklicher Bestätigung (sonst nennt das Nein den offenen Betrag). */}
+      {/* v0.8.101 — „Cancel return": eine gebuchte Lieferantenrückgabe zurücknehmen; der Einkauf bleibt. Zwei Arten: Erfassungsfehler
+          (nichts erstattet — die falsche Buchung wird korrigiert, keine Zahlung) oder echte Rückgabe rückgängig (Geld nur mit
+          nachgewiesener Rückzahlung: Bestätigung + Beleg; sonst nennt das Nein den offenen Betrag). */}
       <Modal open={!!cancelRet} onClose={() => setCancelRet(null)} title="Cancel Supplier Return" width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }} data-purchase-return-cancel-dialog>
           <p style={{ fontSize: 13, color: '#4B5563' }}>
             Cancel <strong style={{ color: '#0F0F10' }}>{cancelRet?.number}</strong>? The returned items come back into stock at the book value they left with,
             a loss booked with the return is reversed, partner shares are set back and the purchase amounts are restored. The return stays visible as cancelled.
           </p>
-          {cancelRet && cancelRet.geld > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span className="text-overline">WHAT HAPPENED?</span>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: '#0F0F10' }}>
+              <input type="radio" name="cancel-return-kind" checked={cancelRetArt === 'entry_error'} onChange={() => setCancelRetArt('entry_error')} disabled={w.busy}
+                data-purchase-return-cancel-kind="entry_error" style={{ marginTop: 3 }} />
+              <span><strong>Entry error</strong> — this return was recorded by mistake; the supplier took nothing back and refunded nothing.
+                {cancelRet && cancelRet.geld > 0 ? ' The booked refund is corrected — no money is paid.' : ''}</span>
+            </label>
+            <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: '#0F0F10' }}>
+              <input type="radio" name="cancel-return-kind" checked={cancelRetArt === 'reversed'} onChange={() => setCancelRetArt('reversed')} disabled={w.busy}
+                data-purchase-return-cancel-kind="reversed" style={{ marginTop: 3 }} />
+              <span><strong>Return undone</strong> — the return really happened and the item is back with us.</span>
+            </label>
+          </div>
+          {cancelRet && cancelRet.geld > 0 && cancelRetArt === 'reversed' && (
             <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 13, color: '#0F0F10' }}>
               <input type="checkbox" checked={cancelRetRepaid} onChange={e => setCancelRetRepaid(e.target.checked)} disabled={w.busy} data-purchase-return-cancel-repaid style={{ marginTop: 3 }} />
               <span>The supplier paid <strong><Bhd v={cancelRet.geld}/> BHD</strong> back by {cancelRet.weg} with this return. I have repaid this amount to the supplier by {cancelRet.weg}{' '}
                 (it is booked as a repayment today).</span>
             </label>
+          )}
+          {cancelRet && cancelRet.geld > 0 && cancelRetArt === 'reversed' && (
+            <Input required label="REPAYMENT REFERENCE" value={cancelRetBeleg} onChange={e => setCancelRetBeleg(e.target.value)} disabled={w.busy}
+              data-purchase-return-cancel-ref placeholder="e.g. bank transfer reference or receipt number" />
           )}
           {cancelRet && cancelRet.guthaben > 0 && (
             <p style={{ fontSize: 12, color: '#6B7280' }}>The supplier credit from this return (<Bhd v={cancelRet.guthaben}/> BHD) is removed — only possible while it is unused.</p>
@@ -804,7 +831,7 @@ export function PurchaseDetail() {
           <WriteError text={cancelRetFehler} />
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setCancelRet(null)} disabled={w.busy}>Close</Button>
-            <Button variant="danger" onClick={() => void handleCancelReturn()} disabled={w.busy || !cancelRetGrund.trim()} data-purchase-return-cancel-confirm>
+            <Button variant="danger" onClick={() => void handleCancelReturn()} disabled={w.busy || !cancelRetGrund.trim() || !cancelRetArt} data-purchase-return-cancel-confirm>
               {w.busy ? 'Cancelling…' : 'Cancel Return'}
             </Button>
           </div>

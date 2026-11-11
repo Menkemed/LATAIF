@@ -1483,6 +1483,9 @@ export interface PurchaseReturn {
   cancelledAt?: string;
   cancelReason?: string;
   refundRepaidAmount?: number;
+  /** ENTRY_ERROR (versehentlich erfasst, nichts erstattet) oder REVERSED (echte Rückgabe rückgängig); Beleg der Rückzahlung. */
+  cancelKind?: 'ENTRY_ERROR' | 'REVERSED';
+  refundRepaidReference?: string;
   notes?: string;
   lines: PurchaseReturnLine[];
   createdAt: string;

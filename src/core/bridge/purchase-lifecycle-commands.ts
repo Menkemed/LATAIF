@@ -30,7 +30,7 @@ import { assertHouseBranch } from './remote-create-support';
 import {
   PURCHASE_LIFECYCLE_OP, PurchaseLifecycleRejected, isRefundMethod, type RefundMethod,
   returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse, createPurchaseInboxInHouse,
-  cancelPurchaseReturnInHouse,
+  cancelPurchaseReturnInHouse, isPurchaseReturnCancelKind, type PurchaseReturnCancelKind,
 } from '@/core/purchases/purchase-lifecycle-house';
 import {
   discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord,
@@ -159,17 +159,28 @@ export function parsePurchaseCancel(raw: unknown): PurchaseCancelCommand {
   return { purchaseId: idOf(r.purchaseId, 'purchaseId'), expectedRevision: revisionOf(r.expectedRevision) };
 }
 
-export interface PurchaseReturnCancelCommand { purchaseId: string; returnId: string; expectedRevision: number; reason: string; refundRepaid: boolean }
+export interface PurchaseReturnCancelCommand {
+  purchaseId: string; returnId: string; expectedRevision: number; reason: string;
+  kind: PurchaseReturnCancelKind; refundRepaid: boolean; repaymentReference?: string;
+}
 
 export function parsePurchaseReturnCancel(raw: unknown): PurchaseReturnCancelCommand {
-  const r = strict(raw, ['purchaseId', 'returnId', 'expectedRevision', 'reason', 'refundRepaid'], PURCHASE_LIFECYCLE_COMPUTED.cancelReturn);
+  const r = strict(raw, ['purchaseId', 'returnId', 'expectedRevision', 'reason', 'kind', 'refundRepaid', 'repaymentReference'], PURCHASE_LIFECYCLE_COMPUTED.cancelReturn);
   if (typeof r.reason !== 'string' || !r.reason.trim()) {
     throw new PurchaseLifecyclePayloadError('A reason is required to cancel a supplier return.', 'PURCHASE_RETURN_REASON_REQUIRED');
   }
   if (r.refundRepaid !== undefined && typeof r.refundRepaid !== 'boolean') throw new PurchaseLifecyclePayloadError('refundRepaid must be true or false');
+  // Dieselbe Pflicht wie im Haus: was geschah — versehentlich erfasst (entry_error) oder echte Rückgabe rückgängig (reversed).
+  if (!isPurchaseReturnCancelKind(r.kind)) {
+    throw new PurchaseLifecyclePayloadError('kind is entry_error or reversed', 'PURCHASE_RETURN_CANCEL_KIND_REQUIRED');
+  }
+  if (r.repaymentReference !== undefined && r.repaymentReference !== null && typeof r.repaymentReference !== 'string') {
+    throw new PurchaseLifecyclePayloadError('repaymentReference must be text');
+  }
+  const ref = typeof r.repaymentReference === 'string' && r.repaymentReference.trim() ? r.repaymentReference.trim() : undefined;
   return {
     purchaseId: idOf(r.purchaseId, 'purchaseId'), returnId: idOf(r.returnId, 'returnId'), expectedRevision: revisionOf(r.expectedRevision),
-    reason: r.reason.trim(), refundRepaid: r.refundRepaid === true,
+    reason: r.reason.trim(), kind: r.kind, refundRepaid: r.refundRepaid === true, ...(ref !== undefined ? { repaymentReference: ref } : {}),
   };
 }
 
@@ -224,7 +235,8 @@ export function runPurchaseReturnCancel(deps: EngineDeps, identity: CommandIdent
     assertHouseBranch(identity);
     const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
     const out = urteil(() => cancelPurchaseReturnInHouse({
-      purchaseId: req.purchaseId, returnId: req.returnId, reason: req.reason, refundRepaid: req.refundRepaid,
+      purchaseId: req.purchaseId, returnId: req.returnId, reason: req.reason, kind: req.kind, refundRepaid: req.refundRepaid,
+      repaymentReference: req.repaymentReference,
     }, ctx, req.expectedRevision));
     return { ...out };
   });

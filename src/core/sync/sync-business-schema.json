@@ -1364,6 +1364,7 @@
       "allowed_fields": [
         "added_cost_refund",
         "branch_id",
+        "cancel_kind",
         "cancel_reason",
         "cancelled_at",
         "cancelled_by",
@@ -1375,6 +1376,7 @@
         "refund_amount",
         "refund_method",
         "refund_repaid_amount",
+        "refund_repaid_reference",
         "return_date",
         "return_number",
         "status",
