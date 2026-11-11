@@ -353,7 +353,8 @@ const IB = verkauf(K, 350, '2026-10-06');
   ok(r.sources[0].label === 'purchase' && r.sources[1].label === 'consignment purchase' && r.sources[1].consignment === true,
     'B23-R3 normal und Kommission klar gekennzeichnet');
   ok(!r.sources.some((x) => x.id === PX || x.id === PZ), 'B23-R4 nicht angeboten: fremder Lieferant (kein Abgleich über Name) und storniert');
-  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE']), 'B23-R5 V7: Store Credit → We Borrowed → Purchases');
+  // v0.8.101 S4 (Owner 11.11.2026): als vierte Gruppe die auszahlbaren Partnerguthaben (test/partner-items/partner-settle-offset).
+  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE', 'PARTNER_ITEM']), 'B23-R5 V7: Store Credit → We Borrowed → Purchases (→ Partner balances, S4)');
 }
 marker('B23_PURCHASE_OFFER_PROVED');
 

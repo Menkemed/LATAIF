@@ -6,9 +6,10 @@
 // Freigegeben (Owner 09.11.2026) sind ZWEI Arten von Gegenposten, in dieser Reihenfolge (V7):
 //   1. Store Credit — nur der freie Teil eines OPEN-Guthabens dieses Kunden in dieser Filiale (Betrag − verwendet);
 //   2. We Borrowed  — ein offenes Darlehen, AUSDRÜCKLICH diesem Kunden zugeordnet (wie B1).
-// (B2/B3: 3. Einkäufe der ausdrücklich verknüpften Lieferantenrolle, normal und Kommission.) Innerhalb jeder Gruppe das
-// älteste zuerst; links die offenen Rechnungen, älteste zuerst. Partner, Order-Anzahlungen, Eröffnungsposten und Gold
-// werden hier NIE angeboten.
+// (B2/B3: 3. Einkäufe der ausdrücklich verknüpften Lieferantenrolle, normal und Kommission.)
+// (v0.8.101 S4: 4. auszahlbare Partnerguthaben des ausdrücklich verknüpften Partners — nur was „Pay out" erlaubt.)
+// Innerhalb jeder Gruppe das älteste zuerst; links die offenen Rechnungen, älteste zuerst. Was der Partner LATAIF schuldet,
+// Gesellschafterkapital, Order-Anzahlungen, Eröffnungsposten und Gold werden hier NIE angeboten.
 //
 // Der Vorschlag paart der Reihe nach (FIFO): jede gewählte Rechnung mit den gewählten Gegenposten, bis eine Seite leer ist —
 // je Zuordnung der kleinere Rest oder ein von Hand gesetzter Betrag („Change amount", nie über der Obergrenze). Dieselbe
@@ -19,6 +20,8 @@ import { paidFilsOfDebt } from '@/core/finance/debt-status';
 import { openItemsStamp } from '@/core/finance/open-items-stamp';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { isDebtClosed, storeCreditLabel } from './party-offset-reads';
+import { partnerItemsOverview } from '@/core/partners/item-participation-house';
+import { partnerOpenRows } from '@/core/partners/partner-open-balances';
 
 export const OP_CUSTOMERS_SETTLE_BALANCE = 'customers.settle_balance';
 export const OP_CUSTOMERS_SETTLEMENT_REVERSE = 'customers.settlement_reverse';
@@ -30,10 +33,11 @@ const B = (f: number): number => f / 1000;
 const day = (v: unknown): string => String(v ?? '').slice(0, 10);
 
 // B2/B3 (Owner 10.11.2026) — dritte Gruppe: offene Einkäufe (normal und Kommission) der AUSDRÜCKLICH verknüpften Lieferantenrolle.
-export type SettleSourceKind = 'STORE_CREDIT' | 'LOAN_BORROWED' | 'PURCHASE';
+// v0.8.101 S4 (Owner 11.11.2026) — vierte Gruppe: auszahlbare Partnerguthaben des AUSDRÜCKLICH verknüpften Partners.
+export type SettleSourceKind = 'STORE_CREDIT' | 'LOAN_BORROWED' | 'PURCHASE' | 'PARTNER_ITEM';
 /** Reihenfolge der Gruppen (V7, nur die freigegebenen). */
-export const SETTLE_SOURCE_ORDER: readonly SettleSourceKind[] = ['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE'];
-export const SETTLE_SOURCE_LABEL: Record<SettleSourceKind, string> = { STORE_CREDIT: 'Store credit', LOAN_BORROWED: 'We Borrowed', PURCHASE: 'Purchases' };
+export const SETTLE_SOURCE_ORDER: readonly SettleSourceKind[] = ['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE', 'PARTNER_ITEM'];
+export const SETTLE_SOURCE_LABEL: Record<SettleSourceKind, string> = { STORE_CREDIT: 'Store credit', LOAN_BORROWED: 'We Borrowed', PURCHASE: 'Purchases', PARTNER_ITEM: 'Partner balances' };
 
 export interface SettleInvoice {
   id: string; number: string; date: string;
@@ -47,6 +51,10 @@ export interface SettleSource {
   total: number; open: number; revision: number;
   /** B2/B3 — nur bei Einkäufen: ein Kommissions-Einkauf (Kopf oder Zeile verweist auf eine Kommission). */
   consignment?: boolean;
+  /** v0.8.101 S4 — nur bei Partnerguthaben: der verknüpfte Partner und der Artikel. */
+  partnerId?: string;
+  partnerName?: string;
+  productLabel?: string;
 }
 export interface SettlePair { invoiceId: string; sourceKind: SettleSourceKind; sourceId: string; amountF: number }
 /**
@@ -64,6 +72,8 @@ export interface SettlementLine {
   offsetId: string; offsetNumber: string; status: string; amount: number; offsetDate: string;
   invoiceId: string; invoiceNumber: string; invoicePaymentId: string;
   sourceKind: SettleSourceKind; sourceId: string; sourceNumber: string;
+  /** v0.8.101 S4 — nur bei Partnerguthaben: der Partner (für den Link in den Partnerartikel). */
+  partnerId?: string;
   reversedAt: string | null; reverseReason: string | null;
 }
 export interface SettlementView {
@@ -171,11 +181,29 @@ export function settlePurchasesOf(customerId: string, branchId: string): SettleS
     }));
 }
 
+/**
+ * v0.8.101 S4 — auszahlbare Partnerguthaben des Partners, der AUSDRÜCKLICH mit diesem Kunden verknüpft ist, je Artikel —
+ * genau was „Pay out" jetzt erlauben würde (offen > 0, keine Sperre), älteste zuerst. Dieselbe Ableitung wie Payables und
+ * Kundenkonto (`partnerOpenRows`). Nie: Kostenanteil, Rückforderung, noch nicht abgerechneter Gewinn, Gesellschafterkapital.
+ */
+export function settlePartnerItemsOf(customerId: string, branchId: string): SettleSource[] {
+  const partner = query('SELECT id, name FROM partners WHERE linked_customer_id = ? AND branch_id = ?', [customerId, branchId])[0];
+  if (!partner) return [];
+  return partnerOpenRows(partnerItemsOverview(branchId, String(partner.id)))
+    .filter((r) => r.side === 'PAYABLE' && r.origin === 'PAYOUT' && !r.onHold && F(r.open) > OPEN_EPS_F)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.purchaseNumber.localeCompare(b.purchaseNumber) || a.purchaseLineId.localeCompare(b.purchaseLineId)))
+    .map((r) => ({
+      kind: 'PARTNER_ITEM' as const, id: r.purchaseLineId, number: r.purchaseNumber || r.purchaseLineId.slice(0, 8),
+      date: r.date, label: `partner balance · ${r.productLabel}`, total: r.open, open: r.open, revision: 0,
+      partnerId: r.partnerId, partnerName: r.partnerName, productLabel: r.productLabel,
+    }));
+}
+
 /** Der Fingerabdruck der angebotenen Posten beider Seiten (Art, Kennung, offener Betrag in Fils). */
 export function settleStamp(invoices: readonly SettleInvoice[], sources: readonly SettleSource[]): string {
   return openItemsStamp([
     ...invoices.map((i) => ({ kind: 'invoice', id: i.id, openF: F(i.open) })),
-    ...sources.map((s) => ({ kind: s.kind === 'STORE_CREDIT' ? 'credit' : s.kind === 'PURCHASE' ? 'purchase' : 'debt', id: s.id, openF: F(s.open) })),
+    ...sources.map((s) => ({ kind: s.kind === 'STORE_CREDIT' ? 'credit' : s.kind === 'PURCHASE' ? 'purchase' : s.kind === 'PARTNER_ITEM' ? 'partner' : 'debt', id: s.id, openF: F(s.open) })),
   ]);
 }
 
@@ -236,13 +264,16 @@ export function finalizingInvoices(invoices: readonly SettleInvoice[], pairs: re
 export function settlementsOf(customerId: string, branchId: string): SettlementView[] {
   const rows = query(
     `SELECT o.*, i.invoice_number, i.status AS inv_status, i.special_mark, i.number_finalized_at,
-            d.loan_number, cn.credit_note_number, pu.purchase_number
+            d.loan_number, cn.credit_note_number, pu.purchase_number, ppu.purchase_number AS partner_purchase_number, ipm.partner_id AS partner_id
        FROM party_offsets o
        LEFT JOIN invoices i ON i.id = o.receivable_id
        LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
        LEFT JOIN customer_credits cc ON cc.id = o.payable_id AND o.payable_type = 'STORE_CREDIT'
        LEFT JOIN credit_notes cn ON cn.id = cc.source_id AND cc.source_type = 'sales_return'
        LEFT JOIN purchases pu ON pu.id = o.payable_id AND o.payable_type = 'PURCHASE'
+       LEFT JOIN purchase_lines ppl ON ppl.id = o.payable_id AND o.payable_type = 'PARTNER_ITEM'
+       LEFT JOIN purchases ppu ON ppu.id = ppl.purchase_id
+       LEFT JOIN item_partner_movements ipm ON ipm.id = o.payable_payment_id AND o.payable_type = 'PARTNER_ITEM'
       WHERE o.customer_id = ? AND o.branch_id = ? AND o.receivable_type = 'INVOICE'
       ORDER BY o.created_at, o.offset_number`,
     [customerId, branchId],
@@ -254,16 +285,19 @@ export function settlementsOf(customerId: string, branchId: string): SettlementV
     single.set(key, !o.settlement_number);
     const credit = String(o.payable_type) === 'STORE_CREDIT';
     const purchase = String(o.payable_type) === 'PURCHASE';
+    const partnerItem = String(o.payable_type) === 'PARTNER_ITEM';
     const line: SettlementLine = {
       offsetId: String(o.id), offsetNumber: String(o.offset_number), status: String(o.status), amount: B(F(o.amount)),
       offsetDate: String(o.offset_date ?? ''), invoiceId: String(o.receivable_id),
       invoiceNumber: invNo({ invoice_number: o.invoice_number, status: o.inv_status, special_mark: o.special_mark, number_finalized_at: o.number_finalized_at }),
       invoicePaymentId: String(o.receivable_payment_id),
-      sourceKind: credit ? 'STORE_CREDIT' : purchase ? 'PURCHASE' : 'LOAN_BORROWED', sourceId: String(o.payable_id),
+      sourceKind: credit ? 'STORE_CREDIT' : purchase ? 'PURCHASE' : partnerItem ? 'PARTNER_ITEM' : 'LOAN_BORROWED', sourceId: String(o.payable_id),
       sourceNumber: credit ? (String(o.credit_note_number ?? '') || 'Store credit')
         : purchase ? (String(o.purchase_number ?? '') || String(o.payable_id).slice(0, 8))
+          : partnerItem ? (String(o.partner_purchase_number ?? '') || String(o.payable_id).slice(0, 8))
           : (String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8)),
       reversedAt: (o.reversed_at as string | null) ?? null, reverseReason: (o.reverse_reason as string | null) ?? null,
+      ...(partnerItem && o.partner_id ? { partnerId: String(o.partner_id) } : {}),
     };
     groups.set(key, [...(groups.get(key) ?? []), line]);
   }
@@ -281,6 +315,7 @@ export function settlementsOf(customerId: string, branchId: string): SettlementV
 /** Was „Settle Balance" zeigt — am Primary lokal, am PC2 als Teil von `parties.account.get` (view customer_account). */
 export function settleBalanceFor(ctx: { branchId: string }, customerId: string): SettleBalanceRead {
   const invoices = settleInvoicesOf(customerId, ctx.branchId);
-  const sources = [...settleCreditsOf(customerId, ctx.branchId), ...settleLoansOf(customerId, ctx.branchId), ...settlePurchasesOf(customerId, ctx.branchId)];
+  const sources = [...settleCreditsOf(customerId, ctx.branchId), ...settleLoansOf(customerId, ctx.branchId), ...settlePurchasesOf(customerId, ctx.branchId),
+    ...settlePartnerItemsOf(customerId, ctx.branchId)];
   return { customerId, invoices, sources, stamp: settleStamp(invoices, sources), settlements: settlementsOf(customerId, ctx.branchId) };
 }

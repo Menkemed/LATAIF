@@ -4,7 +4,7 @@ import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, 
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { restoreOrderDepositForPayment } from '@/core/orders/order-deposit-restore';
-import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment, restorePurchaseOffsetForPayment, restoreStoreCreditOffsetForPayment } from '@/core/offsets/party-offset-restore';
+import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment, restorePartnerOffsetForPayment, restorePurchaseOffsetForPayment, restoreStoreCreditOffsetForPayment } from '@/core/offsets/party-offset-restore';
 import { INVOICE_PURCHASE_OFFSET_METHOD } from '@/core/purchases/purchase-settled';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
@@ -198,6 +198,8 @@ export interface RecordPaymentTimes {
   createdAt?: string;
   /** B2/B3 — nur für 'purchase_offset': der Lieferant des Einkaufs (Gegenpartei der Soll-Zeile ACCOUNTS_PAYABLE). */
   apSupplierId?: string;
+  /** v0.8.101 S4 — nur für 'partner_offset': der Partner (Gegenpartei der Soll-Zeile PARTNER_ITEM_BALANCE). */
+  partnerId?: string;
 }
 
 interface InvoiceStore {
@@ -1732,7 +1734,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           },
           invForLedger.customerId,
           openRemainder,
-          opts?.apSupplierId ? { apSupplierId: opts.apSupplierId } : {},
+          opts?.apSupplierId ? { apSupplierId: opts.apSupplierId } : opts?.partnerId ? { partnerId: opts.partnerId } : {},
         );
       };
       // Slice 2 — innerhalb einer Ambient-Ledger-Tx (editInvoice / applyCreditToInvoice)
@@ -2090,6 +2092,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw new Error('This payment is an offset with a loan — remove the offset (the loan opens again) instead of editing it.');
     }
     // B2/B3 — ebenso die Verrechnung mit einem Einkauf: nur als Ganzes aufheben (der Einkauf ist danach wieder offen).
+    // v0.8.101 S4 — ebenso die Verrechnung mit einem Partnerguthaben.
+    if (newMethod === 'partner_offset' || oldMethod === 'partner_offset') {
+      throw new Error('This payment is an offset with a partner balance — remove the offset (the partner balance opens again) instead of editing it.');
+    }
     if (newMethod === INVOICE_PURCHASE_OFFSET_METHOD || oldMethod === INVOICE_PURCHASE_OFFSET_METHOD) {
       throw new Error('This payment is an offset with a purchase — remove the offset (the purchase opens again) instead of editing it.');
     }
@@ -2372,6 +2378,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // B2/B3 — eine Verrechnung mit einem Einkauf: die Einkaufszeile wird storniert (voided_at), Rest/Status des Einkaufs neu,
     // die Verrechnung auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht der ganze Vorgang zurück.
     if (delMethod === INVOICE_PURCHASE_OFFSET_METHOD) restorePurchaseOffsetForPayment(paymentId, { reason: opts?.offsetReason });
+    // v0.8.101 S4 — eine Verrechnung mit einem Partnerguthaben: die Auszahlung per Verrechnung wird storniert, das Guthaben ist
+    // wieder auszahlbar, die Verrechnung auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht alles zurück.
+    if (delMethod === 'partner_offset') restorePartnerOffsetForPayment(paymentId, { reason: opts?.offsetReason });
 
     // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
     // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei

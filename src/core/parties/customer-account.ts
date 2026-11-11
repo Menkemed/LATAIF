@@ -284,6 +284,8 @@ const PAYMENT_LABEL: Record<string, string> = {
   debt_offset: 'Offset with loan · no cash',
   // v0.8.101 S0 — Verrechnung mit einem Einkauf derselben Person; am Einkauf heißt die Gegenzeile 'offset'.
   purchase_offset: 'Offset with purchase · no cash', offset: 'Offset · no cash',
+  // v0.8.101 S4 — Verrechnung mit einem Partnerguthaben derselben Person.
+  partner_offset: 'Offset with partner balance · no cash',
 };
 /** Unbekannte Zahlart: die gemeinsame Beschriftung (`paymentMethodLabel`), nie der technische Rohwert. */
 const payLabel = (m: unknown): string => PAYMENT_LABEL[txt(m)] || (txt(m) ? paymentMethodLabel(txt(m)) : 'Payment');
@@ -367,9 +369,12 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
     `SELECT p.invoice_id, p.amount, p.method, p.received_at,
             (SELECT o.offset_number || ' · ' || CASE WHEN o.payable_type = 'STORE_CREDIT' THEN 'store credit'
                                                     WHEN o.payable_type = 'PURCHASE' THEN 'purchase ' || COALESCE(pu.purchase_number, '')
+                                                    WHEN o.payable_type = 'PARTNER_ITEM' THEN 'partner balance ' || COALESCE(ppu.purchase_number, '')
                                                     ELSE COALESCE(d.loan_number, '') END
                FROM party_offsets o LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
                                     LEFT JOIN purchases pu ON pu.id = o.payable_id AND o.payable_type = 'PURCHASE'
+                                    LEFT JOIN purchase_lines ppl ON ppl.id = o.payable_id AND o.payable_type = 'PARTNER_ITEM'
+                                    LEFT JOIN purchases ppu ON ppu.id = ppl.purchase_id
               WHERE o.receivable_payment_id = p.id) AS offset_ref
        FROM payments p JOIN invoices i ON i.id = p.invoice_id
       WHERE i.customer_id = ? AND i.branch_id = ?`,

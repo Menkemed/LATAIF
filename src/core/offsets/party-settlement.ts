@@ -36,6 +36,7 @@ import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED } from '@/core/finance/open-ite
 import { roleMayRunOp } from '@/core/bridge/command-permissions';
 import { createDebtOffsetInHouse } from './party-offsets';
 import { createPurchaseOffsetInHouse } from './purchase-offsets';
+import { createPartnerOffsetInHouse } from './partner-offsets';
 import { OFFSET_PAYABLE_STORE_CREDIT, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 export { OFFSET_HAS_LATER_RETURN, assertOffsetUndoSafe } from './party-offset-restore';
 import {
@@ -245,13 +246,23 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
         { branchId: ctx.branchId, userId }, { settlementNumber, line },
       );
       paymentId = r.paymentId;
-    } else {
+    } else if (p.sourceKind === 'PARTNER_ITEM') {
+      // v0.8.101 S4 — die Verrechnung mit einem auszahlbaren Partnerguthaben — mit der gemeinsamen Nummer.
+      const r = createPartnerOffsetInHouse(
+        { invoiceId: p.invoiceId, purchaseLineId: p.sourceId, amount: B(p.amountF), offsetDate: tag, specialMarkOnFinal: special(p.invoiceId) },
+        { branchId: ctx.branchId, userId }, { settlementNumber, line },
+      );
+      paymentId = r.paymentId;
+    } else if (p.sourceKind === 'LOAN_BORROWED') {
       // Die B1-Hausfolge — mit der gemeinsamen Nummer.
       const r = createDebtOffsetInHouse(
         { invoiceId: p.invoiceId, debtId: p.sourceId, amount: B(p.amountF), offsetDate: tag, specialMarkOnFinal: special(p.invoiceId) },
         { branchId: ctx.branchId, userId }, { settlementNumber, line },
       );
       paymentId = r.paymentId;
+    } else {
+      // v0.8.101 S4 — vorher fiel jede unbekannte Art still in die Darlehensverrechnung. Jetzt: Nein, nichts gebucht.
+      throw nein(SETTLE_SELECTION_INVALID, `this kind of counter item (${String(p.sourceKind)}) is not offset here`);
     }
     lines.push({
       offsetNumber, invoiceId: p.invoiceId, invoiceNumber: '', invoiceStatus: '', invoiceOpenAfter: 0,

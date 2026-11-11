@@ -75,14 +75,16 @@ export function storeCreditLabel(sourceType: unknown): string {
 }
 
 const REF_SQL = `SELECT o.*, i.invoice_number AS inv_number, d.loan_number AS loan_number, cc.source_type AS credit_source,
-                          pu.purchase_number AS purchase_number,
+                          pu.purchase_number AS purchase_number, ppu.purchase_number AS partner_purchase_number,
                           (pu.source_consignment_id IS NOT NULL OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = pu.id
                              AND pl.source_consignment_id IS NOT NULL)) AS purchase_consignment
                    FROM party_offsets o
                    LEFT JOIN invoices i ON i.id = o.receivable_id
                    LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
                    LEFT JOIN customer_credits cc ON cc.id = o.payable_id AND o.payable_type = 'STORE_CREDIT'
-                   LEFT JOIN purchases pu ON pu.id = o.payable_id AND o.payable_type = 'PURCHASE'`;
+                   LEFT JOIN purchases pu ON pu.id = o.payable_id AND o.payable_type = 'PURCHASE'
+                   LEFT JOIN purchase_lines ppl ON ppl.id = o.payable_id AND o.payable_type = 'PARTNER_ITEM'
+                   LEFT JOIN purchases ppu ON ppu.id = ppl.purchase_id`;
 
 function ref(o: Record<string, unknown>): OffsetRef {
   return {
@@ -96,6 +98,8 @@ function ref(o: Record<string, unknown>): OffsetRef {
     settlementNumber: (o.settlement_number as string | null) ?? null,
     sourceLabel: String(o.payable_type ?? 'DEBT') === 'STORE_CREDIT'
       ? storeCreditLabel(o.credit_source)
+      : String(o.payable_type) === 'PARTNER_ITEM'
+        ? `partner balance ${String(o.partner_purchase_number ?? '') || String(o.payable_id).slice(0, 8)}`
       : String(o.payable_type) === 'PURCHASE'
         ? `${Number(o.purchase_consignment) === 1 ? 'consignment purchase' : 'purchase'} ${String(o.purchase_number ?? '') || String(o.payable_id).slice(0, 8)}`
         : `loan ${String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8)}`,

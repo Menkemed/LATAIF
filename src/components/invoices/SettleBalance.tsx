@@ -204,7 +204,7 @@ export function InvoiceOffsetList({ offsets, canRemove, busy, onRemove }: {
           <div key={o.offsetId} data-invoice-offset={o.offsetNumber} data-invoice-offset-status={o.status}
             className="flex justify-between items-center" style={{ padding: '5px 0', borderBottom: '1px solid #EEF0F2', fontSize: 11, gap: 8 }}>
             <span style={{ color: aktiv ? '#4B5563' : '#9CA3AF', minWidth: 0 }}>
-              {tag(o.offsetDate)} · {o.offsetNumber}{o.settlementNumber ? ' (settlement)' : ''} · {o.payableType === 'STORE_CREDIT' ? o.sourceLabel : o.payableType === 'PURCHASE' ? (<>{o.sourceLabel.replace(/ \S+$/, '')}{' '}
+              {tag(o.offsetDate)} · {o.offsetNumber}{o.settlementNumber ? ' (settlement)' : ''} · {o.payableType === 'STORE_CREDIT' || o.payableType === 'PARTNER_ITEM' ? o.sourceLabel : o.payableType === 'PURCHASE' ? (<>{o.sourceLabel.replace(/ \S+$/, '')}{' '}
               <Link to={`/purchases/${o.debtId}`} style={{ color: 'inherit', textDecoration: 'underline' }} data-invoice-offset-purchase>{o.sourceLabel.split(' ').pop()}</Link></>) : (<>loan{' '}
               <Link to={`/debts?filter=all&loan=${encodeURIComponent(o.loanNumber)}`} style={{ color: 'inherit', textDecoration: 'underline' }}>{o.loanNumber}</Link></>)}
               {' '}· Offset – no cash{aktiv ? '' : ` · reversed${o.reverseReason ? ` (${o.reverseReason})` : ''}`}

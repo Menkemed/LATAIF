@@ -291,7 +291,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
                  AND e.created_at = p.created_at
                  AND e.status != 'CANCELLED') AS card_fee
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
-     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit', 'debt_offset', 'purchase_offset')`,
+     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit', 'debt_offset', 'purchase_offset', 'partner_offset')`,
     [branchId]
   );
   // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ('order_deposit') bewegt kein Geld: das Geld steht als
@@ -482,7 +482,8 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
        FROM item_partner_movements m
        LEFT JOIN partners pr ON pr.id = m.partner_id
        LEFT JOIN purchases p ON p.id = m.purchase_id
-      WHERE m.branch_id = ? AND m.kind IN ('CONTRIBUTION', 'PAYOUT') AND m.cancelled_at IS NULL`,
+      WHERE m.branch_id = ? AND m.kind IN ('CONTRIBUTION', 'PAYOUT') AND m.cancelled_at IS NULL
+        AND COALESCE(m.method, '') != 'offset'`,
     [branchId]
   );
   for (const m of itemMoves) {

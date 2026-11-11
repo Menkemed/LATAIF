@@ -571,7 +571,7 @@ registerCommand(OP_INVOICES_GET, {
       notes: str(x.notes),
       // Eine Guthaben-Zahlung hängt an einer Guthabenzeile — der Client darf sie sehen, aber
       // nicht anfassen. Der Primary weist sie ohnehin ab; hier steht der Grund sichtbar.
-      editable: str(x.method) !== 'credit' && str(x.method) !== 'order_deposit' && str(x.method) !== 'debt_offset' && str(x.method) !== 'purchase_offset',
+      editable: str(x.method) !== 'credit' && str(x.method) !== 'order_deposit' && str(x.method) !== 'debt_offset' && str(x.method) !== 'purchase_offset' && str(x.method) !== 'partner_offset',
     }));
     // CUSTOMER ACCOUNT B1 — die Verrechnungen dieser Rechnung (Gegenbeleg, Nummer, Stand) und die Darlehen „We Borrowed"
     // desselben Kunden, mit denen sie verrechnet werden kann — vom Primary geprüft, nicht vom Client nachgerechnet.

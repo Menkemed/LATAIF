@@ -419,8 +419,8 @@ marker('B23_SEC_B_EXPENSE_PROVED');
   const t = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'bank_transfer'));
   const be = primary(() => useInvoiceStore.getState().recordPayment('I1', 5, 'benefit'));
   ok(c.ok && t.ok && be.ok && cashDr() === 1 && bankDr() === 2, `B6 cash / bank_transfer / benefit wie bisher (${[c, t, be].map((x) => x.code || 'ok').join(',')})`);
-  ok(S([...posting.INVOICE_PAYMENT_METHODS_KNOWN]) === S(['cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset']),
-    'B6 die bekannten Wege: Geld (cash, card, bank_transfer, benefit, other) und ohne Geld (credit, order_deposit, debt_offset, purchase_offset)');
+  ok(S([...posting.INVOICE_PAYMENT_METHODS_KNOWN]) === S(['cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset', 'partner_offset']),
+    'B6 die bekannten Wege: Geld (cash, card, bank_transfer, benefit, other) und ohne Geld (credit, order_deposit, debt_offset, purchase_offset, seit S4 partner_offset)');
   ok(unbalanced(db) === 0, 'B6 Hauptbuch ausgeglichen');
 }
 marker('B23_SEC_B_INVOICE_PROVED');

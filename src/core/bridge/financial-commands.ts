@@ -314,6 +314,11 @@ function livePayment(paymentId: string, invoiceId: string, forDelete = false): R
       'an offset with a loan is not edited — remove the offset (the loan opens again) instead');
   }
   // B2/B3 — ebenso die Verrechnung mit einem Einkauf.
+  // v0.8.101 S4 — ebenso die Verrechnung mit einem Partnerguthaben.
+  if (String(p.method) === 'partner_offset' && !forDelete) {
+    throw new CommandRejected('PAYMENT_IS_PARTNER_OFFSET',
+      'an offset with a partner balance is not edited — remove the offset (the partner balance opens again) instead');
+  }
   if (String(p.method) === 'purchase_offset' && !forDelete) {
     throw new CommandRejected('PAYMENT_IS_PURCHASE_OFFSET',
       'an offset with a purchase is not edited — remove the offset (the purchase opens again) instead');

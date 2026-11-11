@@ -302,7 +302,7 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
                             {m.occurredAt} · {KIND_LABEL[m.kind] ?? m.kind}{m.invoiceNumber ? ` ${m.invoiceNumber}` : ''}
                             {m.method ? ` · ${m.method}` : ''} · <Bhd v={m.amount} /> BHD{m.detail ? ` · ${m.detail}` : ''}{m.note ? ` · ${m.note}` : ''}
                           </span>
-                          {canPay && !m.cancelled && m.kind !== 'SUPPLIER_RETURN' && m.kind !== 'TAKEOVER' && (
+                          {canPay && !m.cancelled && m.kind !== 'SUPPLIER_RETURN' && m.kind !== 'TAKEOVER' && m.method !== 'offset' && (
                             <button type="button" disabled={busy} onClick={() => void cancelMove(it, m.id, m.kind)} className="cursor-pointer"
                               style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }} data-partner-item-cancel={m.id}>reverse (entry error)</button>
                           )}

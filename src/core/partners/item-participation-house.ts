@@ -43,7 +43,7 @@ import { productDisplayName } from '../products/display-name.ts';
 import {
   B, F, FULL_BP, PartnerItemRejected, itemMovementInput, itemOffsetInput, openBalanceF, owedCostF, ownershipChangeInput,
   planLineParticipation, profitShareF,
-  PARTNER_ITEM_JOINT_BLOCKED, PARTNER_ITEM_NOT_FOUND, PARTNER_ITEM_OFFSET_INVALID, PARTNER_ITEM_OVERFUNDED, PARTNER_ITEM_NOTHING_OWED,
+  PARTNER_ITEM_AMOUNT_INVALID, PARTNER_ITEM_JOINT_BLOCKED, PARTNER_ITEM_NOT_FOUND, PARTNER_ITEM_OFFSET_INVALID, PARTNER_ITEM_OVERFUNDED, PARTNER_ITEM_NOTHING_OWED,
   PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, PARTNER_ITEM_PRIMARY_ONLY, PARTNER_ITEM_PURCHASE_CANCELLED, PARTNER_MOVEMENT_CANCELLED,
   PARTNER_MOVEMENT_NOT_FOUND, PARTNER_NOT_ACTIVE, PARTNER_OWNERSHIP_BLOCKED, PARTNER_OWNERSHIP_UNCHANGED,
   PARTNER_OWNERSHIP_VALUE_MISMATCH, PARTNER_SALE_ALREADY_SETTLED, PARTNER_SALE_NEEDS_CORRECTION, PARTNER_SALE_NOT_FOUND,
@@ -630,6 +630,62 @@ function insertMovement(ctx: PartnerItemCtx, m: {
   return id;
 }
 
+// ── Auszahlung per Verrechnung (v0.8.101 S4, Settle Balance) ─────────────────
+
+/** Methode einer Auszahlung, die nicht bar floss, sondern mit einer Kundenrechnung desselben Menschen verrechnet wurde. */
+export const PARTNER_OFFSET_METHOD = 'offset';
+export const PARTNER_MOVEMENT_IS_OFFSET = 'PARTNER_MOVEMENT_IS_OFFSET';
+
+/**
+ * Was LATAIF diesem Partner an dieser Zeile JETZT auszahlen dürfte — dieselbe Regel wie „Pay out": offener Saldo > 0 und
+ * keine Sperre (Nachabrechnung, Rückkehr nach Übernahme, Lieferantengutschrift). Für die Verrechnung in Settle Balance.
+ */
+export function partnerPayableNow(purchaseLineId: string, partnerId: string, branchId: string): { openF: number; blocker: { code: string; message: string } | null } {
+  assertParticipates(purchaseLineId, partnerId, branchId);
+  const st = lineStateOf(purchaseLineId, partnerId, branchId);
+  return { openF: st.openF, blocker: payoutBlocker(st) };
+}
+
+/**
+ * v0.8.101 S4 — die Partnerseite einer Verrechnung „Partnerguthaben → Kundenrechnung": eine Auszahlung (PAYOUT) mit der
+ * Methode 'offset' und der Rechnung als Bezug, OHNE eigene Buchung. Gebucht wird EINMAL an der Rechnungszahlung
+ * ('partner_offset': Soll PARTNER_ITEM_BALANCE / Gegenpartei Partner, Haben ACCOUNTS_RECEIVABLE / Gegenpartei Kunde).
+ * Dieselben Prüfungen wie „Pay out", gegen den frischen Stand in der Transaktion des Aufrufers.
+ */
+export function recordOffsetPayoutInHouse(
+  v: { purchaseLineId: string; partnerId: string; amountF: number; date: string; invoiceId: string; offsetNumber: string; invoiceLabel: string },
+  ctx: PartnerItemCtx,
+): { movementId: string; openAfterF: number } {
+  assertItemBooksHere();
+  const purchaseId = assertParticipates(v.purchaseLineId, v.partnerId, ctx.branchId);
+  const st = lineStateOf(v.purchaseLineId, v.partnerId, ctx.branchId);
+  const b = payoutBlocker(st);
+  if (b) throw nein(b.code, b.message);
+  if (!Number.isInteger(v.amountF) || v.amountF <= 0) throw nein(PARTNER_ITEM_AMOUNT_INVALID, 'the offset amount must be above 0');
+  if (v.amountF > st.openF) {
+    throw nein(PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN,
+      st.openF > 0 ? `LATAIF owes this partner ${bhd(st.openF)} BHD on this item — offset at most that` : 'LATAIF owes this partner nothing on this item');
+  }
+  const movementId = insertMovement(ctx, {
+    purchaseId, purchaseLineId: v.purchaseLineId, partnerId: v.partnerId, kind: 'PAYOUT', amountF: v.amountF,
+    method: PARTNER_OFFSET_METHOD, occurredAt: v.date, invoiceId: v.invoiceId,
+    basis: { offsetNumber: v.offsetNumber, invoiceNumber: v.invoiceLabel, noCash: true },
+    note: `Offset ${v.offsetNumber} · invoice ${v.invoiceLabel} · no cash`,
+  });
+  return { movementId, openAfterF: lineStateOf(v.purchaseLineId, v.partnerId, ctx.branchId).openF };
+}
+
+/** Die Partnerseite einer aufgehobenen Verrechnung: die Auszahlung per Verrechnung wird storniert (nie gelöscht). */
+export function cancelOffsetPayoutInHouse(movementId: string, now: string, userId: string | null): void {
+  getDatabase().run(
+    `UPDATE item_partner_movements SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND kind = 'PAYOUT' AND method = ? AND cancelled_at IS NULL`,
+    [now, userId, movementId, PARTNER_OFFSET_METHOD],
+  );
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) {
+    throw nein(PARTNER_MOVEMENT_CANCELLED, 'the partner side of this offset changed meanwhile — nothing was changed');
+  }
+}
+
 // ── Beitrag und Auszahlung ──────────────────────────────────────────────────
 
 export interface ItemMovementRecorded {
@@ -1055,6 +1111,10 @@ export function cancelItemMovementInHouse(movementId: string, ctx: PartnerItemCt
   if (m.cancelled_at) throw nein(PARTNER_MOVEMENT_CANCELLED, 'this partner booking is already cancelled');
   if (m.kind === 'SUPPLIER_RETURN' || m.kind === 'TAKEOVER') {
     throw nein(PARTNER_MOVEMENT_CANCELLED, 'this booking belongs to a supplier return or an ownership change — it is not reversed on its own');
+  }
+  // v0.8.101 S4 — eine Auszahlung per Verrechnung (Settle Balance) hängt an ihrer Rechnungszahlung: nur dort aufheben.
+  if (m.kind === 'PAYOUT' && String(query('SELECT method FROM item_partner_movements WHERE id = ?', [movementId])[0]?.method ?? '') === PARTNER_OFFSET_METHOD) {
+    throw nein(PARTNER_MOVEMENT_IS_OFFSET, 'this payout was an offset with a client invoice — remove the offset at the invoice or undo the settlement (STL) instead');
   }
   const targets = m.kind === 'PROFIT_SHARE'
     ? query(

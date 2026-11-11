@@ -23,6 +23,7 @@ import { savePartnerLinkToCustomer } from '@/core/masterdata/masterdata-save';
 import { usePermission } from '@/hooks/usePermission';
 import { SettleBalanceModal, type NotOfferedItem } from '@/components/parties/SettleBalanceModal';
 import type { SettlementView } from '@/core/offsets/party-settlement-reads';
+import { partnerItemHref } from '@/core/partners/partner-open-balances';
 import { reverseSettlementOnPrimary, settlementReverseBody, type SettlementBooked, type SettlementReversed } from '@/core/offsets/party-settlement';
 
 /** Warum ein offener Posten, den LATAIF schuldet, in „Settle Balance" NICHT angeboten wird (Owner 09.11.2026: nur Store Credit + We Borrowed). */
@@ -32,7 +33,8 @@ const NICHT_ANGEBOTEN: Partial<Record<AccountDoc['kind'], string>> = {
   PURCHASE: 'this purchase cannot be offset here (supplier role not linked, or no accounting entry)',
   SUPPLIER_EXPENSE: 'supplier expenses (e.g. consignor loss) are not offset',
   CONSIGNMENT_PAYOUT: 'this consignment purchase cannot be offset here (supplier role not linked, or no accounting entry)',
-  PARTNER_PAYABLE: 'partner amounts are settled in the partner account',
+  // v0.8.101 S4 — ein AUSZAHLBARES Partnerguthaben ist angeboten (Gruppe „Partner balances“); hier steht nur, was wartet.
+  PARTNER_PAYABLE: 'this partner amount cannot be paid out now (a settlement correction or a supplier credit is pending)',
   ORDER_DEPOSIT: 'bound to its order — applied with that order’s invoice',
   OPENING_ADVANCE: 'opening balance — waits for the accountant',
   OPENING_SUPPLIER_PAYABLE: 'opening balance — waits for the accountant',
@@ -72,6 +74,8 @@ function Settlements({ list, canUndo, busy, onUndo }: { list: SettlementView[]; 
                     // v0.8.101 S0 — eine Einkaufsverrechnung ist kein Darlehen: Gegenbeleg ist der Einkauf selbst.
                     : l.sourceKind === 'PURCHASE'
                       ? <>Purchase <Link to={`/purchases/${encodeURIComponent(l.sourceId)}`} style={{ color: INK }} data-settlement-line-source="PURCHASE">{l.sourceNumber}</Link></>
+                      : l.sourceKind === 'PARTNER_ITEM'
+                        ? <>Partner balance <Link to={l.partnerId ? partnerItemHref(l.partnerId, l.sourceId) : '/partners'} style={{ color: INK }} data-settlement-line-source="PARTNER_ITEM">{l.sourceNumber}</Link></>
                       : <>We Borrowed <Link to={`/debts?filter=all&loan=${encodeURIComponent(l.sourceNumber)}`} style={{ color: INK }}>{l.sourceNumber}</Link></>}</td>
                   <td style={{ ...td, fontSize: 12 }}>→ <Link to={`/invoices/${l.invoiceId}`} style={{ color: INK }}>{l.invoiceNumber}</Link></td>
                   <td style={{ ...td, fontSize: 12, color: GREY }}>{l.status === 'ACTIVE' ? 'Offset – no cash' : `removed${l.reverseReason ? ` (${l.reverseReason})` : ''}`}</td>
@@ -275,11 +279,13 @@ export function CustomerAccountPage() {
     .filter((d) => d.side === 'WE_OWE' && d.open > 0.0045 && NICHT_ANGEBOTEN[d.kind])
     // B2/B3 — ein angebotener Einkauf steht rechts in der Gruppe „Purchases", nicht hier.
     .filter((d) => !(d.key.startsWith('purchase:') && (settle?.sources ?? []).some((x) => x.kind === 'PURCHASE' && `purchase:${x.id}` === d.key)))
+    // v0.8.101 S4 — ein angebotenes Partnerguthaben steht rechts in der Gruppe „Partner balances“, nicht hier.
+    .filter((d) => !(d.key.startsWith('partner:') && (settle?.sources ?? []).some((x) => x.kind === 'PARTNER_ITEM' && `partner:${x.partnerId}:${x.id}` === d.key)))
     .map((d) => ({ key: d.key, number: d.number, label: d.kindLabel, open: d.open, why: NICHT_ANGEBOTEN[d.kind] as string })), [acc, settle]);
   async function verrechnungAufheben(st: SettlementView) {
     setAktionFehler('');
     setGebucht(null);
-    const ok = await window.confirm(`Undo ${st.number}?\n\nEvery offset of this settlement that is still active (${st.activeLines}, ${st.activeTotal.toFixed(3)} BHD) is removed at once: the invoices are open again by these amounts, the store credit and the loans are open again. No cash moves. Final invoice numbers stay as they are.`);
+    const ok = await window.confirm(`Undo ${st.number}?\n\nEvery offset of this settlement that is still active (${st.activeLines}, ${st.activeTotal.toFixed(3)} BHD) is removed at once: the invoices are open again by these amounts, the store credit, loans, purchases and partner balances are open again. No cash moves. Final invoice numbers stay as they are.`);
     if (!ok) return;
     const req = { settlementNumber: st.number, expectedActiveLines: st.activeLines, reason: 'settlement undone in the client account' };
     const r = await w.save<SettlementReversed>('customers.settlement_reverse', {

@@ -614,12 +614,15 @@ function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
 // (LATAIFs Schuld gegenüber dem Kunden sinkt), kein Geldkonto. Die Rückzahlungszeile am Darlehen bucht nicht selbst.
 // B2/B3 — 'purchase_offset' = die Verrechnung mit einem offenen Einkauf derselben Person: Soll ACCOUNTS_PAYABLE mit
 // Gegenpartei LIEFERANT (postInvoicePayment setzt sie), kein Geldkonto. Die Zeile am Einkauf ('offset') bucht nicht selbst.
+// v0.8.101 S4 (Owner 11.11.2026) — 'partner_offset' = die Verrechnung mit einem AUSZAHLBAREN Partnerguthaben derselben Person:
+// Soll PARTNER_ITEM_BALANCE mit Gegenpartei PARTNER (postInvoicePayment setzt sie), Haben ACCOUNTS_RECEIVABLE (Kunde), kein
+// Geldkonto. Die Auszahlungszeile am Partnerartikel (PAYOUT, Methode 'offset') bucht nicht selbst.
 //
 // B2/B3 SICHERHEITSABSCHLUSS (10.11.2026) — die bekannten Wege einer Rechnungszahlung. Eine NEUE Zahlung (`recordPayment`)
 // mit einem anderen Wert wird abgewiesen, statt still auf BANK zu fallen. Bewusst NICHT hier im Buchungsweg: Umbuchungen und
 // Nachbuchungen bestehender Zeilen (Altdaten) laufen unverändert weiter. 'other' bleibt wie bisher BANK (Owner-Frage).
 export const INVOICE_PAYMENT_METHODS_KNOWN = [
-  'cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset',
+  'cash', 'card', 'bank_transfer', 'benefit', 'other', 'credit', 'order_deposit', 'debt_offset', 'purchase_offset', 'partner_offset',
 ] as const;
 export const INVOICE_PAYMENT_METHOD_UNKNOWN = 'INVOICE_PAYMENT_METHOD_UNKNOWN';
 export function assertKnownInvoicePaymentMethod(method: unknown): void {
@@ -628,11 +631,12 @@ export function assertKnownInvoicePaymentMethod(method: unknown): void {
   (e as Error & { code?: string }).code = INVOICE_PAYMENT_METHOD_UNKNOWN;
   throw e;
 }
-function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit' | 'debt_offset' | 'purchase_offset'): LedgerAccount {
+function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit' | 'debt_offset' | 'purchase_offset' | 'partner_offset'): LedgerAccount {
   switch (method) {
     case 'order_deposit': return 'CUSTOMER_DEPOSITS';
     case 'debt_offset':   return 'LOAN_PAYABLE';
     case 'purchase_offset': return 'ACCOUNTS_PAYABLE';
+    case 'partner_offset': return 'PARTNER_ITEM_BALANCE';
     case 'cash':          return 'CASH';
     case 'bank_transfer': return 'BANK';
     case 'card':          return 'CARD_CLEARING';
@@ -965,7 +969,7 @@ export function postInvoicePayment(
   payment: Payment,
   customerId: string,
   openRemainder?: number,
-  opts: { occurredAt?: string; apSupplierId?: string } = {}
+  opts: { occurredAt?: string; apSupplierId?: string; partnerId?: string } = {}
 ): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
@@ -980,14 +984,19 @@ export function postInvoicePayment(
   if (purchaseOffset && !opts.apSupplierId) {
     throw new Error('postInvoicePayment: a purchase offset needs the supplier of the purchase (apSupplierId) — nothing was booked');
   }
+  // v0.8.101 S4 — ebenso die Verrechnung mit einem Partnerguthaben: Gegenpartei der Soll-Zeile ist der PARTNER.
+  const partnerOffset = (payment.method as string) === 'partner_offset';
+  if (partnerOffset && !opts.partnerId) {
+    throw new Error('postInvoicePayment: a partner offset needs the partner (partnerId) — nothing was booked');
+  }
   const entries: LedgerEntryInput[] = [
     {
       account: cashAcc,
       direction: 'DEBIT',
       amount,
-      counterpartyType: purchaseOffset ? 'SUPPLIER' : 'CUSTOMER',
-      counterpartyId: purchaseOffset ? String(opts.apSupplierId) : customerId,
-      metadata: purchaseOffset ? { ...meta, offset: true, noCash: true } : meta,
+      counterpartyType: purchaseOffset ? 'SUPPLIER' : partnerOffset ? 'PARTNER' : 'CUSTOMER',
+      counterpartyId: purchaseOffset ? String(opts.apSupplierId) : partnerOffset ? String(opts.partnerId) : customerId,
+      metadata: purchaseOffset || partnerOffset ? { ...meta, offset: true, noCash: true } : meta,
     },
   ];
   if (arCredit > 0) {

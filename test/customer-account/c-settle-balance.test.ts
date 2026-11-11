@@ -561,7 +561,7 @@ reload();
   const reg = src('src/core/bridge/command-registry.ts');
   ok(reg.includes("'customers.settle_balance', 'customers.settlement_reverse',") && src('src-tauri/src/bridge.rs').includes('OP_CUSTOMERS_SETTLE_BALANCE,'),
     'Q-2 beide Befehle namentlich freigegeben (TS und Rust)');
-  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE']), 'Q-3 Store Credit, We Borrowed, seit B2/B3 Einkäufe (Partner, Anzahlung, Eröffnung, Gold nicht)');
+  ok(S(sr.SETTLE_SOURCE_ORDER) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE', 'PARTNER_ITEM']), 'Q-3 Store Credit, We Borrowed, seit B2/B3 Einkäufe, seit S4 auszahlbare Partnerguthaben (Anzahlung, Eröffnung, Gold nicht)');
 }
 
 void [loadDebtPaymentsFor, payS, banking, analytics, backfill, executeCommand, lc, fc, money, po, geld, stand, sale, gap, TODAY, invRev, HCTX, readFileSync, existsSync, zeilen, wirft, n];

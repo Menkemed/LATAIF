@@ -73,7 +73,7 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   // ihr Guthaben zurück, statt bar erstattet zu werden (kein künstliches Geld). Eine gewöhnliche Anrechnung bleibt wie bisher.
   const depositPayments = query(
     `SELECT id, amount, method FROM payments WHERE invoice_id = ?
-        AND (method IN ('order_deposit', 'debt_offset', 'purchase_offset')
+        AND (method IN ('order_deposit', 'debt_offset', 'purchase_offset', 'partner_offset')
              OR (method = 'credit' AND EXISTS (SELECT 1 FROM party_offsets o WHERE o.receivable_payment_id = payments.id AND o.status = 'ACTIVE')))`,
     [input.invoiceId]);
   const depositSum = depositPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0);

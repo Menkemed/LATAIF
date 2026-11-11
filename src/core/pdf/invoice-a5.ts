@@ -103,6 +103,8 @@ const ZAHLWEG: Record<string, string> = {
   credit: 'Store Credit', order_deposit: 'Deposit', debt_offset: 'Offset', other: 'Other',
   // v0.8.101 S0 — Verrechnung mit einem Einkauf derselben Person: für den Kunden „Offset" wie beim Darlehen, nie der Rohwert.
   purchase_offset: 'Offset',
+  // v0.8.101 S4 — ebenso die Verrechnung mit einem Partnerguthaben.
+  partner_offset: 'Offset',
 };
 /** „Credit", solange nichts bezahlt ist; sonst die Zahlungswege — und „Credit" für einen offenen Rest. */
 export function paymentModeText(methods: readonly string[], paid: number, balance: number): string {

@@ -231,6 +231,7 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
                   {kopf}
                   <label data-settle-source={s.number} data-settle-source-kind={s.kind} data-settle-on={on ? '1' : '0'} className="flex cursor-pointer"
                     {...(s.kind === 'PURCHASE' ? { 'data-settle-source-purchase': s.consignment ? 'consignment' : 'normal' } : {})}
+                    {...(s.kind === 'PARTNER_ITEM' ? { 'data-settle-source-partner': s.partnerId ?? '' } : {})}
                     style={{ gap: 8, padding: '7px 8px', borderBottom: `1px solid ${LINE}`, background: on ? '#FAFBFC' : '#FFF', alignItems: 'flex-start' }}>
                     <input type="checkbox" checked={on} onChange={() => toggle(srcSel, s.id, setSrcSel)} style={{ marginTop: 3 }} />
                     <span style={{ flex: 1, minWidth: 0 }}>
@@ -241,10 +242,17 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
                           {s.consignment ? 'Consignment purchase' : 'Purchase'}
                         </span>
                       )}
+                      {/* v0.8.101 S4 — LATAIF schuldet dem verknüpften Partner diesen Betrag an diesem Artikel (auszahlbar, keine Sperre). */}
+                      {s.kind === 'PARTNER_ITEM' && (
+                        <span style={{ fontSize: 10, padding: '1px 6px', borderRadius: 999, marginRight: 4, background: 'rgba(170,149,110,0.16)', color: '#7A6A45' }}>
+                          Partner balance{s.partnerName ? ` · ${s.partnerName}` : ''}
+                        </span>
+                      )}
                       <span style={{ color: GREY }}>· {s.kind === 'PURCHASE' ? `total ${fmt(F(s.total))}` : s.label} · {fmtDate(s.date)}</span>
                       <div style={{ fontSize: 11, color: GREY }}>
                         {!on ? 'excluded' : used === 0 ? 'not needed' : `uses ${fmt(used)} → open after ${fmt(F(s.open) - used)}`}
                         {on && used > 0 && s.kind === 'PURCHASE' && (F(s.open) - used <= 5 ? ' · purchase → Paid' : ' · purchase → Partially paid')}
+                        {on && used > 0 && s.kind === 'PARTNER_ITEM' && ' · counts as paid out to the partner — no cash'}
                       </div>
                     </span>
                     <span className="font-mono" style={{ whiteSpace: 'nowrap' }}><Bhd v={s.open} /></span>
