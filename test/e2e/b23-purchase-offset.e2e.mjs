@@ -319,7 +319,7 @@ function seed() {
       insert(db, 'products', { id: prod, branch_id, category_id: cat, brand: 'Rolex', name: 'Joint ' + sfx, sku: 'B23-J-' + sfx, quantity: 1, condition: 'Pre-Owned',
         scope_of_delivery: '[]', purchase_price: 1000, purchase_currency: 'BHD', stock_status: 'in_stock', tax_scheme: 'MARGIN', images: '[]', attributes: '{}',
         source_type: 'OWN', created_at: now, updated_at: now });
-      insert(db, 'purchases', { id: pur, branch_id, purchase_number: 'PUR-2026-00098' + (sfx === 'i' ? '6' : '7'), supplier_id: SUP_FREMD, status: 'PAID',
+      insert(db, 'purchases', { id: pur, branch_id, purchase_number: 'PUR-2026-00098' + (sfx === 'i' ? '6' : sfx === 'j' ? '7' : '9'), supplier_id: SUP_FREMD, status: 'PAID',
         total_amount: 1000, paid_amount: 1000, remaining_amount: 0, purchase_date: '2026-10-05', created_at: now, updated_at: now });
       insert(db, 'purchase_lines', { id: pl, purchase_id: pur, product_id: prod, description: 'Joint ' + sfx, quantity: 1, unit_price: 1000, line_total: 1000,
         position: 0, tax_scheme: 'ZERO', vat_rate: 0, vat_amount: 0 });
@@ -363,11 +363,23 @@ function seed() {
       remaining_amount: 50, purchase_date: '2026-10-09', created_at: now, updated_at: now });
     le('b23-le-purq-d', 'INVENTORY', 'DEBIT', 50, 'SUPPLIER', SUP_Q, 'PURCHASE', PUR_Q, 'b23-tx-purq');
     le('b23-le-purq-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 50, 'SUPPLIER', SUP_Q, 'PURCHASE', PUR_Q, 'b23-tx-purq');
+    // v0.8.101 Lieferantenrückgabe mit Zusatzkosten — Artikel K: gemeinsam 1000 (Q 50 %), per Bank bezahlt; danach aktivierte
+    // Zusatzkosten 100 (Polieren, gebucht und bezahlt) → Einstand 1100. Q hat 550 eingezahlt (500 Einkauf + 50 Zusatzkosten).
+    const Kx = gemeinsam('k', 50);
+    db.prepare('UPDATE stock_lots SET unit_cost = 1100 WHERE id = ?').run(Kx.lot);
+    le('b23-le-pur-k-d', 'INVENTORY', 'DEBIT', 1000, 'SUPPLIER', SUP_FREMD, 'PURCHASE', Kx.pur, 'b23-tx-pur-k');
+    le('b23-le-pur-k-c', 'BANK', 'CREDIT', 1000, 'SUPPLIER', SUP_FREMD, 'PURCHASE', Kx.pur, 'b23-tx-pur-k');
+    le('b23-le-exp-k-d', 'INVENTORY', 'DEBIT', 100, 'SUPPLIER', SUP_FREMD, 'EXPENSE', 'b23-exp-k', 'b23-tx-exp-k');
+    le('b23-le-exp-k-c', 'BANK', 'CREDIT', 100, 'SUPPLIER', SUP_FREMD, 'EXPENSE', 'b23-exp-k', 'b23-tx-exp-k');
+    insert(db, 'item_partner_movements', { id: 'b23-ipm-k-c', branch_id, purchase_id: Kx.pur, purchase_line_id: Kx.pl, partner_id: PARTNER_Q, kind: 'CONTRIBUTION',
+      amount: 550, method: 'cash', occurred_at: '2026-10-06', created_at: now });
+    le('b23-le-ipm-k-d', 'CASH', 'DEBIT', 550, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-k-c', 'b23-tx-ipm-k');
+    le('b23-le-ipm-k-c', 'PARTNER_ITEM_BALANCE', 'CREDIT', 550, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-k-c', 'b23-tx-ipm-k');
   } finally { db.close(); }
 }
 const K_P = 'b23-kunde-p', PARTNER_P = 'b23-partner-p', PROD_P = 'b23-prod-p', PUR_P = 'b23-pur-p', PL_P = 'b23-pl-p', INV_P = 'b23-inv-p';
 const K_Q = 'b23-kunde-q', PARTNER_Q = 'b23-partner-q', SUP_Q = 'b23-sup-q', REP_I = 'b23-rep-i', EXP_I = 'b23-exp-i', CC_Q = 'b23-cc-q', DEBT_Q = 'b23-debt-q', PUR_Q = 'b23-pur-q';
-const PL_I = 'b23-pl-i', PL_J = 'b23-pl-j';
+const PL_I = 'b23-pl-i', PL_J = 'b23-pl-j', PL_K = 'b23-pl-k', PUR_K = 'b23-pur-k';
 const einkaufZeile = (id) => dbQ(BIZ_DB, 'SELECT status, paid_amount, remaining_amount FROM purchases WHERE id = ?', [id])[0] || {};
 const rechnung = (id) => dbQ(BIZ_DB, 'SELECT status, paid_amount, invoice_number, special_mark FROM invoices WHERE id = ?', [id])[0] || {};
 async function dateiBis(pruefe, ms = 30000) {
@@ -803,6 +815,53 @@ try {
       && zahl("SELECT COUNT(*) AS n FROM item_partner_movements WHERE purchase_line_id = ? AND method = 'offset' AND cancelled_at IS NULL", [PL_J]) === 0,
       'J Rückgängig: Store Credit frei, Darlehen und Einkauf wieder offen, Bewegungen storniert');
     ok(geldBuchungen() === geldJ, 'J auch das Rückgängig bewegt kein Geld');
+  }
+
+  // ── K PC2 (v0.8.101 Lieferantenrückgabe mit Zusatzkosten): gemeinsamer Artikel K, Einstand 1100 (1000 + 100 Polieren), Q 50 %.
+  //    Erst Rücknahmepreis 1100 (abgewiesen, nichts geschrieben), dann 1000 + Zusatzkosten 50 per Bank → Verlust 50, Q trägt 25. ──
+  {
+    await syncRuhe();
+    const soll = (acc) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0) AS s
+      FROM ledger_entries WHERE account = ?`, [acc])[0]?.s || 0)) / 1000;
+    const r3 = (x) => Math.round(x * 1000) / 1000;
+    const lose = () => Math.round(1000 * Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(qty_remaining * unit_cost), 0) AS s FROM stock_lots WHERE status != 'CANCELLED'")[0]?.s || 0)) / 1000;
+    const inv0 = soll('INVENTORY'), los0 = soll('INVENTORY_LOSS'), bank0 = soll('BANK'), lager0 = lose();
+    client = await lade(client, `/purchases/${PUR_K}`);
+    await waitFor(client, '[data-purchase-return-open]', 45000);
+    ok(await mausKlick(client, '[data-purchase-return-open]') === 'OK', 'K PC2: Maus auf „Return to Supplier"');
+    await waitFor(client, `[data-purchase-return-line="${PL_K}"]`, 15000);
+    ok(await mausKlick(client, `[data-purchase-return-line="${PL_K}"]`) === 'OK', 'K Maus: Zeile K auswählen');
+    ok(await tippe(client, `[data-purchase-return-price="${PL_K}"]`, '1100') === 'OK', 'K Tastatur: Rücknahmepreis 1100 (Zusatzkosten im Preis versteckt)');
+    ok(await mausKlick(client, '[data-purchase-return-method="bank"]') === 'OK', 'K Maus: Erstattung „Bank"');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'purchases.return_to_supplier').length;
+    ok(await mausKlick(client, '[data-purchase-return-confirm]') === 'OK', 'K Maus auf „Confirm Return"');
+    await sleep(2500);
+    const dialogText = await text(client, '[data-save-error]').catch(() => '');
+    ok(zahl("SELECT COUNT(*) AS n FROM purchase_returns WHERE purchase_id = ? AND status != 'DRAFT'", [PUR_K]) === 0 && soll('INVENTORY') === inv0
+      && /more than this purchase is worth|above the purchase price/.test(String(dialogText)) && /added costs refunded/.test(String(dialogText)),
+      `K Preis über dem Einkauf abgewiesen, Hinweis im Dialog, nichts gebucht (${String(dialogText).replace(/\s+/g, ' ').slice(-200)})`);
+    ok(await tippe(client, `[data-purchase-return-price="${PL_K}"]`, '1000') === 'OK', 'K Tastatur: Rücknahmepreis 1000');
+    ok(await tippe(client, `[data-purchase-return-added="${PL_K}"]`, '50') === 'OK', 'K Tastatur: Zusatzkosten erstattet 50');
+    const fuss = await text(client, '[data-purchase-return-added-total]');
+    ok(/total refund 1,?050.000/.test(fuss) && /50.000 BHD$/.test(fuss), `K Dialog zeigt „+ Added costs refunded 50“ und Gesamterstattung 1050 (${fuss})`);
+    await foto(client, 'b23-k-pc2-return-dialog');
+    ok(await mausKlick(client, '[data-purchase-return-confirm]') === 'OK', 'K Maus auf „Confirm Return"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K]) === 1);
+    const ret = dbQ(BIZ_DB, "SELECT id, refund_amount, added_cost_refund, refund_method FROM purchase_returns WHERE purchase_id = ? AND status = 'COMPLETED'", [PUR_K])[0] || {};
+    ok(Number(ret.refund_amount) === 1000 && Number(ret.added_cost_refund) === 50 && ret.refund_method === 'bank',
+      `K Rückgabe: Rücknahme 1000 und Zusatzkosten 50 getrennt erfasst (${S(ret)})`);
+    ok(r3(soll('BANK') - bank0) === 1050 && r3(soll('INVENTORY_LOSS') - los0) === 50 && r3(inv0 - soll('INVENTORY')) === 1100,
+      `K Hauptbuch: Bank +1050, Verlust 50 (INVENTORY_LOSS), Lager −1100 (${r3(soll('BANK') - bank0)}/${r3(soll('INVENTORY_LOSS') - los0)}/${r3(inv0 - soll('INVENTORY'))})`);
+    ok(r3(lager0 - lose()) === 1100, `K kein Lagerrest: auch die Lose sinken um 1100 (${r3(lager0 - lose())})`);
+    const pm = dbQ(BIZ_DB, "SELECT amount FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'SUPPLIER_RETURN' AND cancelled_at IS NULL", [PL_K]);
+    ok(pm.length === 1 && Number(pm[0].amount) === -25, `K Partner Q trägt die Hälfte des Verlusts (−25) — Anspruch 550 − 25 = 525 (${S(pm)})`);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'purchases.return_to_supplier');
+    ok(cmds.length === vor + 2 && Number(cmds.at(-1)?.payload?.lines?.[0]?.addedCostRefund) === 50,
+      `K PC2 schickt den Auftrag purchases.return_to_supplier, zuletzt mit addedCostRefund 50 (${cmds.length - vor} Versuche)`);
+    await waitFor(client, '[data-purchase-return-added-shown]', 30000).catch(() => null);
+    const gezeigt = await text(client, '[data-purchase-return-added-shown]');
+    ok(/added costs/.test(gezeigt) && /50.000/.test(gezeigt), `K Einkauf zeigt an der Rückgabe „+ added costs 50“ (${gezeigt})`);
+    await foto(client, 'b23-k-pc2-after-return');
   }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));

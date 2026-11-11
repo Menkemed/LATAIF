@@ -259,7 +259,7 @@ export interface PurchaseReturnDraftInput {
   returnDate?: string;
   refundMethod?: RefundMethod;
   notes?: string;
-  lines: Array<{ purchaseLineId: string; productId?: string; quantity: number; unitPrice: number }>;
+  lines: Array<{ purchaseLineId: string; productId?: string; quantity: number; unitPrice: number; addedCostRefund?: number }>;
 }
 
 export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput, ctx: HouseCtx): { returnId: string; returnNumber: string } {
@@ -282,21 +282,23 @@ export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput
       quantity: l.quantity,
       unitPrice: l.unitPrice,
       lineTotalF: F(l.quantity * l.unitPrice),
+      addedF: F(l.addedCostRefund ?? 0),
     };
   });
   const totalF = lines.reduce((s, l) => s + l.lineTotalF, 0);
+  const addedTotalF = lines.reduce((s, l) => s + l.addedF, 0);
   db.run(
     `INSERT INTO purchase_returns (id, branch_id, return_number, purchase_id, supplier_id, status, total_amount,
-      return_date, refund_method, refund_amount, notes, created_at, created_by)
-     VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, 0, ?, ?, ?)`,
+      return_date, refund_method, refund_amount, notes, created_at, created_by, added_cost_refund)
+     VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, 0, ?, ?, ?, ?)`,
     [id, ctx.branchId, returnNumber, input.purchaseId, String(p.supplier_id ?? ''), B(totalF), returnDate,
-     input.refundMethod || null, input.notes || null, ctx.now, ctx.userId || null]
+     input.refundMethod || null, input.notes || null, ctx.now, ctx.userId || null, B(addedTotalF)]
   );
   for (const l of lines) {
     db.run(
-      `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [l.id, id, l.purchaseLineId, l.productId, l.quantity, l.unitPrice, B(l.lineTotalF)]
+      `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total, added_cost_refund)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [l.id, id, l.purchaseLineId, l.productId, l.quantity, l.unitPrice, B(l.lineTotalF), B(l.addedF)]
     );
   }
   trackInsert('purchase_returns', id, { returnNumber, purchaseId: input.purchaseId, total: B(totalF) });
@@ -319,8 +321,13 @@ export interface PurchaseReturnConfirmed {
  * Retoure, Erstattung oder Lieferanten-Guthaben, Buchung, Overpay-Nachzug — auch der Weg des
  * Store-Altaufrufs `confirmReturn`. Strikt: die Buchung wirft, statt verschluckt zu werden.
  */
-/** v0.8.101 — Rückgabe eines Stücks mit nachträglich aktivierten Kosten (bis eine Verlustbuchung festgelegt ist). */
+/** v0.8.101 — Rückgabe mit Zusatzkosten: nicht unterstützte Fälle (kein Los mit Buchwert, zu hohe Erstattung, Gewinn, Preis über Einkauf). */
 export const PURCHASE_RETURN_HAS_ADDED_COSTS = 'PURCHASE_RETURN_HAS_ADDED_COSTS';
+export const PURCHASE_RETURN_ADDED_REFUND_TOO_HIGH = 'PURCHASE_RETURN_ADDED_REFUND_TOO_HIGH';
+export const PURCHASE_RETURN_GAIN_UNSUPPORTED = 'PURCHASE_RETURN_GAIN_UNSUPPORTED';
+export const PURCHASE_RETURN_PRICE_ABOVE_PURCHASE = 'PURCHASE_RETURN_PRICE_ABOVE_PURCHASE';
+/** Rundungsrest einer Rückgabe in Fils (0,005 BHD): darunter weder Verlust noch Gewinn. */
+const RUNDUNG_F = 5;
 
 export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): PurchaseReturnConfirmed {
   assertBooks();
@@ -334,25 +341,56 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   const returnNumber = String(ret.return_number ?? '');
   const method = (ret.refund_method as string | null) || null;
   const lines = query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [returnId]);
-  // v0.8.101 Abschlussprüfung 3 — die Rückgabebuchung nimmt nur den Rückgabewert NETTO aus dem Lager (Haben INVENTORY), der
-  // Lagerabgang aber das Stück zu seinem Einstand. Trägt das Stück nachträglich aktivierte Kosten (eigene Reparatur, Werkstattgold),
-  // blieben sie still als Lagerwert stehen. Bis eine Buchung für diesen Verlust festgelegt ist: keine Rückgabe, nichts geschrieben.
+  // v0.8.101 (Owner 11.11.2026) — Rückgabe auch mit aktivierten Zusatzkosten (Reparatur, Polieren, Werkstattgold …). Je Zeile:
+  //   Buchwert der zurückgegebenen Stücke  = Menge × Einstand des Loses (was INVENTORY für sie trägt)
+  //   Rücknahmepreis netto                 = Zeilenwert − anteilige Vorsteuer (dieselbe Rechnung wie die Rückgabebuchung)
+  //   Erstattung der Zusatzkosten          = getrennt erfasst, höchstens die aktivierten Zusatzkosten der Stücke
+  //   Verlust                              = Buchwert − Rücknahmepreis netto − Erstattung der Zusatzkosten (≥ 0)
+  // Gebucht (unten, unter der Rückgabe): Soll Erstattungskonto / Haben INVENTORY (Zusatzkosten), Soll INVENTORY_LOSS / Haben
+  // INVENTORY (Verlust) — danach steht kein Lagerwert der Stücke mehr. Ein GEWINN (Erstattung über dem Buchwert) hat kein
+  // festgelegtes Konto: abgewiesen, nichts geschrieben.
+  const bewertung = new Map<string, { carryingF: number; netF: number; addedF: number; addedCostsF: number; lossF: number }>();
+  let addedRefundF = 0;
+  let lossF = 0;
   for (const line of lines) {
     const plId = (line.purchase_line_id as string | null) || null;
     if (!plId) continue;
     const lot = query(`SELECT unit_cost FROM stock_lots WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
                         ORDER BY acquired_at ASC, id ASC LIMIT 1`, [plId])[0];
-    const pl = query('SELECT quantity, line_total, vat_amount FROM purchase_lines WHERE id = ?', [plId])[0];
-    if (!lot || !pl) continue;
-    const qty = Math.max(1, Number(pl.quantity) || 1);
-    const split = getPurchaseLineInputSplit(plId);
-    const netF = split.net > 0 ? Math.round(split.net * 1000) : Math.round((Number(pl.line_total) - Number(pl.vat_amount || 0)) * 1000);
-    const addedPerPiece = (Number(lot.unit_cost) || 0) - netF / 1000 / qty;
-    if (addedPerPiece > 0.0005) {
-      const q = Math.max(0, Number(line.quantity) || 0);
-      throw nein(PURCHASE_RETURN_HAS_ADDED_COSTS,
-        `this item carries ${(addedPerPiece * q).toFixed(3)} BHD of costs added after the purchase (repair, workshop gold) — a supplier return would leave them as stock value; nothing was returned`);
+    const pl = query('SELECT quantity, unit_price, line_total, vat_amount FROM purchase_lines WHERE id = ?', [plId])[0];
+    const q = Math.max(0, Number(line.quantity) || 0);
+    const lineAddedF = F(line.added_cost_refund ?? 0);
+    if (!lot || !pl || q <= 0) {
+      if (lineAddedF > 0) throw nein(PURCHASE_RETURN_HAS_ADDED_COSTS, 'this line has no stock lot with a known book value — an added-cost refund cannot be booked; nothing was returned');
+      continue;
     }
+    const plQty = Math.max(1, Number(pl.quantity) || 1);
+    const split = getPurchaseLineInputSplit(plId);
+    const origNetF = split.net > 0 ? Math.round(split.net * 1000) : Math.round((Number(pl.line_total) - Number(pl.vat_amount || 0)) * 1000);
+    const carryingF = Math.round(q * (Number(lot.unit_cost) || 0) * 1000);
+    const addedCostsF = Math.max(0, carryingF - Math.round(origNetF * q / plQty));
+    const grossF = F(q * (Number(line.unit_price) || 0));
+    const origGross = split.net + split.vat;
+    const vatF = split.vat > 0 && origGross > 0 ? F(Math.round(split.vat * Math.min(1, B(grossF) / origGross) * 1000) / 1000) : 0;
+    const netF = grossF - vatF;
+    if (lineAddedF > addedCostsF) {
+      throw nein(PURCHASE_RETURN_ADDED_REFUND_TOO_HIGH,
+        `the supplier refunds ${B(lineAddedF).toFixed(3)} for added costs, but the returned pieces carry only ${B(addedCostsF).toFixed(3)} of added costs — nothing was returned`);
+    }
+    const residualF = carryingF - netF - lineAddedF;
+    if (residualF < -RUNDUNG_F) {
+      throw nein(PURCHASE_RETURN_GAIN_UNSUPPORTED,
+        `the supplier refunds ${B(-residualF).toFixed(3)} more than the book value of the returned pieces (${B(carryingF).toFixed(3)}) — a gain on a supplier return has no agreed account yet; nothing was returned`);
+    }
+    // Ein Rest bis RUNDUNG_F stammt aus der Rundung (Vorsteuer-Anteil auf 3 Stellen, Einstand ungerundet) — kein Verlust,
+    // keine 0,001-Buchung (so stand es auch vor v0.8.101).
+    const lineLossF = residualF > RUNDUNG_F ? residualF : 0;
+    bewertung.set(String(line.id), { carryingF, netF, addedF: lineAddedF, addedCostsF, lossF: lineLossF });
+    addedRefundF += lineAddedF;
+    lossF += lineLossF;
+  }
+  if (addedRefundF > 0 && (!method || !['cash', 'bank', 'benefit', 'credit'].includes(method))) {
+    throw nein('PURCHASE_RETURN_METHOD_INVALID', 'the supplier refunds added costs — choose how the money comes back (cash, bank, benefit or credit); nothing was changed');
   }
   const totalRetF = F(ret.total_amount);
   const plan = planReturn(p, totalRetF);
@@ -366,6 +404,7 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
     purchaseLineId: (l.purchase_line_id as string | null) || null,
     quantity: Number(l.quantity) || 0,
     unitPrice: Number(l.unit_price) || 0,
+    addedCostRefund: Number(l.added_cost_refund) || 0,
   })), ctx));
 
   const db = getDatabase();
@@ -412,28 +451,30 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   // CONFIRMED, wenn als Lieferanten-Guthaben (wird spaeter verrechnet).
   const finalStatus: 'CONFIRMED' | 'COMPLETED' =
     (plan.refundF === 0 || (method && method !== 'credit')) ? 'COMPLETED' : 'CONFIRMED';
-  db.run(`UPDATE purchase_returns SET status = ?, refund_amount = ? WHERE id = ?`, [finalStatus, B(plan.refundF), returnId]);
+  db.run(`UPDATE purchase_returns SET status = ?, refund_amount = ?, added_cost_refund = ? WHERE id = ?`, [finalStatus, B(plan.refundF), B(addedRefundF), returnId]);
   if (plan.refundF > 0 && method && method !== 'credit') trackRefund('purchase_returns', returnId, B(plan.refundF), method);
 
   // Plan §8 #3 — Erstattung als Guthaben beim Lieferanten (gegen kuenftige Kaeufe verrechenbar).
   let supplierCreditId: string | null = null;
-  if (plan.refundF > 0 && method === 'credit' && supplierId) {
+  if ((plan.refundF > 0 || addedRefundF > 0) && method === 'credit' && supplierId) {
     supplierCreditId = uuid();
     db.run(
       `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
          amount, used_amount, status, note, created_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
-      [supplierCreditId, ctx.branchId, supplierId, returnId, purchaseId, B(plan.refundF),
+      [supplierCreditId, ctx.branchId, supplierId, returnId, purchaseId, B(plan.refundF + addedRefundF),
        `Credit aus Return ${returnNumber || returnId.slice(0, 8)}`, now, ctx.userId || null]
     );
-    trackInsert('supplier_credits', supplierCreditId, { supplierId, amount: B(plan.refundF) });
+    trackInsert('supplier_credits', supplierCreditId, { supplierId, amount: B(plan.refundF + addedRefundF) });
   }
 
   // Protokoll ATOMAR in derselben Transaktion (vorher `trackStatusChange` — ein verschluckter Fehler).
   logAuditOrThrow({
     module: 'Purchase', entityType: 'purchase_returns', entityId: returnId, action: 'STATUS_CHANGE', field: 'status',
     oldValue: 'DRAFT',
-    newValue: { status: finalStatus, purchaseId, returnNumber, totalAmount: B(totalRetF), refundAmount: B(plan.refundF), refundMethod: method },
+    newValue: { status: finalStatus, purchaseId, returnNumber, totalAmount: B(totalRetF), refundAmount: B(plan.refundF), refundMethod: method,
+      addedCostRefund: B(addedRefundF), returnLoss: B(lossF),
+      bookValue: [...bewertung.entries()].map(([lineId, v]) => ({ lineId, bookValue: B(v.carryingF), returnNet: B(v.netF), addedCosts: B(v.addedCostsF), addedRefund: B(v.addedF), loss: B(v.lossF) })) },
     actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },
   });
   trackChange('purchase_returns', returnId, 'update', {});
@@ -472,6 +513,16 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
     if (refund > 0.0005) {
       entries.push({ account: refundAccountFor(method), direction: 'DEBIT', amount: refund, counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: { ...meta, refundMethod: method, side: 'refund-in' } });
     }
+    // v0.8.101 — getrennt erstattete Zusatzkosten: Geld/Guthaben vom Lieferanten gegen den aktivierten Teil des Lagerwerts.
+    if (addedRefundF > 0) {
+      entries.push({ account: refundAccountFor(method), direction: 'DEBIT', amount: B(addedRefundF), counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: { ...meta, refundMethod: method, side: 'added-cost-refund' } });
+      entries.push({ account: 'INVENTORY', direction: 'CREDIT', amount: B(addedRefundF), counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: { ...meta, side: 'added-cost-refund' } });
+    }
+    // v0.8.101 — was vom Buchwert nicht erstattet wird, ist ein Bestandsverlust (wie jede Abschreibung: INVENTORY_LOSS) — nie Lagerrest.
+    if (lossF > 0) {
+      entries.push({ account: 'INVENTORY_LOSS', direction: 'DEBIT', amount: B(lossF), counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: { ...meta, side: 'return-loss' } });
+      entries.push({ account: 'INVENTORY', direction: 'CREDIT', amount: B(lossF), counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata: { ...meta, side: 'return-loss' } });
+    }
     if (entries.length > 0) {
       postEntries(entries, { occurredAt: now, sourceModule: 'PURCHASE_RETURN', sourceId: returnId });
     }
@@ -491,7 +542,7 @@ export interface PurchaseReturnRequest {
   purchaseId: string;
   refundMethod: RefundMethod;
   notes?: string;
-  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number }>;
+  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number; addedCostRefund?: number }>;
 }
 
 export interface PurchaseReturned {
@@ -539,6 +590,7 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   }
   const seen = new Set<string>();
   let totalF = 0;
+  let preisZuHoch: Error | null = null;
   for (const l of req.lines) {
     if (seen.has(l.purchaseLineId)) throw nein('PURCHASE_RETURN_LINE_DUPLICATE', 'the same purchase line twice is not a return');
     seen.add(l.purchaseLineId);
@@ -553,6 +605,16 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
     }
     if (typeof l.unitPrice !== 'number' || !Number.isFinite(l.unitPrice) || l.unitPrice < 0) {
       throw nein('PURCHASE_RETURN_PRICE_INVALID', 'the unit price of a returned item must be a number of at least 0');
+    }
+    // v0.8.101 — der Rücknahmepreis mindert den Einkauf und ist höchstens der Einkaufspreis; was der Lieferant für Zusatzkosten
+    // (Reparatur …) darüber hinaus erstattet, steht getrennt („added costs refunded") — nie im Rücknahmepreis versteckt.
+    const plPrice = Number(query('SELECT unit_price FROM purchase_lines WHERE id = ?', [l.purchaseLineId])[0]?.unit_price ?? 0) || 0;
+    if (F(l.unitPrice) > F(plPrice) && !preisZuHoch) {
+      preisZuHoch = nein(PURCHASE_RETURN_PRICE_ABOVE_PURCHASE,
+        `the return price per piece (${l.unitPrice.toFixed(3)}) is above the purchase price (${plPrice.toFixed(3)}) — enter what the supplier pays for added costs (repair …) under "added costs refunded"`);
+    }
+    if (l.addedCostRefund !== undefined && (typeof l.addedCostRefund !== 'number' || !Number.isFinite(l.addedCostRefund) || l.addedCostRefund < 0)) {
+      throw nein('PURCHASE_RETURN_PRICE_INVALID', 'the refund of added costs must be a number of at least 0');
     }
     // Hat diese Zeile ein Los (Einkäufe seit Phase 2), muss die Menge darin noch liegen. Zeilen ohne
     // Los-Historie (Altbestand vor den Losen) behalten den bisherigen Weg.
@@ -575,8 +637,10 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   if (totalF <= 0) throw nein('PURCHASE_RETURN_TOTAL_INVALID', 'The return total must be more than 0.');
   if (totalF > F(p.total_amount)) {
     throw nein('PURCHASE_RETURN_EXCEEDS_PURCHASE',
-      `the return (${B(totalF).toFixed(3)}) is more than this purchase is worth (${B(F(p.total_amount)).toFixed(3)})`);
+      `the return (${B(totalF).toFixed(3)}) is more than this purchase is worth (${B(F(p.total_amount)).toFixed(3)})`
+      + (preisZuHoch ? ' — what the supplier pays for added costs (repair …) goes under "added costs refunded"' : ''));
   }
+  if (preisZuHoch) throw preisZuHoch;
   // Overpay-Vorabprüfung VOR dem ersten Schreiben — mit derselben Rechnung, die die Wirkung benutzt.
   const plan = planReturn(p, totalF);
   liveOrRedeemed(() => assertSupplierOverpayMutable(req.purchaseId, B(plan.newPaidF), B(plan.newTotalF)));
@@ -584,7 +648,7 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   const notes = typeof req.notes === 'string' && req.notes.trim() ? req.notes.trim() : undefined;
   const draft = createPurchaseReturnDraftInHouse({
     purchaseId: req.purchaseId, refundMethod: req.refundMethod, notes,
-    lines: req.lines.map((l) => ({ purchaseLineId: l.purchaseLineId, quantity: l.quantity, unitPrice: l.unitPrice })),
+    lines: req.lines.map((l) => ({ purchaseLineId: l.purchaseLineId, quantity: l.quantity, unitPrice: l.unitPrice, addedCostRefund: l.addedCostRefund })),
   }, ctx);
   const done = confirmPurchaseReturnInHouse(draft.returnId, ctx);
   return {

@@ -228,6 +228,7 @@ function rowToReturn(row: Record<string, unknown>): PurchaseReturn {
     returnDate: row.return_date as string,
     refundMethod: row.refund_method as 'cash' | 'bank' | 'benefit' | 'credit' | undefined,
     refundAmount: (row.refund_amount as number) || 0,
+    addedCostRefund: Number(row.added_cost_refund) || 0,
     notes: row.notes as string | undefined,
     lines: [],
     createdAt: row.created_at as string,

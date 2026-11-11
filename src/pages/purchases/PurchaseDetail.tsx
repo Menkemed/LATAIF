@@ -73,7 +73,7 @@ export function PurchaseDetail() {
 
   // Return state
   const [showReturn, setShowReturn] = useState(false);
-  const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
+  const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number; addedCostRefund?: number }>>({});
   const [returnMethod, setReturnMethod] = useState<'cash' | 'bank' | 'benefit' | 'credit'>('bank');
   const [returnNotes, setReturnNotes] = useState('');
   const [retFehler, setRetFehler] = useState('');
@@ -167,6 +167,11 @@ export function PurchaseDetail() {
       return s;
     }, 0);
   }, [returnLines, purchase]);
+  // v0.8.101 — getrennt erstattete Zusatzkosten: kommen zur Erstattung dazu, mindern den Einkauf aber nicht.
+  const returnAddedTotal = useMemo(() => (purchase?.lines || []).reduce((s, l) => {
+    const r = returnLines[l.id];
+    return r?.include ? s + (r.addedCostRefund ?? 0) : s;
+  }, 0), [returnLines, purchase]);
 
   // CENTRAL-UI-PARITY R4A — diese Weiche stand frueher VOR dem Haken darueber. Am Primary fiel
   // das kaum auf, weil der Einkauf beim ersten Zeichnen meist schon geladen war; auf einem
@@ -192,6 +197,7 @@ export function PurchaseDetail() {
         purchaseLineId: l.id,
         quantity: returnLines[l.id].quantity,
         unitPrice: returnLines[l.id].unitPrice,
+        ...((returnLines[l.id].addedCostRefund ?? 0) > 0 ? { addedCostRefund: returnLines[l.id].addedCostRefund } : {}),
       }));
     if (lines.length === 0) return;
     setRetFehler('');
@@ -553,6 +559,9 @@ export function PurchaseDetail() {
                     {r.refundAmount > 0 && (
                       <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }}>refund <Bhd v={r.refundAmount}/> {r.refundMethod}</span>
                     )}
+                    {(r.addedCostRefund ?? 0) > 0 && (
+                      <span className="font-mono" style={{ fontSize: 12, color: '#16A34A' }} data-purchase-return-added-shown={r.id}>+ added costs <Bhd v={r.addedCostRefund ?? 0}/></span>
+                    )}
                   </div>
                 </div>
               ))}
@@ -642,15 +651,15 @@ export function PurchaseDetail() {
             Plan §Purchase Returns: select items to return. Payable is reduced first; any surplus becomes a refund.
           </p>
           <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
-              {['', 'PRODUCT', 'QTY', 'UNIT PRICE', 'LINE TOTAL'].map(h => (
+            <div style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr 1fr', gap: 10, padding: '10px 12px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE' }}>
+              {['', 'PRODUCT', 'QTY', 'UNIT PRICE', 'ADDED COSTS REFUNDED', 'LINE TOTAL'].map(h => (
                 <span key={h} className="text-overline" style={{ fontSize: 10 }}>{h}</span>
               ))}
             </div>
             {purchase.lines.map(l => {
               const r = returnLines[l.id] || { include: false, quantity: l.quantity, unitPrice: l.unitPrice };
               return (
-                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
+                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
                   <input type="checkbox" checked={r.include} disabled={w.busy} data-purchase-return-line={l.id}
                     onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
                   <span style={{ fontSize: 12, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
@@ -660,13 +669,21 @@ export function PurchaseDetail() {
                   <input type="number" step="0.01" value={r.unitPrice} disabled={w.busy} data-purchase-return-price={l.id}
                     onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.quantity * r.unitPrice}/></span>
+                  {/* v0.8.101 — was der Lieferant für aktivierte Zusatzkosten (Reparatur, Polieren, Werkstattgold) zusätzlich erstattet; der Rest des Buchwerts wird als Verlust gebucht. */}
+                  <input type="number" step="0.001" min={0} value={r.addedCostRefund ?? 0} disabled={w.busy} data-purchase-return-added={l.id}
+                    onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, addedCostRefund: Math.max(0, parseFloat(e.target.value) || 0) } })}
+                    className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.quantity * r.unitPrice + (r.addedCostRefund ?? 0)}/></span>
                 </div>
               );
             })}
           </div>
 
           <div>
+            <p style={{ fontSize: 11, color: '#6B7280', marginBottom: 8 }} data-purchase-return-added-hint>
+              The unit price is what the supplier credits for the item (at most the purchase price). If the item carries added costs (repair, polishing, workshop gold),
+              enter what the supplier refunds for them under “Added costs refunded” — the part of the book value that is not refunded is booked as a loss, nothing stays as stock value.
+            </p>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD (if paid)</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
               {(['cash', 'bank', 'benefit', 'credit'] as const).map(m => {
@@ -690,6 +707,12 @@ export function PurchaseDetail() {
             <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
             <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}><Bhd v={returnTotal}/> BHD</span>
           </div>
+          {returnAddedTotal > 0 && (
+            <div className="flex justify-between" style={{ marginTop: -8 }} data-purchase-return-added-total>
+              <span style={{ fontSize: 12, color: '#6B7280' }}>+ Added costs refunded (not part of the purchase) · total refund <Bhd v={returnTotal + returnAddedTotal}/></span>
+              <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={returnAddedTotal}/> BHD</span>
+            </div>
+          )}
 
           <WriteError text={retFehler} />
           <div className="flex justify-end gap-3">

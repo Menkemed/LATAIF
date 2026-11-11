@@ -592,8 +592,9 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   // Lieferanten-Guthaben (refund_method='credit', die offene Rückforderung) ist KEIN Geldeingang (wie L-01 bei den
   // Kundenretouren); das Geld erscheint erst mit dem tatsächlichen Eingang (supplier_credit_refunds, unten).
   const purchRet = safeQuery('purchase_returns',
-    `SELECT id, refund_amount, refund_method, return_date, return_number, purchase_id, created_at
-     FROM purchase_returns WHERE branch_id = ? AND refund_amount > 0 AND status != 'CANCELLED'
+    // v0.8.101 — dazu die getrennt erstatteten Zusatzkosten (Reparatur …): auch sie kommen als Geld vom Lieferanten zurück.
+    `SELECT id, refund_amount + COALESCE(added_cost_refund, 0) AS refund_amount, refund_method, return_date, return_number, purchase_id, created_at
+     FROM purchase_returns WHERE branch_id = ? AND refund_amount + COALESCE(added_cost_refund, 0) > 0 AND status != 'CANCELLED'
        AND COALESCE(refund_method, '') != 'credit'`,
     [branchId]
   );

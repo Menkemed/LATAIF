@@ -2663,6 +2663,10 @@ function runMigrations(database: Database): void {
       reversed_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_customer_credit_offsets_credit ON customer_credit_offsets(customer_credit_id)`,
+    // v0.8.101 — Lieferantenrückgabe mit Zusatzkosten: was der Lieferant ÜBER den Rücknahmepreis hinaus für aktivierte
+    // Zusatzkosten (Reparatur, Polieren, Werkstattgold) erstattet — getrennt vom Rücknahmepreis (der den Einkauf mindert).
+    `ALTER TABLE purchase_returns ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE purchase_return_lines ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
     // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order: die Goldkosten der Order-Zeile, gebucht Soll
     // INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist (Tag der Buchung daneben). NULL = noch nicht bewertet
     // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.

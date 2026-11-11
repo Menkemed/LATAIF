@@ -1087,7 +1087,7 @@ export function settleSaleLineInHouse(invoiceLineId: string, ctx: PartnerItemCtx
  */
 export function settleSupplierReturnForPartners(
   returnId: string, returnNumber: string,
-  lines: ReadonlyArray<{ purchaseLineId: string | null; quantity: number; unitPrice: number }>,
+  lines: ReadonlyArray<{ purchaseLineId: string | null; quantity: number; unitPrice: number; addedCostRefund?: number }>,
   ctx: PartnerItemCtx,
 ): number {
   let n = 0;
@@ -1115,7 +1115,8 @@ export function settleSupplierReturnForPartners(
     const split = getPurchaseLineInputSplit(l.purchaseLineId);
     const origGross = split.net + split.vat;
     const vatBackF = split.vat > 0 && origGross > 0 ? F(Math.round(split.vat * Math.min(1, B(grossF) / origGross) * 1000) / 1000) : 0;
-    const valueF = grossF - vatBackF;
+    // v0.8.101 — getrennt erstattete Zusatzkosten zählen zum Erstattungswert (der Verlust ist Buchwert − beides).
+    const valueF = grossF - vatBackF + F(l.addedCostRefund ?? 0);
     const costF = stockValueF(l.purchaseLineId, q);
     const profitF = valueF - costF;
     const groupId = uuid();

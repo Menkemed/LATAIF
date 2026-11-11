@@ -670,9 +670,10 @@ export function financeFor(ctx: BusinessReadContext) {
     let purchaseRefundCash = 0, purchaseRefundBank = 0;
     try {
       const prRows = qry(
-        `SELECT refund_method, COALESCE(SUM(refund_amount),0) as total
+        // v0.8.101 — inkl. getrennt erstatteter Zusatzkosten (Geld vom Lieferanten).
+        `SELECT refund_method, COALESCE(SUM(refund_amount + COALESCE(added_cost_refund, 0)),0) as total
          FROM purchase_returns WHERE branch_id = ? AND status = 'CONFIRMED'
-         AND refund_method IS NOT NULL AND refund_method != 'credit' AND refund_amount > 0
+         AND refund_method IS NOT NULL AND refund_method != 'credit' AND refund_amount + COALESCE(added_cost_refund, 0) > 0
          GROUP BY refund_method`,
         [branchId]
       );

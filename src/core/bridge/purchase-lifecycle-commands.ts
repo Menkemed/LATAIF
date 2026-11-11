@@ -118,7 +118,7 @@ export interface PurchaseReturnCommand {
   expectedRevision: number;
   refundMethod: RefundMethod;
   notes?: string;
-  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number }>;
+  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number; addedCostRefund?: number }>;
 }
 
 export function parsePurchaseReturn(raw: unknown): PurchaseReturnCommand {
@@ -132,8 +132,10 @@ export function parsePurchaseReturn(raw: unknown): PurchaseReturnCommand {
     throw new PurchaseLifecyclePayloadError('Select at least one item to return.', 'PURCHASE_RETURN_NO_LINES');
   }
   const lines = r.lines.map((raw) => {
-    const l = strict(raw, ['purchaseLineId', 'quantity', 'unitPrice'], PURCHASE_LIFECYCLE_COMPUTED.returnToSupplier, 'a return line');
-    return { purchaseLineId: idOf(l.purchaseLineId, 'purchaseLineId'), quantity: numberOf(l.quantity, 'quantity'), unitPrice: numberOf(l.unitPrice, 'unitPrice') };
+    const l = strict(raw, ['purchaseLineId', 'quantity', 'unitPrice', 'addedCostRefund'], PURCHASE_LIFECYCLE_COMPUTED.returnToSupplier, 'a return line');
+    // v0.8.101 — optional: was der Lieferant für aktivierte Zusatzkosten getrennt erstattet.
+    return { purchaseLineId: idOf(l.purchaseLineId, 'purchaseLineId'), quantity: numberOf(l.quantity, 'quantity'), unitPrice: numberOf(l.unitPrice, 'unitPrice'),
+      ...(l.addedCostRefund !== undefined ? { addedCostRefund: numberOf(l.addedCostRefund, 'addedCostRefund') } : {}) };
   });
   const notes = typeof r.notes === 'string' && r.notes.trim() ? r.notes : undefined;
   return {

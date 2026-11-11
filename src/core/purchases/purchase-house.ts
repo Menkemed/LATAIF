@@ -227,7 +227,7 @@ function fassungVon(x: unknown): number | undefined {
 export interface PurchaseReturnForm {
   refundMethod: RefundMethod;
   notes?: string;
-  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number }>;
+  lines: Array<{ purchaseLineId: string; quantity: number; unitPrice: number; addedCostRefund?: number }>;
 }
 
 /** Der Rumpf für `purchases.return_to_supplier` — Artikel, Summen, Erstattung, Datum und Nummer rechnet der Primary. */
@@ -238,7 +238,8 @@ export function purchaseReturnBody(purchase: { id: string }, form: PurchaseRetur
     expectedRevision: fassungVon(purchase),
     refundMethod: form.refundMethod,
     ...(notes ? { notes } : {}),
-    lines: form.lines.map((l) => ({ purchaseLineId: l.purchaseLineId, quantity: l.quantity, unitPrice: l.unitPrice })),
+    lines: form.lines.map((l) => ({ purchaseLineId: l.purchaseLineId, quantity: l.quantity, unitPrice: l.unitPrice,
+      ...(l.addedCostRefund && l.addedCostRefund > 0 ? { addedCostRefund: l.addedCostRefund } : {}) })),
   };
 }
 

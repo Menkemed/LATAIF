@@ -1477,6 +1477,8 @@ export interface PurchaseReturn {
   returnDate: string;
   refundMethod?: 'cash' | 'bank' | 'benefit' | 'credit';
   refundAmount: number;
+  /** v0.8.101 — getrennt erstattete Zusatzkosten (Reparatur …), nicht Teil von refundAmount/totalAmount. */
+  addedCostRefund?: number;
   notes?: string;
   lines: PurchaseReturnLine[];
   createdAt: string;

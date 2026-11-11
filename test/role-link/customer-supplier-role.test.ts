@@ -354,7 +354,11 @@ const gegenparteien = (db: Db): string => all(db,
     // und prüft die Verknüpfung in der Buchung (kein Abgleich über Name/Telefon). Sonst liest weiter kein Code die Verknüpfung.
     'core/offsets/party-settlement-reads.ts', 'core/offsets/purchase-offsets.ts',
     // B2/B3 — der Einkauf öffnet „Settle Balance" nur für den AUSDRÜCKLICH verknüpften Kunden seines Lieferanten.
-    'pages/purchases/PurchaseDetail.tsx'];
+    'pages/purchases/PurchaseDetail.tsx',
+    // v0.8.101 S4/S5 (Owner E3) — Partnerguthaben gegen Rechnungen nur für den Partner, der AUSDRÜCKLICH mit dem Kunden
+    // verknüpft ist (`partners.linked_customer_id`); die Partnerforderung gegen offene Einkäufe prüft wie
+    // purchase-offsets.ts die ausdrückliche Lieferanten-Verknüpfung. Kein Abgleich über Name/Telefon.
+    'core/offsets/partner-offsets.ts', 'core/offsets/partner-receivable-offsets.ts'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');
