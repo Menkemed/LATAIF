@@ -319,6 +319,9 @@ export interface PurchaseReturnConfirmed {
  * Retoure, Erstattung oder Lieferanten-Guthaben, Buchung, Overpay-Nachzug — auch der Weg des
  * Store-Altaufrufs `confirmReturn`. Strikt: die Buchung wirft, statt verschluckt zu werden.
  */
+/** v0.8.101 — Rückgabe eines Stücks mit nachträglich aktivierten Kosten (bis eine Verlustbuchung festgelegt ist). */
+export const PURCHASE_RETURN_HAS_ADDED_COSTS = 'PURCHASE_RETURN_HAS_ADDED_COSTS';
+
 export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): PurchaseReturnConfirmed {
   assertBooks();
   const ret = query('SELECT * FROM purchase_returns WHERE id = ? AND branch_id = ?', [returnId, ctx.branchId])[0];
@@ -331,6 +334,26 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   const returnNumber = String(ret.return_number ?? '');
   const method = (ret.refund_method as string | null) || null;
   const lines = query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [returnId]);
+  // v0.8.101 Abschlussprüfung 3 — die Rückgabebuchung nimmt nur den Rückgabewert NETTO aus dem Lager (Haben INVENTORY), der
+  // Lagerabgang aber das Stück zu seinem Einstand. Trägt das Stück nachträglich aktivierte Kosten (eigene Reparatur, Werkstattgold),
+  // blieben sie still als Lagerwert stehen. Bis eine Buchung für diesen Verlust festgelegt ist: keine Rückgabe, nichts geschrieben.
+  for (const line of lines) {
+    const plId = (line.purchase_line_id as string | null) || null;
+    if (!plId) continue;
+    const lot = query(`SELECT unit_cost FROM stock_lots WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+                        ORDER BY acquired_at ASC, id ASC LIMIT 1`, [plId])[0];
+    const pl = query('SELECT quantity, line_total, vat_amount FROM purchase_lines WHERE id = ?', [plId])[0];
+    if (!lot || !pl) continue;
+    const qty = Math.max(1, Number(pl.quantity) || 1);
+    const split = getPurchaseLineInputSplit(plId);
+    const netF = split.net > 0 ? Math.round(split.net * 1000) : Math.round((Number(pl.line_total) - Number(pl.vat_amount || 0)) * 1000);
+    const addedPerPiece = (Number(lot.unit_cost) || 0) - netF / 1000 / qty;
+    if (addedPerPiece > 0.0005) {
+      const q = Math.max(0, Number(line.quantity) || 0);
+      throw nein(PURCHASE_RETURN_HAS_ADDED_COSTS,
+        `this item carries ${(addedPerPiece * q).toFixed(3)} BHD of costs added after the purchase (repair, workshop gold) — a supplier return would leave them as stock value; nothing was returned`);
+    }
+  }
   const totalRetF = F(ret.total_amount);
   const plan = planReturn(p, totalRetF);
   // Slice 4b — Pre-Check VOR dem Total-UPDATE: der Return aendert total/paid → den Ueberschuss.
