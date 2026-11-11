@@ -19,6 +19,7 @@ import { trackChange } from '@/core/sync/sync-service';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
+import { repairLotChoiceRequired } from '@/core/partners/item-participation-house';
 import { useRepairStore, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
@@ -51,6 +52,9 @@ export function houseRepairPort(branchId: string): RepairHousePort {
     },
     // Dieselbe Quelle wie die Losauswahl der Maske — keine zweite Vorstellung davon, was „aktiv" ist.
     lotBelongs: (lotId, productId) => getLotsWithPurchaseNumbers(productId, branchId).some((l) => l.id === lotId),
+    // v0.8.101 S3 — verkauft = Kundenware; gemischte Lose (eigen + gemeinsam) = Los ist Pflicht.
+    productSold: (id) => String(query('SELECT stock_status FROM products WHERE id = ? AND branch_id = ?', [id, branchId])[0]?.stock_status ?? '') === 'sold',
+    lotChoiceRequired: (productId) => repairLotChoiceRequired(productId),
     supplierExists: (id) => !!query('SELECT id FROM suppliers WHERE id = ? AND branch_id = ?', [id, branchId])[0],
     // Die Mitarbeiterauswahl der Maske zeigt nur, wer nicht ausgeschieden ist.
     employeeExists: (id) => !!query(

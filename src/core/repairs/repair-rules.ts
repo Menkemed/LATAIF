@@ -29,6 +29,8 @@ import { businessDateIssue, businessTimestamp, todayIso } from '@/core/utils/bus
 
 /** Höchstens so viele Fotos je Reparatur — dieselbe Zahl, die die Bildauswahl beider Masken zeigt. */
 export const REPAIR_MAX_PHOTOS = 6;
+/** v0.8.101 S3 — eigene Reparatur an einem Artikel mit gemeinsamem und weiterem Los: ohne Los keine stille FIFO-Zuordnung. */
+export const REPAIR_LOT_REQUIRED = 'REPAIR_LOT_REQUIRED';
 
 /** Ein fachliches Nein zu einer Reparatur — mit dem Code, den auch der Fernbefehl meldet. */
 export class RepairActionRejected extends Error {
@@ -240,6 +242,10 @@ export interface RepairHousePort {
   supplierExists: (id: string) => boolean;
   employeeExists: (id: string) => boolean;
   categoryExists: (id: string) => boolean;
+  /** v0.8.101 S3 — verkauft: gehört dem Kunden; eine eigene Reparatur setzte ihn sonst still auf „in_repair". */
+  productSold?: (id: string) => boolean;
+  /** v0.8.101 S3 — mehrere aktive Lose, davon mindestens eines gemeinsam mit einem Partner gekauft: das Los ist Pflicht. */
+  lotChoiceRequired?: (productId: string) => boolean;
 }
 
 /** Die Anlage samt der Arbeit, die `createRepair` als Zeile anlegt. */
@@ -269,6 +275,13 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     }
     if (input.lotId && !port.lotBelongs(input.lotId, p.id)) {
       throw new RepairActionRejected('LOT_NOT_FOUND', 'this stock lot is not an active lot of the product');
+    }
+    if (port.productSold?.(p.id)) {
+      throw new RepairActionRejected('PRODUCT_SOLD', 'this item is sold — it belongs to the client now; record it as a client repair');
+    }
+    if (!input.lotId && port.lotChoiceRequired?.(p.id)) {
+      throw new RepairActionRejected(REPAIR_LOT_REQUIRED,
+        'this item has several stock lots and one of them was bought together with a partner — choose the lot that is repaired, so the cost lands on the right pieces');
     }
     // Dieselbe Übernahme wie beim Auswählen in der Maske — aber vom Artikel, wie er JETZT ist.
     item = {

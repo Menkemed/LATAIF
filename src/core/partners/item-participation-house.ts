@@ -126,6 +126,22 @@ export function insertLineParticipations(
 
 // ── Wächter: was ein gemeinsam gekauftes Stück ohne Verkauf aus der Beteiligung nähme ──────────
 
+/**
+ * v0.8.101 S3 — Muss eine eigene Reparatur ihr Los nennen? Ja, wenn der Artikel mehrere aktive Lose hat und mindestens
+ * eines davon gemeinsam mit einem Partner gekauft wurde: sonst landete die Reparatur still (FIFO) auf dem falschen Los
+ * und damit beim falschen Eigentümer. Ein einziges Los oder nur eigene Lose: wie bisher.
+ */
+export function repairLotChoiceRequired(productId: string | null | undefined): boolean {
+  if (!productId) return false;
+  const r = query(
+    `SELECT COUNT(*) AS n,
+            COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM item_participations ip WHERE ip.purchase_line_id = l.purchase_line_id AND ip.party = 'PARTNER') THEN 1 ELSE 0 END), 0) AS j
+       FROM stock_lots l WHERE l.product_id = ? AND l.status = 'ACTIVE' AND l.qty_remaining > 0`,
+    [productId],
+  )[0];
+  return (Number(r?.n) || 0) >= 2 && (Number(r?.j) || 0) >= 1;
+}
+
 /** Ist diese Einkaufszeile (irgendwann) gemeinsam gekauft? */
 export function isJointPurchaseLine(purchaseLineId: string | null | undefined): boolean {
   if (!purchaseLineId) return false;

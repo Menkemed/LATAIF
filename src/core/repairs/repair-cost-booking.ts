@@ -30,7 +30,8 @@ import { hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from 
 import { createExpenseInHouse } from '@/core/payables/payables-house';
 import { canonicalRepairStatus, type Expense, type ExpenseCategory, type Repair } from '@/core/models/types';
 import { repairCostParts, repairHeaderFeeKept } from './repair-cost';
-import { RepairActionRejected } from './repair-rules';
+import { REPAIR_LOT_REQUIRED, RepairActionRejected } from './repair-rules';
+import { repairLotChoiceRequired } from '@/core/partners/item-participation-house';
 
 const EPS = 0.0005;
 const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
@@ -104,6 +105,11 @@ export function shiftOwnRepairCost(r: Pick<Repair, 'id' | 'productId' | 'lotId'>
   if (!r.productId || !Number.isFinite(delta) || Math.abs(delta) < EPS) return;
   const p = query('SELECT purchase_price, stock_status FROM products WHERE id = ?', [r.productId])[0];
   if (!p) throw new RepairActionRejected('PRODUCT_NOT_FOUND', 'the repaired item is no longer in stock records');
+  // v0.8.101 S3 — gemischte Lose (eigen + gemeinsam mit Partner): ohne gewähltes Los keine stille FIFO-Zuordnung.
+  if (!r.lotId && repairLotChoiceRequired(r.productId)) {
+    throw new RepairActionRejected(REPAIR_LOT_REQUIRED,
+      'this item has several stock lots and one of them was bought together with a partner — set the repaired lot on this repair first');
+  }
   const lot = costLot(r.productId, r.lotId);
   const hasLots = Number(query('SELECT COUNT(*) AS c FROM stock_lots WHERE product_id = ?', [r.productId])[0]?.c) > 0;
   if (String(p.stock_status) === 'sold' || (hasLots && !lot)) {
