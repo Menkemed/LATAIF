@@ -303,9 +303,71 @@ function seed() {
     }
     insert(db, 'invoices', { id: INV_P, branch_id, invoice_number: 'PINV-2026-000985', customer_id: K_P, status: 'PARTIAL', currency: 'BHD',
       net_amount: 250, vat_amount: 0, gross_amount: 250, paid_amount: 0, issued_at: '2026-10-22T09:00:00.000Z', created_at: now, updated_at: now });
+
+    // v0.8.101 Abschlussprüfung — Kunde „Quinn Partner" mit verknüpftem Partner Q und verknüpfter Lieferantenrolle.
+    //   Artikel I: gemeinsam 1000 (Q 40 %), Q hat 400 eingezahlt; EIGENE Reparatur in Arbeit, Werkstattzeile 100 (offen, gebucht).
+    //   Artikel J: gemeinsam 1000 (Q 50 %), an Q zu viel ausgezahlt 150 → GEBUCHTE Rückforderung 150 (Kostenanteil 500 nur berechnet).
+    //   Gegenposten: Store Credit 30, „We Borrowed" 80, offener Einkauf 50 — FIFO 30 + 80 + 40 = 150.
+    insert(db, 'customers', { id: K_Q, branch_id, first_name: 'Quinn', last_name: 'Partner', phone: '+973 3300 0403', created_at: now, updated_at: now });
+    insert(db, 'partners', { id: PARTNER_Q, branch_id, name: 'Quinn Partner', share_percentage: 0, active: 1, linked_customer_id: K_Q, created_at: now, updated_at: now });
+    insert(db, 'suppliers', { id: SUP_Q, branch_id, name: 'Quinn Partner', active: 1, linked_customer_id: K_Q, created_at: now, updated_at: now });
+    const le = (id, acc, dir, amount, cpt, cp, mod, sid, tx) => insert(db, 'ledger_entries', { id, branch_id, entry_no: ++nr, transaction_id: tx,
+      occurred_at: '2026-10-07T09:00:00.000Z', recorded_at: now, account: acc, direction: dir, amount, currency: 'BHD', counterparty_type: cpt,
+      counterparty_id: cp, source_module: mod, source_id: sid, created_by: 'e2e', created_at: now });
+    const gemeinsam = (sfx, pct) => {
+      const prod = 'b23-prod-' + sfx, pur = 'b23-pur-' + sfx, pl = 'b23-pl-' + sfx, lot = 'b23-lot-' + sfx;
+      insert(db, 'products', { id: prod, branch_id, category_id: cat, brand: 'Rolex', name: 'Joint ' + sfx, sku: 'B23-J-' + sfx, quantity: 1, condition: 'Pre-Owned',
+        scope_of_delivery: '[]', purchase_price: 1000, purchase_currency: 'BHD', stock_status: 'in_stock', tax_scheme: 'MARGIN', images: '[]', attributes: '{}',
+        source_type: 'OWN', created_at: now, updated_at: now });
+      insert(db, 'purchases', { id: pur, branch_id, purchase_number: 'PUR-2026-00098' + (sfx === 'i' ? '6' : '7'), supplier_id: SUP_FREMD, status: 'PAID',
+        total_amount: 1000, paid_amount: 1000, remaining_amount: 0, purchase_date: '2026-10-05', created_at: now, updated_at: now });
+      insert(db, 'purchase_lines', { id: pl, purchase_id: pur, product_id: prod, description: 'Joint ' + sfx, quantity: 1, unit_price: 1000, line_total: 1000,
+        position: 0, tax_scheme: 'ZERO', vat_rate: 0, vat_amount: 0 });
+      insert(db, 'stock_lots', { id: lot, branch_id, product_id: prod, purchase_id: pur, purchase_line_id: pl, qty_initial: 1, qty_remaining: 1,
+        unit_cost: 1000, status: 'ACTIVE', acquired_at: '2026-10-05T09:00:00.000Z', created_at: now });
+      for (const [party, partner_id, bp] of [['HOUSE', null, 10000 - pct * 100], ['PARTNER', PARTNER_Q, pct * 100]]) {
+        insert(db, 'item_participations', { id: `b23-ip-${sfx}-${party}`, branch_id, purchase_id: pur, purchase_line_id: pl, product_id: prod, party, partner_id,
+          share_bp: bp, cost_share: bp / 10, line_total: 1000, quantity: 1, created_at: now, epoch_id: pl, from_il_rowid: 0, unit_cost: 1000 });
+      }
+      return { prod, pur, pl, lot };
+    };
+    const I = gemeinsam('i', 40);
+    insert(db, 'item_partner_movements', { id: 'b23-ipm-i-c', branch_id, purchase_id: I.pur, purchase_line_id: I.pl, partner_id: PARTNER_Q, kind: 'CONTRIBUTION',
+      amount: 400, method: 'cash', occurred_at: '2026-10-06', created_at: now });
+    le('b23-le-ipm-i-d', 'CASH', 'DEBIT', 400, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-i-c', 'b23-tx-ipm-i');
+    le('b23-le-ipm-i-c', 'PARTNER_ITEM_BALANCE', 'CREDIT', 400, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-i-c', 'b23-tx-ipm-i');
+    insert(db, 'repairs', { id: REP_I, branch_id, repair_number: 'REP-2026-000981', customer_id: K_Q, product_id: I.prod, lot_id: I.lot, status: 'in_progress',
+      repair_scope: 'OWN', repair_type: 'external', workshop_supplier_id: SUP_FREMD, issue_description: 'Service', received_at: '2026-10-08T09:00:00.000Z',
+      created_at: now, updated_at: now });
+    insert(db, 'expenses', { id: EXP_I, branch_id, expense_number: 'EXP-2026-000981', category: 'Inventory', amount: 100, paid_amount: 0, payment_method: 'bank',
+      expense_date: '2026-10-08', description: 'Workshop', related_module: 'repair', related_entity_id: REP_I, supplier_id: SUP_FREMD, status: 'PENDING',
+      created_at: now, revision: 1 });
+    insert(db, 'repair_lines', { id: 'b23-rl-i', branch_id, repair_id: REP_I, position: 1, supplier_id: SUP_FREMD, work_type: 'service', cost_amount: 100,
+      expense_id: EXP_I, status: 'OPEN', created_at: now, updated_at: now });
+    le('b23-le-exp-i-d', 'INVENTORY', 'DEBIT', 100, 'SUPPLIER', SUP_FREMD, 'EXPENSE', EXP_I, 'b23-tx-exp-i');
+    le('b23-le-exp-i-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 100, 'SUPPLIER', SUP_FREMD, 'EXPENSE', EXP_I, 'b23-tx-exp-i');
+    const J = gemeinsam('j', 50);
+    insert(db, 'item_partner_movements', { id: 'b23-ipm-j-p', branch_id, purchase_id: J.pur, purchase_line_id: J.pl, partner_id: PARTNER_Q, kind: 'PAYOUT',
+      amount: 150, method: 'bank', occurred_at: '2026-10-06', created_at: now });
+    le('b23-le-ipm-j-d', 'PARTNER_ITEM_BALANCE', 'DEBIT', 150, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-j-p', 'b23-tx-ipm-j');
+    le('b23-le-ipm-j-c', 'BANK', 'CREDIT', 150, 'PARTNER', PARTNER_Q, 'PARTNER_ITEM', 'b23-ipm-j-p', 'b23-tx-ipm-j');
+    insert(db, 'customer_credits', { id: CC_Q, branch_id, customer_id: K_Q, amount: 30, used_amount: 0, status: 'OPEN', source_type: 'overpayment',
+      source_id: 'b23-pay-q', created_at: '2026-10-09T09:00:00.000Z' });
+    le('b23-le-cc-d', 'CASH', 'DEBIT', 30, 'CUSTOMER', K_Q, 'PAYMENT', 'b23-pay-q', 'b23-tx-cc');
+    le('b23-le-cc-c', 'CUSTOMER_CREDIT', 'CREDIT', 30, 'CUSTOMER', K_Q, 'PAYMENT', 'b23-pay-q', 'b23-tx-cc');
+    insert(db, 'debts', { id: DEBT_Q, branch_id, loan_number: 'LOAN-2026-000981', direction: 'we_borrow', customer_id: K_Q, counterparty: 'Quinn Partner',
+      amount: 80, status: 'ACTIVE', source: 'cash', created_at: '2026-10-09T09:00:00.000Z', updated_at: now, revision: 1 });
+    le('b23-le-debt-d', 'CASH', 'DEBIT', 80, 'CUSTOMER', K_Q, 'LOAN', DEBT_Q, 'b23-tx-debt');
+    le('b23-le-debt-c', 'LOAN_PAYABLE', 'CREDIT', 80, 'CUSTOMER', K_Q, 'LOAN', DEBT_Q, 'b23-tx-debt');
+    insert(db, 'purchases', { id: PUR_Q, branch_id, purchase_number: 'PUR-2026-000988', supplier_id: SUP_Q, status: 'UNPAID', total_amount: 50, paid_amount: 0,
+      remaining_amount: 50, purchase_date: '2026-10-09', created_at: now, updated_at: now });
+    le('b23-le-purq-d', 'INVENTORY', 'DEBIT', 50, 'SUPPLIER', SUP_Q, 'PURCHASE', PUR_Q, 'b23-tx-purq');
+    le('b23-le-purq-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 50, 'SUPPLIER', SUP_Q, 'PURCHASE', PUR_Q, 'b23-tx-purq');
   } finally { db.close(); }
 }
 const K_P = 'b23-kunde-p', PARTNER_P = 'b23-partner-p', PROD_P = 'b23-prod-p', PUR_P = 'b23-pur-p', PL_P = 'b23-pl-p', INV_P = 'b23-inv-p';
+const K_Q = 'b23-kunde-q', PARTNER_Q = 'b23-partner-q', SUP_Q = 'b23-sup-q', REP_I = 'b23-rep-i', EXP_I = 'b23-exp-i', CC_Q = 'b23-cc-q', DEBT_Q = 'b23-debt-q', PUR_Q = 'b23-pur-q';
+const PL_I = 'b23-pl-i', PL_J = 'b23-pl-j';
 const einkaufZeile = (id) => dbQ(BIZ_DB, 'SELECT status, paid_amount, remaining_amount FROM purchases WHERE id = ?', [id])[0] || {};
 const rechnung = (id) => dbQ(BIZ_DB, 'SELECT status, paid_amount, invoice_number, special_mark FROM invoices WHERE id = ?', [id])[0] || {};
 async function dateiBis(pruefe, ms = 30000) {
@@ -644,6 +706,103 @@ try {
     ok(stlRows(stlP).every((r) => r.status === 'REVERSED') && mv2.length === 1 && !!mv2[0].cancelled_at && pib() === 600 && Number(rechnung(INV_P).paid_amount) === 0,
       `H rückgängig: Zuordnung REVERSED, Auszahlung storniert (nicht gelöscht), Partnerkonto wieder 600, Rechnung wieder offen (${pib()})`);
     ok(geldBuchungen() === geldH, 'H auch das Rückgängig bewegt kein Geld');
+  }
+
+  // ── I PC2 (v0.8.101 S3): Partner bezahlt die Werkstatt direkt — Teilbetrag 60, dann 40, Storno des Teilbetrags ─────────
+  {
+    await syncRuhe();
+    const geldI = geldBuchungen();
+    const saldo = (acc, cp) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE WHEN direction='CREDIT' THEN amount ELSE -amount END), 0) AS s
+      FROM ledger_entries WHERE account = ? AND counterparty_id = ?`, [acc, cp])[0]?.s || 0)) / 1000;
+    const ap0 = saldo('ACCOUNTS_PAYABLE', SUP_FREMD), pq0 = saldo('PARTNER_ITEM_BALANCE', PARTNER_Q);
+    client = await lade(client, `/partners?partner=${PARTNER_Q}&item=${PL_I}`);
+    await waitFor(client, '[data-partner-cost-pay="EXP-2026-000981"]', 45000);
+    const offenText = await text(client, `[data-partner-item-expanded="${PL_I}"]`);
+    ok(/Open workshop costs/.test(offenText) && /EXP-2026-000981/.test(offenText), `I offene Werkstattkosten am Partnerartikel sichtbar (${offenText.slice(0, 120)})`);
+    ok(await mausKlick(client, '[data-partner-cost-pay="EXP-2026-000981"]') === 'OK', 'I PC2: Maus auf „Partner paid directly"');
+    await waitFor(client, '[data-partner-direct-amount]', 15000);
+    ok(await tippe(client, '[data-partner-direct-amount]', '60') === 'OK', 'I Tastatur: Teilbetrag 60');
+    await foto(client, 'b23-i-pc2-direct-dialog');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment').length;
+    ok(await mausKlick(client, '[data-partner-direct-save]') === 'OK', 'I Maus auf „Confirm"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM expense_payments WHERE expense_id = ? AND method = 'partner'", [EXP_I]) === 1);
+    const e1 = dbQ(BIZ_DB, 'SELECT paid_amount, status, payment_method FROM expenses WHERE id = ?', [EXP_I])[0] || {};
+    ok(Number(e1.paid_amount) === 60 && e1.payment_method === 'bank' && saldo('ACCOUNTS_PAYABLE', SUP_FREMD) === ap0 - 60 && saldo('PARTNER_ITEM_BALANCE', PARTNER_Q) === pq0 + 60,
+      `I Werkstattschuld −60, Partnerkonto +60, Geldweg der Ausgabe unverändert (${JSON.stringify(e1)})`);
+    ok(geldBuchungen() === geldI, 'I keine Geldbuchung von LATAIF');
+    const cmdsI = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment');
+    ok(cmdsI.length === vor + 1 && cmdsI.at(-1)?.payload?.method === 'partner' && cmdsI.at(-1)?.payload?.partnerId === PARTNER_Q,
+      `I PC2 schickt EINEN Auftrag expenses.record_payment (partner, ${PARTNER_Q})`);
+    // Zweite Teilzahlung 40 → Werkstatt voll bezahlt.
+    client = await lade(client, `/partners?partner=${PARTNER_Q}&item=${PL_I}`);
+    await waitFor(client, '[data-partner-cost-pay="EXP-2026-000981"]', 45000);
+    ok(await mausKlick(client, '[data-partner-cost-pay="EXP-2026-000981"]') === 'OK', 'I PC2: zweite Teilzahlung');
+    await waitFor(client, '[data-partner-direct-amount]', 15000);
+    ok(await tippe(client, '[data-partner-direct-amount]', '40') === 'OK', 'I Tastatur: 40');
+    ok(await mausKlick(client, '[data-partner-direct-save]') === 'OK', 'I Maus auf „Confirm"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM expense_payments WHERE expense_id = ? AND method = 'partner'", [EXP_I]) === 2);
+    const e2 = dbQ(BIZ_DB, 'SELECT paid_amount, status FROM expenses WHERE id = ?', [EXP_I])[0] || {};
+    ok(Number(e2.paid_amount) === 100 && e2.status === 'PAID' && saldo('ACCOUNTS_PAYABLE', SUP_FREMD) === ap0 - 100 && geldBuchungen() === geldI,
+      `I Werkstatt voll bezahlt (100, PAID), kein Geld von LATAIF (${JSON.stringify(e2)})`);
+    // Storno des ersten Teilbetrags (Erfassungsfehler) — App-Dialog. Erlaubt nur ohne spätere Bewegung → den zweiten (letzten) stornieren.
+    const letzte = String(dbQ(BIZ_DB, "SELECT id FROM item_partner_movements WHERE purchase_line_id = ? AND method = 'direct' ORDER BY rowid DESC LIMIT 1", [PL_I])[0]?.id || '');
+    client = await lade(client, `/partners?partner=${PARTNER_Q}&item=${PL_I}`);
+    await waitFor(client, `[data-partner-item-cancel="${letzte}"]`, 45000);
+    ok(await mausKlick(client, `[data-partner-item-cancel="${letzte}"]`) === 'OK', 'I PC2: Maus auf „reverse (entry error)" der Direktzahlung 40');
+    await waitFor(client, '[data-app-confirm]', 15000);
+    ok(await mausKlick(client, '[data-app-confirm-ok]') === 'OK', 'I Maus auf „OK"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM expense_payments WHERE expense_id = ? AND method = 'partner'", [EXP_I]) === 1);
+    const e3 = dbQ(BIZ_DB, 'SELECT paid_amount, status FROM expenses WHERE id = ?', [EXP_I])[0] || {};
+    ok(Number(e3.paid_amount) === 60 && e3.status !== 'PAID' && saldo('ACCOUNTS_PAYABLE', SUP_FREMD) === ap0 - 60 && saldo('PARTNER_ITEM_BALANCE', PARTNER_Q) === pq0 + 60,
+      `I Storno: Werkstattschuld wieder 40 offen, Partnerkonto +60, Bewegung storniert (${JSON.stringify(e3)})`);
+    ok(geldBuchungen() === geldI, 'I auch das Storno bewegt kein Geld');
+    await foto(client, 'b23-i-pc2-direct-after', `[data-partner-item-expanded="${PL_I}"]`);
+  }
+
+  // ── J PC2 (v0.8.101 S5): gebuchte Partnerforderung 150 gegen Store Credit 30 + We Borrowed 80 + Einkauf 40, dann Rückgängig ──
+  {
+    await syncRuhe();
+    const geldJ = geldBuchungen();
+    client = await lade(client, `/clients/${K_Q}/account`);
+    await waitFor(client, '[data-account-settle]', 45000);
+    ok(await mausKlick(client, '[data-account-settle]') === 'OK', 'J PC2: Maus auf „Settle Balance"');
+    await waitFor(client, '[data-settle-balance]', 30000);
+    const links = await attrs(client, '[data-settle-invoice]', 'data-settle-invoice-kind');
+    const rechts = await attrs(client, '[data-settle-source]', 'data-settle-source-kind');
+    ok(S(links) === S(['PARTNER_ITEM']) && S(rechts) === S(['STORE_CREDIT', 'LOAN_BORROWED', 'PURCHASE']),
+      `J links nur die gebuchte Partnerforderung (nicht der Kostenanteil, nicht Artikel I), rechts Store Credit, Darlehen, Einkauf (${S(links)} ${S(rechts)})`);
+    const lt = await text(client, '[data-settle-invoice="PUR-2026-000987"]');
+    ok(/Partner owes · Quinn Partner/.test(lt) && /open 150\.000/.test(lt.replace(/,/g, '')), `J gekennzeichnet „Partner owes", offen 150 (${lt.slice(0, 160)})`);
+    const paare = await attrs(client, '[data-settle-pair]', 'data-settle-pair');
+    ok(paare.length === 3 && (await attrs(client, '[data-settle-total]', 'data-settle-total'))[0] === '150.000', `J Vorschlag FIFO 30 + 80 + 40 = 150 (${S(paare)})`);
+    await foto(client, 'b23-j-pc2-receivable-dialog');
+    ok(await mausKlick(client, '[data-settle-confirm]') === 'OK', 'J Maus auf „Confirm settlement"');
+    await dateiBis(() => zahl("SELECT COUNT(*) AS n FROM party_offsets WHERE receivable_type = 'PARTNER_ITEM' AND status = 'ACTIVE'") === 3);
+    const stlJ = String(dbQ(BIZ_DB, "SELECT settlement_number FROM party_offsets WHERE receivable_type = 'PARTNER_ITEM' LIMIT 1")[0]?.settlement_number || '');
+    const rows = stlRows(stlJ);
+    ok(rows.length === 3 && S(rows.map((r) => [r.payable_type, Number(r.amount)])) === S([['STORE_CREDIT', 30], ['DEBT', 80], ['PURCHASE', 40]]),
+      `J EINE STL ${stlJ}: Store Credit 30, Darlehen 80, Einkauf 40 (${S(rows)})`);
+    const cc = dbQ(BIZ_DB, 'SELECT used_amount, status FROM customer_credits WHERE id = ?', [CC_Q])[0] || {};
+    ok(Number(cc.used_amount) === 30 && cc.status === 'USED' && zahl('SELECT COUNT(*) AS n FROM customer_credit_offsets WHERE customer_credit_id = ? AND reversed_at IS NULL', [CC_Q]) === 1
+      && zahl('SELECT COUNT(*) AS n FROM credit_applications WHERE credit_id = ?', [CC_Q]) === 0, 'J Store Credit verbraucht über den eigenen Beleg, keine Anrechnung');
+    ok(zahl("SELECT COUNT(*) AS n FROM debt_payments WHERE debt_id = ? AND source = 'offset'", [DEBT_Q]) === 1
+      && Number(einkaufZeile(PUR_Q).remaining_amount) === 10, 'J Darlehen 0 offen, Einkauf 10 offen');
+    ok(geldBuchungen() === geldJ && zahl("SELECT COUNT(*) AS n FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'CONTRIBUTION' AND method = 'offset' AND cancelled_at IS NULL", [PL_J]) === 3,
+      'J keine Geldbuchung; drei Rückzahlungen per Verrechnung am Partnerartikel');
+    ok((await kommandos(client)).filter((x) => x.op === 'customers.settle_balance').length >= 1, 'J PC2 schickt den Auftrag customers.settle_balance');
+    client = await lade(client, `/clients/${K_Q}/account`);
+    await waitFor(client, `[data-settlement-undo="${stlJ}"]`, 45000);
+    const rk = await attrs(client, '[data-settlement-line-receivable="PARTNER_ITEM"]', 'href');
+    ok(rk.length === 3 && rk.every((h) => /\/partners\?partner=/.test(String(h))), `J Verrechnungsliste: „→ Partner owes …" mit Link (${S(rk)})`);
+    ok(await mausKlick(client, `[data-settlement-undo="${stlJ}"]`) === 'OK', `J PC2: Maus auf „Undo settlement" (${stlJ})`);
+    await waitFor(client, '[data-app-confirm]', 15000);
+    ok(await mausKlick(client, '[data-app-confirm-ok]') === 'OK', 'J Maus auf „OK"');
+    await dateiBis(() => stlRows(stlJ).every((r) => r.status === 'REVERSED'));
+    const cc2 = dbQ(BIZ_DB, 'SELECT used_amount, status FROM customer_credits WHERE id = ?', [CC_Q])[0] || {};
+    ok(stlRows(stlJ).every((r) => r.status === 'REVERSED') && Number(cc2.used_amount) === 0 && cc2.status === 'OPEN' && Number(einkaufZeile(PUR_Q).remaining_amount) === 50
+      && zahl("SELECT COUNT(*) AS n FROM item_partner_movements WHERE purchase_line_id = ? AND method = 'offset' AND cancelled_at IS NULL", [PL_J]) === 0,
+      'J Rückgängig: Store Credit frei, Darlehen und Einkauf wieder offen, Bewegungen storniert');
+    ok(geldBuchungen() === geldJ, 'J auch das Rückgängig bewegt kein Geld');
   }
 } catch (e) {
   ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));

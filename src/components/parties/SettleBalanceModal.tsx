@@ -212,11 +212,11 @@ export function SettleBalanceModal({ customerName, data, focus, totals, notOffer
                     <span style={{ color: GREY }}>· {fmtDate(i.date)}</span>
                     <div style={{ fontSize: 11, color: GREY }}>
                       {i.kind === 'PARTNER_ITEM'
-                        ? <>{i.productLabel ? `${i.productLabel} · ` : ''}booked partner receivable · open <Bhd v={i.open} /> · only against We Borrowed or open purchases</>
+                        ? <>{i.productLabel ? `${i.productLabel} · ` : ''}booked partner receivable · open <Bhd v={i.open} /> · against store credit, We Borrowed or open purchases</>
                         : <>total <Bhd v={i.total} /> · paid <Bhd v={i.paid} /> · open <Bhd v={i.open} /></>}
                     </div>
                     <div style={{ fontSize: 11, color: on && used > 0 ? (after <= 5 ? GREEN : INK) : GREY }}>
-                      {!on ? 'excluded' : used === 0 ? 'nothing left to offset' : after <= 5 ? '→ fully paid' : `→ ${fmt(after)} stays open`}
+                      {!on ? 'excluded' : used === 0 ? 'nothing left to offset' : after <= 5 ? (i.kind === 'PARTNER_ITEM' ? '→ partner owes nothing more on this item' : '→ fully paid') : `→ ${fmt(after)} stays open`}
                     </div>
                   </span>
                   <span className="font-mono" style={{ whiteSpace: 'nowrap' }}><Bhd v={i.open} /></span>
