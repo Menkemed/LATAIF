@@ -270,8 +270,8 @@ const PB40 = [{ partnerId: 'pa-b', sharePct: 40 }];
   ok(r3(saldo('PARTNER_ITEM_BALANCE', 'pa-b') - pb0) === 100, 'D1 Haben PARTNER_ITEM_BALANCE (Partner) 100 — LATAIF schuldet ihm, was er für LATAIF bezahlt hat');
   ok(banking() === bank0, 'D1 Banking zeigt keinen Ausgabenabgang (die Zahlung war nicht von LATAIF)');
   ok(n(DB, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'EXPENSE_PAYMENT'") === 0, 'D1 keine Geld-Buchung der Ausgabenzahlung');
-  ok(open(a.line) === 100 && view(a.line)!.repairPending && await code(() => move(a.line, 'PAYOUT', 1)) === 'PARTNER_REPAIR_PENDING',
-    `D1 vor „ready": +100 steht, aber Auszahlung wartet (Kostenanteil noch nicht fest) (${open(a.line)})`);
+  ok(open(a.line) === 60 && view(a.line)!.repairPending && await code(() => move(a.line, 'PAYOUT', 1)) === 'PARTNER_REPAIR_PENDING',
+    `D1 vor „ready": Anspruch 60 (Anteil an der gebuchten Reparatur zählt schon), Auszahlung wartet bis „ready" (${open(a.line)})`);
   await status(rid, 'ready');
   ok(losKosten(lot) === 1100 && open(a.line) === 60 && !view(a.line)!.repairPending,
     `D1 „ready": Kostenanteil 40 von 100 → zugunsten des Partners 60 (${open(a.line)})`);
@@ -314,7 +314,8 @@ const PB40 = [{ partnerId: 'pa-b', sharePct: 40 }];
   await save.cancelItemMovementOnPrimary(mid);
   ok(Number(exp(ex)[0]) === 0 && String(exp(ex)[1]) !== 'PAID' && n(DB, "SELECT COUNT(*) FROM expense_payments WHERE expense_id = ?", [ex]) === 0,
     `D3 Ausgabe wieder offen, Zahlungszeile entfernt (${S(exp(ex))})`);
-  ok(apWerkstatt() === ap0 && saldo('PARTNER_ITEM_BALANCE', 'pa-b') === pb0 && open(a.line) === 0, 'D3 A/P und Partnerkonto wie vorher, Partner wieder bei 0');
+  ok(apWerkstatt() === ap0 && saldo('PARTNER_ITEM_BALANCE', 'pa-b') === pb0 && open(a.line) === -40,
+    `D3 A/P und Partnerkonto wie vorher; Partner schuldet seinen Anteil 40 an der gebuchten Reparatur (${open(a.line)})`);
   ok(gap('ACCOUNTS_PAYABLE') === 0 && gap('PARTNER_ITEM_BALANCE') === 0 && ausgeglichen(), 'D3 Abgleich ohne Differenz');
 }
 
@@ -387,6 +388,91 @@ const PB40 = [{ partnerId: 'pa-b', sharePct: 40 }];
     'D7 eigener (nicht gemeinsamer) Artikel: Werkstattgold bleibt Betriebsausgabe, Los unverändert (keine pauschale Änderung)');
   void op0;
   ok(gap('ACCOUNTS_PAYABLE') === 0 && gap('PARTNER_ITEM_BALANCE') === 0 && ausgeglichen(), 'D7 A/P (Werkstatt) und Partnerkonto: Hauptbuch = Bestand, ausgeglichen');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ABSCHLUSSPRÜFUNG (Owner 11.11.2026): wirtschaftlicher Anspruch gegen Hauptbuch — nie 100 als frei verfügbar, wenn
+// wirtschaftlich nur 60 geschuldet sind; vor/nach „ready", nach Verkauf, Auszahlung, S4-Verrechnung, Rückgängig, Übernahme.
+// ════════════════════════════════════════════════════════════════════════════
+const sr = await import('../../src/core/offsets/party-settlement-reads.ts');
+const st4 = await import('../../src/core/offsets/party-settlement.ts');
+const { partnerOpenRows } = await import('../../src/core/partners/partner-open-balances.ts');
+DB.run("UPDATE partners SET linked_customer_id = 'cust-1' WHERE id = 'pa-b'");
+const angebotS4 = (line: string): number => sr.settleBalanceFor({ branchId: 'branch-main' }, 'cust-1').sources.find((x) => x.kind === 'PARTNER_ITEM' && x.id === line)?.open ?? 0;
+const payableRow = (line: string, pid = 'pa-b') => partnerOpenRows(house.partnerItemsOverview('branch-main', pid)).find((r) => r.purchaseLineId === line);
+
+// ── F1 60/40, Partner zahlt 100 direkt: Kette Werkstattschuld → Partnerkonto → Anteil 40 → Anspruch 60 ──
+{
+  const a = await kauf('pw20', 1000, PB40, 1, 1000);
+  const lot = lotOf(DB, a.line);
+  await move(a.line, 'CONTRIBUTION', 400);
+  const ap0 = apWerkstatt(), pb0 = saldo('PARTNER_ITEM_BALANCE', 'pa-b'), g0 = geld();
+  const rid = await reparatur('pw20', lot, 100);
+  await status(rid, 'in_progress');
+  ok(r3(apWerkstatt() - ap0) === 100, 'F1 „in Arbeit": Werkstattschuld 100 (Haben A/P)');
+  zahlt(ausgabe(rid), 100, 'partner', 'pa-b');
+  ok(r3(apWerkstatt() - ap0) === 0 && r3(saldo('PARTNER_ITEM_BALANCE', 'pa-b') - pb0) === 100 && geld() === g0,
+    'F1 nach Zahlung: Werkstattschuld 0, Partnerkonto +100 (Haben), kein Geld von LATAIF');
+  // Vor „ready": wirtschaftlich schuldet LATAIF 60 — nie 100.
+  const v = view(a.line)!;
+  ok(open(a.line) === 60 && v.owedCost === 440, `F1 vor „ready": Anspruch 60 (Anteil 40 an der gebuchten Reparatur zählt schon), nie 100 (${open(a.line)}/${v.owedCost})`);
+  ok(payableRow(a.line)?.open === 60 && payableRow(a.line)?.onHold === true, `F1 vor „ready": Verbindlichkeit 60, gesperrt (${S(payableRow(a.line))})`);
+  ok(angebotS4(a.line) === 0, 'F1 vor „ready": in Settle Balance NICHT angeboten');
+  ok(await code(() => move(a.line, 'PAYOUT', 1)) === 'PARTNER_REPAIR_PENDING', 'F1 vor „ready": Auszahlung gesperrt');
+  ok(await code(() => save.takeOverOnPrimary({ purchaseLineId: a.line, expectedValue: 1000 })) !== '' && open(a.line) === 60,
+    'F1 vor „ready": Übernahme durch LATAIF gesperrt (sonst entginge der Partner seinem Anteil)');
+  await status(rid, 'ready');
+  ok(open(a.line) === 60 && angebotS4(a.line) === 60 && payableRow(a.line)?.onHold === false,
+    `F1 nach „ready": Anspruch 60, in Settle Balance genau 60 angeboten (${open(a.line)}/${angebotS4(a.line)})`);
+  ok(await code(() => move(a.line, 'PAYOUT', 60.001)) === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, 'F1 Auszahlung über 60 abgewiesen');
+  // S4: 60 gegen eine Rechnung, dann rückgängig.
+  const lotR = s(DB, "SELECT id FROM stock_lots WHERE product_id = 'pw25' AND status = 'ACTIVE' LIMIT 1");
+  void lotR;
+  await kauf('pw25', 50, undefined, 1, 50);
+  const inv = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ productId: 'pw25', quantity: 1, unitPrice: 200, purchasePrice: 50,
+    taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 200, lotId: s(DB, "SELECT id FROM stock_lots WHERE product_id = 'pw25' LIMIT 1") }] as never, 'P').id);
+  reload();
+  const r = sr.settleBalanceFor({ branchId: 'branch-main' }, 'cust-1');
+  const sel = { invoiceIds: [inv], sourceIds: [a.line] };
+  const pairs = sr.planSettlement(r.invoices, r.sources, sel);
+  const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+  const res = await st4.settleBalanceOnPrimary({ customerId: 'cust-1', ...sel, expectedStamp: r.stamp, expectedTotal: pairs.reduce((x, p) => x + p.amountF, 0) / 1000, settlementDate: today } as never);
+  ok(res.total === 60 && open(a.line) === 0 && angebotS4(a.line) === 0, `F1 S4: genau 60 gegen die Rechnung verrechnet (${res.total})`);
+  await st4.reverseSettlementOnPrimary({ settlementNumber: res.settlementNumber, expectedActiveLines: 1 } as never);
+  ok(open(a.line) === 60, 'F1 S4 rückgängig: Anspruch wieder 60');
+  // Verkauf: Kapital 440 + Gewinn 160 + Vorschuss 60 = 660; Partnerkonto = Domäne.
+  const vk = verkauf(DB, 'pw20', lot, 1500, 'full');
+  await save.settleSaleOnPrimary(vk.il);
+  ok(open(a.line) === 660 && gap('PARTNER_ITEM_BALANCE') === 0 && ausgeglichen(),
+    `F1 nach Verkauf 1500 (Einstand 1100): Kapital 440 + Gewinn 160 + vorgestreckte 60 = 660, Abgleich ohne Differenz (${open(a.line)})`);
+}
+
+// ── F2 Gegenprobe 70/30: LATAIF 70 bar, Partner 30 direkt → er schuldet 10 (nicht +30) ──
+{
+  const a = await kauf('pw21', 1000, PB40, 1, 1000);
+  await move(a.line, 'CONTRIBUTION', 400);
+  const rid = await reparatur('pw21', lotOf(DB, a.line), 100);
+  await status(rid, 'in_progress');
+  zahlt(ausgabe(rid), 70, 'cash');
+  zahlt(ausgabe(rid), 30, 'partner', 'pa-b');
+  ok(open(a.line) === -10 && angebotS4(a.line) === 0 && !payableRow(a.line) || payableRow(a.line)?.side === 'RECEIVABLE',
+    `F2 vor „ready": Partner schuldet 10 (nie +30 als Verbindlichkeit) (${open(a.line)})`);
+  await status(rid, 'ready');
+  ok(open(a.line) === -10 && sr.settleBalanceFor({ branchId: 'branch-main' }, 'cust-1').invoices.every((i) => i.id !== a.line),
+    'F2 nach „ready": schuldet 10 — offener Kostenanteil, nie als gebuchte Forderung verrechnet');
+}
+
+// ── F3 Mehrere Partner (30/20), B zahlt 100 direkt: B +70, C −20 — schon vor „ready" ──
+{
+  const a = await kauf('pw22', 1000, [{ partnerId: 'pa-b', sharePct: 30 }, { partnerId: 'pa-c', sharePct: 20 }], 1, 1000);
+  await move(a.line, 'CONTRIBUTION', 300, 'pa-b');
+  await move(a.line, 'CONTRIBUTION', 200, 'pa-c');
+  const rid = await reparatur('pw22', lotOf(DB, a.line), 100);
+  await status(rid, 'in_progress');
+  zahlt(ausgabe(rid), 100, 'partner', 'pa-b');
+  ok(open(a.line, 'pa-b') === 70 && open(a.line, 'pa-c') === -20, `F3 vor „ready": B +70, C −20 (${open(a.line, 'pa-b')}/${open(a.line, 'pa-c')})`);
+  await status(rid, 'ready');
+  ok(open(a.line, 'pa-b') === 70 && open(a.line, 'pa-c') === -20 && gap('PARTNER_ITEM_BALANCE') === 0, 'F3 nach „ready": unverändert, Abgleich ohne Differenz');
 }
 
 console.log(`\npartner-direct-payer: ${PASS} passed, ${fails.length} failed`);

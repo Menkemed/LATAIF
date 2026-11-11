@@ -250,8 +250,8 @@ const PB40 = [{ partnerId: 'pa-b', sharePct: 40 }];
   const inv0 = saldo('INVENTORY'), ap0 = saldo('ACCOUNTS_PAYABLE', 'sup-1');
   const rid = await reparatur('pw6', lot, 100);
   await status(rid, 'in_progress');
-  ok(r3(saldo('INVENTORY') - inv0) === 100 && r3(ap0 - saldo('ACCOUNTS_PAYABLE', 'sup-1')) === 100 && losKosten(lot) === 1000 && open(a.line) === 0,
-    `R1 „in Arbeit": Soll INVENTORY 100 / Haben A/P Werkstatt 100; Los und Partneranteil noch unverändert (${losKosten(lot)}, ${open(a.line)})`);
+  ok(r3(saldo('INVENTORY') - inv0) === 100 && r3(ap0 - saldo('ACCOUNTS_PAYABLE', 'sup-1')) === 100 && losKosten(lot) === 1000 && open(a.line) === -40,
+    `R1 „in Arbeit": Soll INVENTORY 100 / Haben A/P Werkstatt 100; Los noch 1000, Partneranteil 40 an der gebuchten Reparatur zählt schon (${losKosten(lot)}, ${open(a.line)})`);
   await status(rid, 'ready');
   const v = view(a.line)!;
   ok(losKosten(lot) === 1100 && open(a.line) === -40 && v.extraCosts === 100 && v.extraCostShare === 40,

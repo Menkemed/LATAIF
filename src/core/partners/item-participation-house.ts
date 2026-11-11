@@ -599,6 +599,10 @@ function lineStateOf(purchaseLineId: string, partnerId: string, branchId: string
         if (left <= 0) break;
       }
       extra += st.soldUnsettledCostF - e.unitCostF * st.unsettledSoldQty;
+      // v0.8.101 Abschlussprüfung — eine EIGENE Reparatur dieses Loses, die noch nicht „ready" ist: ihre Werkstattzeilen stehen
+      // ab „in Arbeit" schon im Lager (Soll INVENTORY), der Los-Einstand folgt erst bei „ready". Ihr Anteil zählt deshalb schon
+      // jetzt — sonst stünde eine Direktzahlung des Partners voll als sein Anspruch da (100 statt 60).
+      extra += pendingOwnRepairCostF(purchaseLineId);
       extraUnsettledF += extra;
       extraCostShareF += Math.round(extra * party.shareBp / FULL_BP);
     }
@@ -620,6 +624,21 @@ function lineStateOf(purchaseLineId: string, partnerId: string, branchId: string
  * Solange wartet jede Auszahlung/Verrechnung an diesem Artikel — sonst ginge eine Direktzahlung des Partners vorher als
  * Guthaben hinaus, bevor sein Anteil daran feststeht. Ohne gewähltes Los zählt das Los, das die Reparatur per FIFO träfe.
  */
+export function pendingOwnRepairCostF(purchaseLineId: string): number {
+  const r = query(
+    `SELECT COALESCE(SUM(rl.cost_amount), 0) AS t FROM repair_lines rl
+       JOIN repairs r ON r.id = rl.repair_id
+       JOIN purchase_lines pl ON pl.id = ? AND pl.product_id = r.product_id
+      WHERE rl.status = 'OPEN' AND rl.expense_id IS NOT NULL AND COALESCE(r.repair_scope, '') = 'OWN'
+        AND LOWER(COALESCE(r.status, '')) NOT IN ('ready', 'picked_up', 'delivered', 'cancelled')
+        AND (r.lot_id IN (SELECT id FROM stock_lots WHERE purchase_line_id = pl.id)
+             OR (r.lot_id IS NULL AND (SELECT l.purchase_line_id FROM stock_lots l WHERE l.product_id = r.product_id AND l.status = 'ACTIVE'
+                   AND l.qty_remaining > 0 ORDER BY l.acquired_at, l.id LIMIT 1) = pl.id))`,
+    [purchaseLineId],
+  )[0];
+  return F(r?.t);
+}
+
 export function ownRepairPendingOn(purchaseLineId: string): boolean {
   return !!query(
     `SELECT 1 FROM repairs r
@@ -1079,6 +1098,9 @@ export function settleSupplierReturnForPartners(
       throw nein(PARTNER_OWNERSHIP_BLOCKED, 'a piece of this item came back after the partnership on it ended — take it over first, then return it');
     }
     if (info.mode !== 'ACTIVE' || !info.epoch) continue;   // LATAIF hält die Stücke allein
+    if (ownRepairPendingOn(l.purchaseLineId)) {
+      throw nein(PARTNER_OWNERSHIP_BLOCKED, 'an own repair of this item is not "Ready" yet — finish or cancel it before returning the item to the supplier');
+    }
     const e = info.epoch;
     const q = Math.max(0, Number(l.quantity) || 0);
     if (q <= 0) continue;
@@ -1167,6 +1189,8 @@ export function ownershipInfo(purchaseLineId: string, branchId: string): Ownersh
   }
   const probe = (e: Epoch) => epochStateOf(e, e.parties[0]?.partnerId ?? '', branchId);
   const blockerOf = (e: Epoch, st: EpochState): string | null => {
+    // v0.8.101 Abschlussprüfung — sonst gäben die Partner die Stücke zum Einstand OHNE die laufende Reparatur ab und trügen ihren Anteil nie.
+    if (ownRepairPendingOn(purchaseLineId)) return 'an own repair of this item is not "Ready" yet — its cost share is fixed at "Ready"; take over or change partners afterwards';
     if (st.correctionPending) return 'a settled sale of this item changed — correct the settlement first';
     if (st.pendingReturn) return 'a return on a sale of this item is not decided yet';
     if (st.unsettledSoldQty > 0) return 'a sale of this item is not settled yet — settle it first';
