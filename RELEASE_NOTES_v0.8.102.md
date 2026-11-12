@@ -41,23 +41,20 @@ Payments get their real date: expenses and Pay Supplier can be booked on the day
   - Supplier returns: a gain has no account; VAT on refunded added costs is not calculated.
   - Partners: production with a joint item and correcting a joint purchase line stay blocked.
 
-**Before you update the main computer:**
+**Before you update** (the main computer and the second computer are both on v0.8.101):
 
 1. Stop entering anything on the phone.
-2. Close the main computer. Keep the second computer closed.
-3. Make a full archive copy of both databases, the complete media folder (all files, no cleanup) and the key files, and check it.
+2. Check **Unresolved saves** on the second computer. Clarify open entries; do not remove them blindly.
+3. Close both computers.
+4. Make a full archive copy of both databases, the complete media folder (all files, no cleanup) and the key files, and check it.
 
-**Update** the main computer (from v0.8.101). The second computer may stay on its older version as long as it is not used; keep it closed.
-
-Before the second computer is used again:
-- Check **Unresolved saves** on it. Clarify open entries; do not remove them blindly.
-- Then update it to v0.8.102.
+**Update** the main computer first, then the second computer, both from v0.8.101.
 
 The payment date, several payment methods, the cost date, "Edit date" and the estimate field need v0.8.102 on both computers.
 
-A second computer on an older version:
-- **Payments:** books them on today's date.
+While the second computer is still on v0.8.101:
+- **Payments:** it books them on today's date.
 - **Refused with a message:**
   - adding costs to a repair received before the opening;
   - typing own cost or actual cost on a new repair.
-- In those cases, use the main computer or update the second computer.
+- In those cases, use the main computer or update the second computer first.
