@@ -388,6 +388,11 @@ const PB40 = [{ partnerId: 'pa-b', sharePct: 40 }];
     'D7 eigener (nicht gemeinsamer) Artikel: Werkstattgold bleibt Betriebsausgabe, Los unverändert (keine pauschale Änderung)');
   void op0;
   ok(gap('ACCOUNTS_PAYABLE') === 0 && gap('PARTNER_ITEM_BALANCE') === 0 && ausgeglichen(), 'D7 A/P (Werkstatt) und Partnerkonto: Hauptbuch = Bestand, ausgeglichen');
+  // Release v0.8.101 — die Herkunftsregel der Bestandskorrektur kennt diese INVENTORY-Sollbuchung (Quelle EXPENSE, Bezug gold_payable).
+  const { unknownInventoryDebits } = await import('../../src/core/stock/stock-adjustment.ts');
+  ok(unknownInventoryDebits() === 0 && s(DB, 'SELECT related_module FROM expenses WHERE id = ?', [r.expenseId]) === 'gold_payable'
+    && n(DB, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'EXPENSE' AND source_id = ? AND account = 'INVENTORY' AND direction = 'DEBIT'", [r.expenseId]) === 1,
+    'D7 Herkunftsregel: die aktivierte Werkstattgold-Buchung ist bekannt (EXPENSE, Bezug gold_payable) — keine INVENTORY-Buchung unbekannter Herkunft');
 }
 
 // ════════════════════════════════════════════════════════════════════════════

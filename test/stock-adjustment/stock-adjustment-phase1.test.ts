@@ -514,7 +514,17 @@ for (const [name, trigger, mitLos] of [
   // geschlossenen Quartal — COGS), beides unter der Quelle EXPENSE/gold_payable; dasselbe gilt für das Zurück-ins-Lager beim
   // Rechnungsstorno (cost-correction.ts). Beide Stellen sind hier ausdrücklich festgehalten.
   const ogs = src('src/core/gold/order-gold-settle.ts'), cco = src('src/core/purchases/cost-correction.ts');
-  ok(soll === 3 && fremd.length === 0
+  // v0.8.101 S3/E2 (Owner) — Werkstattgold an einem gemeinsamen, unverkauften Los wird aktiviert: gold-settle.ts bucht Soll
+  // INVENTORY / Haben A/P unter der Quelle EXPENSE einer Ausgabe mit Bezug 'gold_payable' — derselbe bekannte Weg wie die
+  // Order-Goldbegleichung (EXPENSE-Ausnahme der Herkunftsregel). Genau diese eine weitere Stelle, nur in dieser Form;
+  // funktional belegt in partner-direct-payer D7 (unknownInventoryDebits() = 0).
+  const gs = src('src/core/gold/gold-settle.ts');
+  const fremdBekannt = fremd.map((f) => f.replace(/\\/g, '/'));
+  const nurWerkstattgold = JSON.stringify(fremdBekannt) === JSON.stringify(['core/gold/gold-settle.ts'])
+    && (gs.match(/account: 'INVENTORY',\s*direction: 'DEBIT'/g) ?? []).length === 1
+    && /kind: 'workshop_gold_joint_item'/.test(gs) && /\{ occurredAt: now, sourceModule: 'EXPENSE', sourceId: expenseId \}/.test(gs)
+    && /related_module, related_entity_id, supplier_id, status, created_at, created_by\)\s*VALUES \(\?, \?, \?, \?, \?, 0, \?, \?, \?, 'gold_payable'/.test(gs);
+  ok(soll === 3 && nurWerkstattgold
     && /const diffAccount = costMode === 'SEPARATE' \? 'COGS' : 'INVENTORY';/.test(ogs) && /sourceModule: 'EXPENSE', sourceId: expenseId/.test(ogs)
     && /account: diff > 0 \? 'INVENTORY' : 'COGS', direction: 'DEBIT'/.test(cco) && /sourceModule: 'EXPENSE', sourceId: String\(r\.expense_id\)/.test(cco)
     && /'GOLD_PAYABLE'\]/.test(sa) && /e\.related_module IN \('repair', 'order', 'gold_payable'\)/.test(sa)
