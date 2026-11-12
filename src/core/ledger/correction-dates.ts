@@ -32,6 +32,8 @@ export function setOpeningCutoffForTest(day: string | null): void {
   cutoffForTest = day;
 }
 const openingCutoff = (): string => (nurNodeTest() && cutoffForTest !== null ? cutoffForTest : OPENING_CUTOFF_DATE);
+/** Der gültige Eröffnungsstichtag (in der App immer die Owner-Konstante) — auch für einen gewählten Zahlungstag. */
+export function openingCutoffDay(): string { return openingCutoff(); }
 
 export interface CorrectionDate {
   /** Der Buchungszeitpunkt (ISO), den die Korrektur schreiben würde. */

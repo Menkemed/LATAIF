@@ -11,7 +11,9 @@
 //
 // Owner 12.11.2026 — je Zahlung der Tag, an dem WIRKLICH bezahlt wurde (vorbelegt heute; nicht in der Zukunft, nicht vor
 // der Ausgabe), und mehrere Zahlwege in EINER Zahlung (z. B. 300 Cash + 200 Bank, je mit eigenem Tag) — atomar gebucht.
-// Eine einzelne Zeile reist wie bisher (amount/method), ein gewählter Tag nur, wenn er nicht heute ist.
+// Eine einzelne Zeile reist wie bisher (amount/method), ein gewählter Tag nur, wenn er nicht der Standardtag des Primary ist.
+// Der Tag ist ein Kalendertag in Bahrain (`payment-date`): vorbelegt heute in Bahrain, nicht danach, nicht vor der Ausgabe
+// und nicht vor dem Eröffnungsstichtag — schon hier geprüft (auch am PC2); das VAT-Quartal prüft der Primary.
 import { useEffect, useState } from 'react';
 import { Plus, X } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
@@ -27,7 +29,9 @@ import { WriteError } from '@/components/shared/WriteError';
 import { PAYABLES_OP } from '@/core/payables/payables-house';
 import { saveExpensePayment, saveExpensePayments } from '@/core/payables/payables-save';
 import { usePermission } from '@/hooks/usePermission';
-import { latestBusinessDate, todayIso } from '@/core/utils/business-date';
+import { todayIso } from '@/core/utils/business-date';
+import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
+import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -48,7 +52,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const zahlen = useSharedWrite<Record<string, unknown>>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
   const perm = usePermission();
   const [fehler, setFehler] = useState('');
-  const [rows, setRows] = useState<PayRow[]>([{ amount: 0, method: 'bank', date: todayIso() }]);
+  const [rows, setRows] = useState<PayRow[]>([{ amount: 0, method: 'bank', date: bahrainTodayIso() }]);
 
   const exp = expenseId ? expenses.find(e => e.id === expenseId) : null;
   // Settlement-SSOT: Rest = amount − (cash + credit). credit_paid einzeln (eine Expense → eine Query,
@@ -59,10 +63,21 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const creditPaid = expenseId ? (guthaben.byExpense[expenseId] || 0) : 0;
   const settlement = exp ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, creditPaid, exp.status) : null;
   const remaining = settlement ? settlement.remaining : 0;
-  const minDate = exp?.expenseDate ? exp.expenseDate.slice(0, 10) : undefined;
+  const ausgabeTag = exp?.expenseDate ? exp.expenseDate.slice(0, 10) : '';
+  const minDate = ausgabeTag > OPENING_CUTOFF_DATE ? ausgabeTag : OPENING_CUTOFF_DATE;
+  const maxDate = bahrainTodayIso();
+  const datumFehler = (d: string, i: number): string | null => {
+    const label = rows.length > 1 ? `Payment ${i + 1} date` : 'The payment date';
+    if (!d) return `${label} is required`;
+    const issue = paymentDateIssue(d, label);
+    if (issue) return issue;
+    if (ausgabeTag && d < ausgabeTag) return `${label} cannot be before the expense date (${ausgabeTag})`;
+    if (d < OPENING_CUTOFF_DATE) return `${label} cannot be before the opening cut-off (${OPENING_CUTOFF_DATE})`;
+    return null;
+  };
   const sumF = rows.reduce((s, r) => s + F(r.amount), 0);
   const zuViel = sumF > F(remaining);
-  const ungueltig = rows.some((r) => !(F(r.amount) > 0) || !r.date);
+  const ungueltig = rows.some((r, i) => !(F(r.amount) > 0) || !!datumFehler(r.date, i));
 
   // R6D — beim Oeffnen den Stand frisch holen: die Fassung, die „Record Payment" nennt, soll die
   // aktuelle sein (auch wenn das Modal aus Reparatur/Auftrag kommt, die die Liste nicht laden).
@@ -75,7 +90,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   // wiederholtes Oeffnen mit einer anderen Expense den State neu seedet.
   useEffect(() => {
     setFehler('');
-    setRows([{ amount: exp ? remaining : 0, method: ((exp?.paymentMethod as PayMethod) || 'bank'), date: todayIso() }]);
+    setRows([{ amount: exp ? remaining : 0, method: ((exp?.paymentMethod as PayMethod) || 'bank'), date: bahrainTodayIso() }]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expenseId]);
 
@@ -85,7 +100,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
       if (rs.length >= MAX_ROWS) return rs;
       const offen = Math.max(0, F(remaining) - rs.reduce((s, r) => s + F(r.amount), 0)) / 1000;
       const frei = METHODS.find((m) => !rs.some((r) => r.method === m)) ?? 'bank';
-      return [...rs, { amount: offen, method: frei, date: todayIso() }];
+      return [...rs, { amount: offen, method: frei, date: bahrainTodayIso() }];
     });
   }
 
@@ -93,6 +108,8 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
     if (!expenseId || ungueltig || zuViel || zahlen.busy) return;
     if (!exp) { setFehler('This expense is not loaded yet — close and open it again.'); return; }
     setFehler('');
+    // Der Standardtag des Primary ohne Angabe ist sein UTC-Heute — nur ein ANDERER Tag reist (zwischen 00:00 und 03:00 in
+    // Bahrain also auch der vorbelegte Bahrain-Tag). Alte Primary-Stände und alte Aufträge bleiben so unverändert.
     const heute = todayIso();
     const r = rows.length === 1
       ? await saveExpensePayment(zahlen, exp, rows[0].amount, rows[0].method, undefined, rows[0].date !== heute ? rows[0].date : undefined)
@@ -171,7 +188,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
                   label="PAYMENT DATE"
                   type="date"
                   value={r.date}
-                  max={latestBusinessDate()}
+                  max={maxDate}
                   min={minDate}
                   disabled={zahlen.busy}
                   onChange={e => setRow(i, { date: e.target.value })}
@@ -179,6 +196,9 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
                 />
               </div>
             </div>
+            {datumFehler(r.date, i) && (
+              <div style={{ fontSize: 12, color: '#DC2626' }} data-expense-pay-date-error={i}>{datumFehler(r.date, i)}</div>
+            )}
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
               <div className="flex gap-2" style={{ marginTop: 6 }}>

@@ -17,7 +17,7 @@
 //     Zielwert `active`, kein Umschalter; der Guthaben-Modus von „Pay Supplier" ist `suppliers.apply_credit`.
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
-import { businessDateIssue } from '@/core/utils/business-date';
+import { paymentDateIssue } from '@/core/utils/payment-date';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
@@ -140,10 +140,10 @@ export function parseExpenseUpdate(raw: unknown): { expenseId: string; expectedR
   return { expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision), fields };
 }
 
-/** Owner 12.11.2026 — der gewählte Zahlungstag (JJJJ-MM-TT, nicht in der Zukunft); ohne Angabe bucht der Primary heute. */
+/** Owner 12.11.2026 — der gewählte Zahlungstag (JJJJ-MM-TT, bis heute in Bahrain); ohne Angabe bucht der Primary heute. */
 function paidDateOf(v: unknown): string | undefined {
   if (v === undefined) return undefined;
-  const issue = businessDateIssue(v, 'Payment date');
+  const issue = paymentDateIssue(v, 'Payment date');
   if (issue || typeof v !== 'string' || v === '') throw new PayablesPayloadError(issue || 'Payment date is not a valid date');
   return v;
 }
@@ -250,8 +250,11 @@ export function parseSupplierPay(raw: unknown): {
   allocations?: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
   confirmExcessAsCredit?: boolean;
   expectedOpenStamp?: string;
+  paidAt?: string;
 } {
-  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations', 'confirmExcessAsCredit', 'expectedOpenStamp']);
+  // Owner 12.11.2026 — `paidDate`: der gewählte Zahlungstag (ohne Angabe heute; alte Aufträge ohne Feld bleiben gültig).
+  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations', 'confirmExcessAsCredit', 'expectedOpenStamp', 'paidDate']);
+  const tag = paidDateOf(r.paidDate);
   if (r.expectedOpenStamp !== undefined && (typeof r.expectedOpenStamp !== 'string' || r.expectedOpenStamp.length > 64)) throw new PayablesPayloadError('expectedOpenStamp must be text');
   if (r.confirmExcessAsCredit !== undefined && typeof r.confirmExcessAsCredit !== 'boolean') throw new PayablesPayloadError('confirmExcessAsCredit is true or false');
   const mode = r.mode;
@@ -271,6 +274,7 @@ export function parseSupplierPay(raw: unknown): {
     supplierId: idOf(r.supplierId, 'supplierId'), amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'), mode, allocations,
     ...(r.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
     ...(typeof r.expectedOpenStamp === 'string' ? { expectedOpenStamp: r.expectedOpenStamp } : {}),
+    ...(tag ? { paidAt: tag } : {}),
   };
 }
 

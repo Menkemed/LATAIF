@@ -55,6 +55,8 @@ import { isAutoCardFee, postCardFeeEntries } from '@/core/finance/card-fee-booki
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
+import { paymentDateIssue } from '@/core/utils/payment-date';
+import { openingCutoffDay } from '@/core/ledger/correction-dates';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
 import { isOrderCostClaim, ORDER_COST_CLAIM_OPEN, ORDER_COST_CLAIM_DONE } from './order-cost-claim';
 
@@ -519,6 +521,32 @@ export function updateExpenseInHouse(
 
 // ── Ausgabe bezahlen ────────────────────────────────────────────────────────
 
+/**
+ * Owner 12.11.2026 — ein GEWÄHLTER Zahlungstag (Ausgabe, „Pay Supplier"), geprüft vor jedem Schreiben:
+ *   • ein echter Kalendertag, nicht nach heute in Bahrain (`payment-date`, dieselbe Regel wie Maske und PC2);
+ *   • der bestehende Periodenschutz für Buchungen in der Vergangenheit (wie Korrekturen und umdatierte Zahlungen):
+ *     nicht vor dem Eröffnungsstichtag, nicht in einem eingereichten oder VAT-bezahlten Quartal.
+ * „Nicht vor dem Beleg" prüft der jeweilige Weg (Ausgabe, Einkauf). Ohne gewählten Tag bleibt alles wie bisher (heute).
+ */
+export function chosenPaymentDay(raw: unknown, ctx: HouseCtx): string {
+  const day = isoDateOf(raw, 'PAYMENT_DATE_INVALID', 'the payment date');
+  const issue = paymentDateIssue(day, 'The payment date', Date.parse(ctx.now) || Date.now());
+  if (issue) throw nein('PAYMENT_DATE_INVALID', issue);
+  const cutoff = openingCutoffDay();
+  if (day < cutoff) {
+    throw nein('PAYMENT_DATE_BEFORE_OPENING',
+      `the payment date (${day}) is before the opening cut-off (${cutoff}) — bookings before the opening are not changed afterwards; choose ${cutoff} or later`);
+  }
+  const q = nbrQuarterOfDate(day);
+  const c = q ? closedVatQuarters(ctx.branchId).get(q.key) : undefined;
+  if (q && c) {
+    const [y, n] = q.key.split('-Q');
+    throw nein('VAT_PERIOD_FILED',
+      `the VAT return for Q${n}/${y} is already ${c.filedAt ? 'filed' : 'paid'} — a payment dated ${day} cannot be recorded in that quarter afterwards; choose a payment date in an open quarter`);
+  }
+  return day;
+}
+
 export interface ExpensePaid {
   expenseId: string;
   paymentId: string;
@@ -556,12 +584,10 @@ export function recordExpensePaymentInHouse(
     throw nein('EXPENSE_OVERPAYMENT', `the payment (${fmt(payF)}) is more than what is open on this expense (${fmt(remainingF)})`);
   }
   // Owner 12.11.2026 — der Tag, an dem WIRKLICH bezahlt wurde (in „Record Expense Payment" wählbar; ohne Angabe heute):
-  // ein echter Tag, nicht in der Zukunft (business-date, ein Tag Spielraum), nicht vor dem Tag der Ausgabe (wie beim Einkauf).
+  // ein echter Tag bis heute in Bahrain, offen (Eröffnung, VAT-Quartal), nicht vor dem Tag der Ausgabe (wie beim Einkauf).
   let paidAt = dayOf(ctx.now);
   if (opts.paidAt !== undefined && opts.paidAt !== null && opts.paidAt !== '') {
-    paidAt = isoDateOf(opts.paidAt, 'PAYMENT_DATE_INVALID', 'the payment date');
-    const issue = businessDateIssue(paidAt, 'The payment date', Date.parse(ctx.now) || Date.now());
-    if (issue) throw nein('PAYMENT_DATE_INVALID', issue);
+    paidAt = chosenPaymentDay(opts.paidAt, ctx);
     const ausgabeTag = String(row.expense_date ?? '').slice(0, 10);
     if (ausgabeTag && paidAt < ausgabeTag) {
       throw nein('PAYMENT_DATE_BEFORE_EXPENSE',
@@ -1356,7 +1382,11 @@ export function markConsignorRepaymentClaim(creditId: string, note?: string): vo
 }
 
 /** Standalone-Guthaben (Vorauszahlung): Zeile + DR SUPPLIER_CREDIT / CR Kasse, strikt. */
-export function grantStandaloneCreditInHouse(supplierId: string, amount: number, method: string, note: string | undefined, ctx: HouseCtx): string {
+export function grantStandaloneCreditInHouse(
+  supplierId: string, amount: number, method: string, note: string | undefined, ctx: HouseCtx,
+  /** Owner 12.11.2026 — „Pay Supplier" mit gewähltem Zahlungstag: das Geld floss an diesem Tag (geprüft vom Aufrufer). */
+  occurredAt?: string,
+): string {
   assertHouseBooks();
   supplierInBranch(supplierId, ctx.branchId);
   const amtF = positiveF(amount, 'PAYMENT_AMOUNT_INVALID', 'the credit amount');
@@ -1369,7 +1399,7 @@ export function grantStandaloneCreditInHouse(supplierId: string, amount: number,
     [creditId, ctx.branchId, supplierId, B(amtF), note || 'Supplier prepayment', ctx.now, ctx.userId || null]
   );
   trackInsert('supplier_credits', creditId, { supplierId, amount: B(amtF) });
-  postStandaloneSupplierCredit(creditId, supplierId, B(amtF), m, ctx.now);
+  postStandaloneSupplierCredit(creditId, supplierId, B(amtF), m, occurredAt || ctx.now);
   return creditId;
 }
 
@@ -1566,6 +1596,11 @@ export interface SupplierPayRequest {
    * Rechner), wird abgewiesen statt ein zweites Mal gezahlt.
    */
   expectedOpenStamp?: string;
+  /**
+   * Owner 12.11.2026 — der Tag, an dem WIRKLICH bezahlt wurde (JJJJ-MM-TT; ohne Angabe heute). Gilt für jede Teilzahlung
+   * und ein Überschuss-Guthaben; nie vor einem der bezahlten Belege (`chosenPaymentDay` + Belegtag).
+   */
+  paidAt?: string;
 }
 
 /** Der Fingerabdruck der offenen Posten eines Lieferanten — derselbe, den „Pay Supplier — Bulk" mitschickt. */
@@ -1608,21 +1643,37 @@ export function paySupplierInHouse(req: SupplierPayRequest, ctx: HouseCtx): Supp
   if (plan.excessF > 0 && req.confirmExcessAsCredit !== true) {
     throw nein('PAYMENT_EXCEEDS_OPEN', `the payment is ${fmt(plan.excessF)} more than everything open — choose explicitly to keep the rest as supplier credit, or lower the amount`);
   }
+  // Owner 12.11.2026 — ein gewählter Zahlungstag: geprüft (Bahrain-Heute, Eröffnung, VAT-Quartal) und gegen JEDEN Beleg,
+  // den diese Zahlung trifft — VOR dem ersten Schreiben, mit der Belegnummer im Satz. Ohne Tag: heute, wie bisher.
+  const paidAt = req.paidAt !== undefined && req.paidAt !== null && req.paidAt !== '' ? chosenPaymentDay(req.paidAt, ctx) : undefined;
+  if (paidAt) {
+    const byKey = new Map(items.map((i) => [`${i.kind}:${i.id}`, i]));
+    const getroffen = [...plan.allocations.map((a) => `${a.kind}:${a.id}`), ...(plan.excessF > 0 && plan.overflowPurchaseId ? [`purchase:${plan.overflowPurchaseId}`] : [])];
+    for (const k of getroffen) {
+      const it = byKey.get(k);
+      const tag = String(it?.date ?? '').slice(0, 10);
+      if (it && tag && paidAt < tag) {
+        throw nein(it.kind === 'expense' ? 'PAYMENT_DATE_BEFORE_EXPENSE' : 'PAYMENT_DATE_BEFORE_PURCHASE',
+          `the payment date (${paidAt}) is before ${it.number} (${tag}) — this payment would settle it; choose ${tag} or later, or allocate manually`);
+      }
+    }
+  }
+  const tagOpts = paidAt ? { paidAt } : {};
 
   const out: SupplierPaid = { supplierId: req.supplierId, amount: B(amountF), allocations: [], excessAmount: B(plan.excessF), excessTo: null, excessRef: null };
   for (const a of plan.allocations) {
     const paymentId = a.kind === 'expense'
-      ? recordExpensePaymentInHouse(a.id, B(a.amountF), method, ctx).paymentId
-      : recordPurchasePaymentInHouse(a.id, B(a.amountF), method, ctx).paymentId;
+      ? recordExpensePaymentInHouse(a.id, B(a.amountF), method, ctx, tagOpts).paymentId
+      : recordPurchasePaymentInHouse(a.id, B(a.amountF), method, ctx, tagOpts).paymentId;
     out.allocations.push({ kind: a.kind, id: a.id, amount: B(a.amountF), paymentId });
   }
   if (plan.excessF > 0) {
     if (plan.overflowPurchaseId) {
-      recordPurchasePaymentInHouse(plan.overflowPurchaseId, B(plan.excessF), method, ctx);
+      recordPurchasePaymentInHouse(plan.overflowPurchaseId, B(plan.excessF), method, ctx, tagOpts);
       out.excessTo = 'purchase_overpay';
       out.excessRef = plan.overflowPurchaseId;
     } else {
-      out.excessRef = grantStandaloneCreditInHouse(req.supplierId, B(plan.excessF), method, 'Supplier prepayment (PaySupplier overpayment)', ctx);
+      out.excessRef = grantStandaloneCreditInHouse(req.supplierId, B(plan.excessF), method, 'Supplier prepayment (PaySupplier overpayment)', ctx, paidAt);
       out.excessTo = 'standalone_credit';
     }
   }

@@ -19,6 +19,10 @@
 //     er kam NIE an.
 // Die Verteilung rechnet jetzt DERSELBE Planer wie das Haus (`planSupplierPayment`); am Ende rechnet
 // der Primary sie frisch nach. Die Maske schliesst NUR bei Erfolg.
+//
+// Owner 12.11.2026 — der ZAHLUNGSTAG ist wählbar (vorbelegt heute in Bahrain): er gilt für jede Teilzahlung und ein
+// Überschuss-Guthaben; nicht nach heute in Bahrain, nicht vor einem getroffenen Beleg, nicht vor dem Eröffnungsstichtag
+// (hier und am PC2 geprüft; das VAT-Quartal prüft der Primary). Guthaben einlösen trägt weiter den Tag der Einlösung.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -37,6 +41,8 @@ import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { WriteError } from '@/components/shared/WriteError';
 import { PAYABLES_OP, planSupplierPayment, sortOpenItems, supplierOpenStamp, type SupplierOpenItem } from '@/core/payables/payables-house';
 import { saveSupplierCredit, saveSupplierPay, viaWrites } from '@/core/payables/payables-save';
+import { todayIso } from '@/core/utils/business-date';
+import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
 
 interface PaySupplierModalProps {
   supplierId: string | null;
@@ -99,6 +105,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
 
   const [totalAmount, setTotalAmount] = useState<number>(0);
   const [method, setMethod] = useState<PayMethod>('bank');
+  const [payDate, setPayDate] = useState<string>(() => bahrainTodayIso());
   const [overrideMode, setOverrideMode] = useState(false);
   // Map<itemKey, allocation> — itemKey = `${kind}:${id}`
   const [manualAlloc, setManualAlloc] = useState<Record<string, number>>({});
@@ -179,6 +186,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     if (supplierId) {
       setTotalAmount(0);
       setMethod('bank');
+      setPayDate(bahrainTodayIso());
       setOverrideMode(false);
       setManualAlloc({});
       setFehler('');
@@ -203,6 +211,29 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     () => fromFils(Object.values(effectiveAllocation).reduce((s, v) => s + toFils(v || 0), 0)),
     [effectiveAllocation],
   );
+
+  // Owner 12.11.2026 — der jüngste Beleg, den diese Zahlung trifft (Zuordnung > 0; bei FIFO-Überschuss auch der
+  // Einkauf, der ihn trägt): früher darf der Zahlungstag nicht liegen — wie im Haus.
+  const juengsterBeleg = useMemo(() => {
+    let best: { number: string; date: string } | null = null;
+    const keys = Object.entries(effectiveAllocation).filter(([, v]) => toFils(v || 0) > 0).map(([k]) => k);
+    if (!overrideMode && fifoPlan.excessF > 0 && fifoPlan.overflowPurchaseId) keys.push(`purchase:${fifoPlan.overflowPurchaseId}`);
+    for (const k of keys) {
+      const it = openItems.find((i) => itemKey(i) === k);
+      const d = String(it?.date ?? '').slice(0, 10);
+      if (it && d && (!best || d > best.date)) best = { number: it.number, date: d };
+    }
+    return best;
+  }, [effectiveAllocation, overrideMode, fifoPlan, openItems]);
+  const minPayDate = juengsterBeleg && juengsterBeleg.date > OPENING_CUTOFF_DATE ? juengsterBeleg.date : OPENING_CUTOFF_DATE;
+  const payDateFehler = ((): string | null => {
+    if (!payDate) return 'The payment date is required';
+    const issue = paymentDateIssue(payDate, 'The payment date');
+    if (issue) return issue;
+    if (juengsterBeleg && payDate < juengsterBeleg.date) return `The payment date cannot be before ${juengsterBeleg.number} (${juengsterBeleg.date}), which this payment settles`;
+    if (payDate < OPENING_CUTOFF_DATE) return `The payment date cannot be before the opening cut-off (${OPENING_CUTOFF_DATE})`;
+    return null;
+  })();
 
   // ─────────────────────────────────────────────────────────────
   // Slice B — Credit-Methode: Snapshot, Maximum (Fils), reine Vorschau.
@@ -342,6 +373,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       ...(excessConfirmed ? { confirmExcessAsCredit: true } : {}),
       // PAYMENT FINAL VERIFICATION — der Stand, den diese Maske gezeigt hat; der Primary vergleicht ihn in seiner Transaktion.
       expectedOpenStamp: supplierOpenStamp(openItems),
+      // Der Standardtag des Primary ohne Angabe ist sein UTC-Heute — nur ein ANDERER Tag reist (alte Aufträge unverändert).
+      ...(payDate !== todayIso() ? { paidDate: payDate } : {}),
     });
     setRefreshTick(t => t + 1);
     if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
@@ -351,7 +384,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   // Credit-Modus: Betrag > 0 und <= maxApplicable (Fils, kein stilles Cappen). Sonst: bestehende Mathe.
   const canSubmit = isCredit
     ? (requestedFils > 0 && requestedFils <= maxApplicableFils)
-    : (totalAmount > 0 && (overrideMode
+    : (totalAmount > 0 && !payDateFehler && (overrideMode
         ? toFils(allocatedSum) === toFils(totalAmount)
         : allocatedSum > 0));
 
@@ -387,6 +420,24 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                   onChange={e => setTotalAmount(parseFloat(e.target.value) || 0)}
                   data-supplier-pay-amount
                 />
+                {!isCredit && (
+                  <div style={{ marginTop: 10 }}>
+                    <Input
+                      required
+                      label="PAYMENT DATE"
+                      type="date"
+                      value={payDate}
+                      max={bahrainTodayIso()}
+                      min={minPayDate}
+                      disabled={busy}
+                      onChange={e => setPayDate(e.target.value)}
+                      data-supplier-pay-date
+                    />
+                    {payDateFehler && (
+                      <span style={{ fontSize: 11, color: '#DC2626', marginTop: 6, display: 'block' }} data-supplier-pay-date-error>{payDateFehler}</span>
+                    )}
+                  </div>
+                )}
                 {isCredit && (
                   <div className="flex items-center justify-between" style={{ marginTop: 6, fontSize: 11, color: '#6B7280' }}>
                     <span>Max applicable: <span className="font-mono">{fmt(fromFils(maxApplicableFils))}</span></span>

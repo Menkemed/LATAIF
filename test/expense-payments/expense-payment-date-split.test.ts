@@ -1,5 +1,6 @@
 // ════════════════════════════════════════════════════════════════════════════
-// Owner 12.11.2026 — Ausgaben bezahlen: Zahlungstag wählbar, mehrere Zahlwege in einer Handlung (Haus, PC2, Banking)
+// Owner 12.11.2026 — Ausgaben und „Pay Supplier" bezahlen: Zahlungstag wählbar (Bahrain-Tag, Periodenschutz), mehrere
+// Zahlwege in einer Handlung (Haus, PC2, Banking, Lieferantensaldo).
 // Harness aus partner-ownership.test.ts.
 // Run: node test/expense-payments/expense-payment-date-split.test.ts
 /* eslint-disable @typescript-eslint/no-unused-vars -- übernommener Harness (nicht jeder Helfer wird hier gebraucht). */
@@ -205,12 +206,19 @@ void CTX; void cmd; void loadPartnersFor; void bankTransactionsFor; void purchas
 //   • eine Zahlung kann auf mehrere Zahlwege geteilt werden (z. B. 300 Cash + 200 Bank), jeder mit eigenem Tag —
 //     in EINER Handlung: alles oder nichts.
 // Hauptbuch (occurred_at), Zahlungszeilen (paid_at) und Banking (eine Zeile je Zahlung, Konto = Zahlweg) folgen dem Tag.
+// Dazu „Pay Supplier" (Sammelzahlung) mit Zahlungstag. Ein Zahlungstag ist ein Kalendertag in Bahrain (UTC+3): bis heute in
+// Bahrain, nicht vor dem Beleg, nicht vor dem Eröffnungsstichtag, nicht in einem eingereichten/bezahlten VAT-Quartal.
 // ════════════════════════════════════════════════════════════════════════════
 const payables = await import('../../src/core/payables/payables-house.ts');
 const pcmds = await import('../../src/core/bridge/payables-commands.ts');
 const repairs = await import('../../src/core/repairs/repair-house.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const DB = freshDb();
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+const pd = await import('../../src/core/utils/payment-date.ts');
+// Die Szenarien spielen im September 2026 — VOR der Eröffnung (15.10.). Wie andere Regeltests: früherer Stichtag;
+// E15 prüft mit der echten Owner-Konstante.
+setOpeningCutoffForTest('2026-01-01');
 const HEUTE = NOW.slice(0, 10); // 2026-09-26
 type Row = { amount: number; method: string; paidAt?: string };
 const ausgabe = (amount: number, expenseDate: string, category = 'Rent', supplierId?: string): string =>
@@ -277,6 +285,7 @@ const ausg = (ex: string) => S(DB.exec('SELECT paid_amount, status FROM expenses
   const ex = ausgabe(100, '2026-09-10');
   const v = nichts();
   ok(fehler(() => zahl(ex, 100, 'cash', '2026-09-28')) === 'PAYMENT_DATE_INVALID' && nichts() === v, 'E3 Tag in der Zukunft: PAYMENT_DATE_INVALID, nichts geschrieben');
+  ok(fehler(() => zahl(ex, 100, 'cash', '2026-09-27')) === 'PAYMENT_DATE_INVALID' && nichts() === v, 'E3 morgen in Bahrain (13:00 Ortszeit): PAYMENT_DATE_INVALID — kein Tag Spielraum für Zahlungen');
   ok(fehler(() => zahl(ex, 100, 'cash', '2026-09-09')) === 'PAYMENT_DATE_BEFORE_EXPENSE' && nichts() === v, 'E4 vor dem Ausgabetag: PAYMENT_DATE_BEFORE_EXPENSE, nichts geschrieben');
   ok(fehler(() => zahl(ex, 100, 'cash', '2026-02-30')) === 'PAYMENT_DATE_INVALID' && nichts() === v, 'E5 kein echter Tag (30.02.): PAYMENT_DATE_INVALID');
   ok(fehler(() => zahl(ex, 100, 'cash', '15.09.2026')) === 'PAYMENT_DATE_INVALID' && nichts() === v, 'E5 falsches Format: PAYMENT_DATE_INVALID');
@@ -411,6 +420,164 @@ const ausg = (ex: string) => S(DB.exec('SELECT paid_amount, status FROM expenses
   DB.run("UPDATE expenses SET paid_amount = 80, status = 'PAID', payment_method = 'cash' WHERE id = ?", [ex]);
   ok(S(bank(ex)) === S(['cash 80 2026-09-03']), `E13 Altbestand ohne Zahlungszeile: eine Zeile wie bisher (${S(bank(ex))})`);
   DB.run('UPDATE expenses SET paid_amount = 0, status = \'UNPAID\' WHERE id = ?', [ex]);
+}
+
+
+// ── E14 Bahrain-Zeitzone: der Zahlungstag ist ein Kalendertag in Bahrain (UTC+3), ohne Spielraum nach vorn ────────
+{
+  const t = Date.parse('2026-11-12T22:30:00.000Z'); // 13.11. 01:30 in Bahrain
+  ok(pd.bahrainTodayIso(t) === '2026-11-13' && pd.bahrainTodayIso(Date.parse('2026-11-12T20:59:00.000Z')) === '2026-11-12',
+    'E14 Bahrain-Heute: 01:30 Ortszeit ist schon der 13., 23:59 Ortszeit noch der 12.');
+  ok(pd.paymentDateIssue('2026-11-13', 'd', t) === null && /future/.test(pd.paymentDateIssue('2026-11-14', 'd', t) ?? ''), 'E14 Regel: heute in Bahrain ja, morgen nein');
+  ok(/future/.test(pd.paymentDateIssue('2026-11-13', 'd', Date.parse('2026-11-12T10:00:00.000Z')) ?? ''), 'E14 Regel: tagsüber ist morgen Zukunft (kein Tag Spielraum)');
+  ok(pd.paymentDateIssue('2026-02-30', 'd') !== null && pd.paymentDateIssue('12.11.2026', 'd') !== null && pd.paymentDateIssue(undefined, 'd') === null,
+    'E14 Regel: kein echter Tag / falsches Format abgewiesen, leer = heute');
+  const NACHT = { ...CTX, now: '2026-09-26T22:30:00.000Z' }; // 27.09. 01:30 in Bahrain
+  const ex = ausgabe(100, '2026-09-10');
+  const v = nichts();
+  ok(fehler(() => imHaus(() => payables.recordExpensePaymentInHouse(ex, 50, 'cash', NACHT, { paidAt: '2026-09-28' }))) === 'PAYMENT_DATE_INVALID' && nichts() === v,
+    'E14 nachts: der morgige Tag in Bahrain wird abgewiesen');
+  imHaus(() => payables.recordExpensePaymentInHouse(ex, 50, 'cash', NACHT, { paidAt: '2026-09-27' }));
+  imHaus(() => payables.recordExpensePaymentInHouse(ex, 50, 'bank', NACHT));
+  ok(S(zahlungen(ex)) === S([[50, 'bank', '2026-09-26'], [50, 'cash', '2026-09-27']]),
+    `E14 nachts: Bahrain-Heute (27.) gewählt = so gebucht; ohne Tag wie bisher der Standardtag des Primary (${S(zahlungen(ex))})`);
+}
+
+// ── E15 Periodenschutz: Eröffnungsstichtag (echte Owner-Konstante) und eingereichtes VAT-Quartal ─────────────────
+{
+  const ex = ausgabe(300, '2026-09-10');
+  const ohne = ausgabe(10, '2026-09-10');
+  const v = nichts();
+  setOpeningCutoffForTest(null);
+  const c1 = fehler(() => zahl(ex, 100, 'cash', '2026-09-15'));
+  ok(c1 === 'PAYMENT_DATE_BEFORE_OPENING' && nichts() === v, `E15 gewählter Tag vor dem Eröffnungsstichtag: abgewiesen (${c1})`);
+  const c1b = fehler(() => teil(ex, [{ amount: 100, method: 'cash' }, { amount: 100, method: 'bank', paidAt: '2026-09-15' }]));
+  ok(c1b === 'PAYMENT_DATE_BEFORE_OPENING' && nichts() === v, `E15 auch als Zeile einer geteilten Zahlung — nichts gebucht (${c1b})`);
+  zahl(ohne, 10, 'cash');
+  ok(ausg(ohne) === S([10, 'PAID']), 'E15 ohne gewählten Tag (heute) bleibt alles wie bisher');
+  setOpeningCutoffForTest('2026-01-01');
+  DB.run("INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, snapshot_json, created_at) VALUES ('vf-q3', 'branch-main', 2026, 3, ?, '{}', ?)", [NOW, NOW]);
+  const v2 = nichts();
+  const c2 = fehler(() => zahl(ex, 100, 'cash', '2026-09-15'));
+  ok(c2 === 'VAT_PERIOD_FILED' && nichts() === v2, `E15 gewählter Tag in einem eingereichten VAT-Quartal (Q3/2026): abgewiesen (${c2})`);
+  DB.run("DELETE FROM vat_filings WHERE id = 'vf-q3'");
+  zahl(ex, 300, 'cash', '2026-09-15');
+  ok(ausg(ex) === S([300, 'PAID']), 'E15 Quartal wieder offen: derselbe Tag geht');
+}
+
+// ── E16 „Pay Supplier" im Haus: ein Tag für alle Teilzahlungen; nie vor einem getroffenen Beleg ─────────────────────
+const lieferant = (id: string) => DB.run("INSERT INTO suppliers (id, branch_id, name, active, created_at, updated_at) VALUES (?, 'branch-main', ?, 1, ?, ?)",
+  [id, 'Lieferant ' + id, NOW, NOW]);
+const stempel = (sup: string): string => payables.supplierOpenStamp(payables.openSupplierItems(sup, 'branch-main'));
+const pay = (sup: string, amount: number, method: string, extra: Record<string, unknown> = {}) =>
+  imHaus(() => payables.paySupplierInHouse({ supplierId: sup, amount, method, mode: 'fifo', expectedOpenStamp: stempel(sup), ...extra } as never, CTX));
+const meldung = (fn: () => unknown): string => { try { fn(); return ''; } catch (e) { return String((e as Error).message); } };
+const apLief = (sup: string): number => r3(n(DB, "SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = 'ACCOUNTS_PAYABLE' AND counterparty_id = ?", [sup]));
+const kaufZahlungen = (pid: string): Array<[number, string, string]> =>
+  (DB.exec('SELECT amount, method, paid_at FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at, amount', [pid])[0]?.values ?? [])
+    .map((v) => [Number(v[0]), String(v[1]), String(v[2]).slice(0, 10)]);
+const kaufGeld = (pid: string): string[] => (DB.exec(`SELECT le.account, le.amount, le.occurred_at FROM ledger_entries le JOIN purchase_payments pp ON pp.id = le.source_id
+   WHERE le.source_module = 'PURCHASE_PAYMENT' AND pp.purchase_id = ? AND le.account != 'ACCOUNTS_PAYABLE' ORDER BY le.occurred_at, le.amount`, [pid])[0]?.values ?? [])
+  .map((v) => `${v[0]} ${Number(v[1])} ${String(v[2]).slice(0, 10)}`);
+const nichts2 = () => nichts() + S([n(DB, 'SELECT COUNT(*) FROM purchase_payments'), n(DB, 'SELECT COUNT(*) FROM supplier_credits')]);
+{
+  lieferant('sup-2');
+  const exA = ausgabe(100, '2026-09-05', 'Rent', 'sup-2');
+  const kauf = (await purchaseHouse.createPurchaseOnPrimary({ ...EINKAUF([ZEILE('pw2', 200)], 0), supplierId: 'sup-2', purchaseDate: '2026-09-08' })).id;
+  const kaufNr = s(DB, 'SELECT purchase_number FROM purchases WHERE id = ?', [kauf]);
+  const ap0 = apLief('sup-2');
+  const v = nichts2();
+  const m1 = meldung(() => pay('sup-2', 300, 'bank', { paidAt: '2026-09-07' }));
+  ok(fehler(() => pay('sup-2', 300, 'bank', { paidAt: '2026-09-07' })) === 'PAYMENT_DATE_BEFORE_PURCHASE' && m1.includes(kaufNr) && nichts2() === v,
+    `E16 Tag vor dem getroffenen Einkauf: abgewiesen mit Belegnummer, nichts gebucht (${m1.slice(0, 110)})`);
+  ok(fehler(() => pay('sup-2', 50, 'bank', { paidAt: '2026-09-04' })) === 'PAYMENT_DATE_BEFORE_EXPENSE' && nichts2() === v,
+    'E16 Tag vor der getroffenen Ausgabe: abgewiesen, nichts gebucht');
+  ok(fehler(() => pay('sup-2', 300, 'bank', { paidAt: '2026-09-27' })) === 'PAYMENT_DATE_INVALID' && nichts2() === v, 'E16 morgen in Bahrain: abgewiesen');
+  ok(fehler(() => pay('sup-2', 300, 'bank', { paidAt: '2026-9-10' })) === 'PAYMENT_DATE_INVALID' && nichts2() === v, 'E16 falsches Format: abgewiesen');
+  setOpeningCutoffForTest(null);
+  ok(fehler(() => pay('sup-2', 300, 'bank', { paidAt: '2026-09-10' })) === 'PAYMENT_DATE_BEFORE_OPENING' && nichts2() === v, 'E16 vor dem Eröffnungsstichtag: abgewiesen');
+  setOpeningCutoffForTest('2026-01-01');
+  DB.run("INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, snapshot_json, created_at) VALUES ('vf-q3b', 'branch-main', 2026, 3, ?, '{}', ?)", [NOW, NOW]);
+  ok(fehler(() => pay('sup-2', 300, 'bank', { paidAt: '2026-09-10' })) === 'VAT_PERIOD_FILED' && nichts2() === v, 'E16 im eingereichten VAT-Quartal: abgewiesen');
+  DB.run("DELETE FROM vat_filings WHERE id = 'vf-q3b'");
+  // FIFO 50 trifft nur die Ausgabe (05.09.) — der 06.09. liegt vor dem Einkauf (08.09.), der hier aber nicht bezahlt wird.
+  pay('sup-2', 50, 'cash', { paidAt: '2026-09-06' });
+  pay('sup-2', 250, 'bank', { paidAt: '2026-09-10' });
+  ok(S(zahlungen(exA)) === S([[50, 'cash', '2026-09-06'], [50, 'bank', '2026-09-10']]) && S(kaufZahlungen(kauf)) === S([[200, 'bank', '2026-09-10']]),
+    `E16 Zahlungshistorie: Ausgabe 50 Cash am 06.09. + 50 Bank am 10.09., Einkauf 200 Bank am 10.09. (${S(zahlungen(exA))} ${S(kaufZahlungen(kauf))})`);
+  ok(S(geld(exA)) === S(['CASH CREDIT 50 2026-09-06', 'BANK CREDIT 50 2026-09-10']) && S(kaufGeld(kauf)) === S(['BANK 200 2026-09-10']),
+    `E16 Hauptbuch am gewählten Tag (${S(geld(exA))} ${S(kaufGeld(kauf))})`);
+  ok(ap0 === 300 && apLief('sup-2') === 0, `E16 Lieferantensaldo (A/P) 300 → 0 (${ap0} → ${apLief('sup-2')})`);
+  const bk = BT().filter((t) => t.relatedEntityId === exA || t.relatedEntityId === kauf).map((t) => `${t.type} ${t.account} ${t.amount} ${String(t.date).slice(0, 10)}`).sort();
+  ok(S(bk) === S(['EXPENSE_OUT bank 50 2026-09-10', 'EXPENSE_OUT cash 50 2026-09-06', 'PURCHASE_OUT bank 200 2026-09-10']), `E16 Banking am Zahlungstag (${S(bk)})`);
+  abgleich('E16');
+}
+
+// ── E17 Überschuss mit Tag: Vorauszahlungs-Guthaben bzw. Überzahlung des Einkaufs am gewählten Tag ─────────────────────
+{
+  lieferant('sup-3');
+  const ex = ausgabe(100, '2026-09-05', 'Rent', 'sup-3');
+  const r = pay('sup-3', 150, 'cash', { paidAt: '2026-09-12', confirmExcessAsCredit: true });
+  const pre = (DB.exec("SELECT account, direction, amount, substr(occurred_at, 1, 10) FROM ledger_entries WHERE source_module = 'SUPPLIER_PREPAYMENT' AND source_id = ? ORDER BY account", [r.excessRef])[0]?.values ?? [])
+    .map((x) => x.join(' '));
+  ok(r.excessTo === 'standalone_credit' && S(zahlungen(ex)) === S([[100, 'cash', '2026-09-12']]) && S(pre) === S(['CASH CREDIT 50 2026-09-12', 'SUPPLIER_CREDIT DEBIT 50 2026-09-12']),
+    `E17 Vorauszahlung 50 am gewählten Tag (${S(pre)})`);
+  lieferant('sup-4');
+  const k = (await purchaseHouse.createPurchaseOnPrimary({ ...EINKAUF([ZEILE('pw3', 200)], 0), supplierId: 'sup-4', purchaseDate: '2026-09-08' })).id;
+  const r2 = pay('sup-4', 250, 'bank', { paidAt: '2026-09-14', confirmExcessAsCredit: true });
+  ok(r2.excessTo === 'purchase_overpay' && S(kaufZahlungen(k)) === S([[50, 'bank', '2026-09-14'], [200, 'bank', '2026-09-14']]) && S(kaufGeld(k)) === S(['BANK 50 2026-09-14', 'BANK 200 2026-09-14']),
+    `E17 Überzahlung des Einkaufs am gewählten Tag (${S(kaufZahlungen(k))})`);
+  abgleich('E17');
+}
+
+// ── E18 alter Auftrag ohne Tag: wie bisher heute ─────────────────────────────────────────────────────────────────────
+{
+  lieferant('sup-5');
+  const ex = ausgabe(70, '2026-09-05', 'Rent', 'sup-5');
+  pay('sup-5', 70, 'benefit');
+  ok(S(zahlungen(ex)) === S([[70, 'benefit', HEUTE]]) && S(geld(ex)) === S([`BENEFIT CREDIT 70 ${HEUTE}`]), 'E18 Pay Supplier ohne Tag: heute, wie bisher');
+}
+
+// ── E19 PC2 „suppliers.pay": paidDate, Wiederholung, alter Rumpf, strenger Rumpf ───────────────────────────────────
+{
+  lieferant('sup-6');
+  const ex = ausgabe(100, '2026-09-05', 'Rent', 'sup-6');
+  const ex2 = ausgabe(80, '2026-09-06', 'Rent', 'sup-6');
+  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000f1`;
+  const deps = () => ({ db: DB as never, begin: () => { setTestDatabase(DB as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => NOW });
+  const ident = (k: number) => ({ commandId: ID(k), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN', op: 'suppliers.pay', payloadHash: 'h' + k });
+  const run = async (k: number, body: unknown): Promise<{ kind: string; code?: string; replayed?: boolean }> => {
+    try { return await pcmds.runSupplierPay(deps() as never, ident(k) as never, body) as { kind: string; code?: string; replayed?: boolean }; }
+    catch (e) { return { kind: 'thrown', code: String((e as { code?: unknown }).code ?? '') }; }
+  };
+  const kopf = () => ({ supplierId: 'sup-6', mode: 'fifo', expectedOpenStamp: stempel('sup-6') });
+  const v = nichts2();
+  const a = await run(1, { ...kopf(), amount: 100, method: 'cash', paidAt: '2026-09-11' });
+  ok(a.code === 'PAYABLES_PAYLOAD_INVALID' && nichts2() === v, `E19 paidAt bestimmt der Client nicht (Feld heißt paidDate) (${S(a)})`);
+  const b = await run(2, { ...kopf(), amount: 100, method: 'cash', paidDate: '2099-01-01' });
+  ok(b.code === 'PAYABLES_PAYLOAD_INVALID' && nichts2() === v, `E19 Tag weit in der Zukunft: schon der Rumpf abgewiesen (${S(b)})`);
+  const c = await run(3, { ...kopf(), amount: 100, method: 'cash', paidDate: '2026-09-27' });
+  ok(c.kind === 'rejected' && c.code === 'PAYMENT_DATE_INVALID' && nichts2() === v, `E19 morgen in Bahrain (Uhr des Primary): abgewiesen (${S(c)})`);
+  const body = { ...kopf(), amount: 100, method: 'cash', paidDate: '2026-09-11' };
+  const x1 = await run(4, body);
+  const x2 = await run(4, body);
+  ok(x1.kind === 'ok' && x2.kind === 'ok' && x2.replayed === true && S(zahlungen(ex)) === S([[100, 'cash', '2026-09-11']]) && S(geld(ex)) === S(['CASH CREDIT 100 2026-09-11']),
+    `E19 PC2 mit paidDate: genau einmal, am gewählten Tag (${x1.kind}/${x2.kind}/${S(zahlungen(ex))})`);
+  const alt = await run(5, { ...kopf(), amount: 80, method: 'bank' });
+  ok(alt.kind === 'ok' && S(zahlungen(ex2)) === S([[80, 'bank', HEUTE]]), `E19 alter Rumpf ohne paidDate: angenommen, heute gebucht (${S(zahlungen(ex2))})`);
+  abgleich('E19');
+}
+
+// ── E20 SALES ohne Zahlungsrecht ───────────────────────────────────────────────────────────────────────────────────
+{
+  lieferant('sup-7');
+  ausgabe(40, '2026-09-05', 'Rent', 'sup-7');
+  const v = nichts2();
+  const sales = await registry.executeCommand('suppliers.pay',
+    { input: { supplierId: 'sup-7', amount: 40, method: 'cash', mode: 'fifo', expectedOpenStamp: stempel('sup-7'), paidDate: '2026-09-15' } },
+    { commandId: '00000098-0000-4000-8000-0000000000f1', tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'SALES', payloadHash: 'h98' } as never) as { kind: string; code?: string };
+  ok(sales.kind === 'business_error' && sales.code === 'PERMISSION_DENIED' && nichts2() === v, `E20 SALES: PERMISSION_DENIED, nichts gebucht (${S(sales)})`);
 }
 
 console.log(`\nexpense-payment-date-split: ${PASS} passed, ${fails.length} failed`);

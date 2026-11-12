@@ -35,6 +35,13 @@ import {
   PAYABLES_OP,
   type ExpenseCreateIntent, type PayTiming, type TemplateCreateIntent,
 } from './payables-house';
+import { paymentDateIssue } from '@/core/utils/payment-date';
+
+/** Owner 12.11.2026 — der gewählte Zahlungstag, schon HIER geprüft (auch am PC2, vor dem Senden): bis heute in Bahrain. */
+function tagFehlt<T>(paidDate: string | undefined, label = 'The payment date'): WriteOutcome<T> | null {
+  const issue = paymentDateIssue(paidDate, label);
+  return issue ? absage({ code: 'PAYMENT_DATE_INVALID', message: issue }) : null;
+}
 
 /** Was eine Maske von ihrer Schreibweiche braucht — `useSharedWrite` passt direkt, `useSharedWrites` ueber `viaWrites`. */
 export interface PayablesWrite<T> {
@@ -186,6 +193,8 @@ export async function saveExpensePayment(
   const nein = rechtFehlt<Result>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
   if (nein) return nein;
   if (!(F(amount) > 0)) return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'Payment amount must be positive.' });
+  const datum = tagFehlt<Result>(paidDate);
+  if (datum) return datum;
   const rev = seenRevision(expense);
   if (write.remote && rev === undefined) return ohneFassung();
   return speichern(write, {
@@ -208,6 +217,10 @@ export async function saveExpensePayments(
   if (nein) return nein;
   if (rows.length === 0 || rows.some((r) => !(F(r.amount) > 0))) {
     return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'every payment needs a positive amount' });
+  }
+  for (const [i, r] of rows.entries()) {
+    const datum = tagFehlt<Result>(r.paidDate, `Payment ${i + 1} date`);
+    if (datum) return datum;
   }
   const rev = seenRevision(expense);
   if (write.remote && rev === undefined) return ohneFassung();
@@ -350,6 +363,8 @@ export interface SupplierPayForm {
   confirmExcessAsCredit?: boolean;
   /** PAYMENT FINAL VERIFICATION — der Fingerabdruck der offenen Posten, die die Maske gezeigt hat. */
   expectedOpenStamp?: string;
+  /** Owner 12.11.2026 — der gewählte Zahlungstag (JJJJ-MM-TT); ohne Angabe bucht der Primary heute. */
+  paidDate?: string;
 }
 
 /** „Pay Supplier — Bulk": EINE Buchung ueber alle Posten; FIFO rechnet der Primary. */
@@ -357,15 +372,18 @@ export function saveSupplierPay(write: PayablesWrite<Result>, form: SupplierPayF
   const nein = rechtFehlt<Result>(PAYABLES_OP.SUPPLIERS_PAY);
   if (nein) return Promise.resolve(nein);
   if (!(F(form.amount) > 0)) return Promise.resolve(absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'the payment amount must be positive' }));
+  const datum = tagFehlt<Result>(form.paidDate);
+  if (datum) return Promise.resolve(datum);
   const allocations = form.mode === 'manual' ? (form.allocations ?? []).filter((a) => F(a.amount) > 0) : undefined;
   const req = {
     supplierId: form.supplierId, amount: form.amount, method: form.method, mode: form.mode, ...(allocations ? { allocations } : {}),
     ...(form.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
     ...(form.expectedOpenStamp ? { expectedOpenStamp: form.expectedOpenStamp } : {}),
   };
+  // Am PC2 heißt das Feld `paidDate` (`paidAt` bestimmt der Primary nie auf Zuruf); das Haus nimmt `paidAt`.
   return speichern(write, {
-    local: () => runOnPrimary(() => paySupplierInHouse(req, localHouseCtx()) as unknown as Result, supplierHier),
-    remote: () => ({ ...req }),
+    local: () => runOnPrimary(() => paySupplierInHouse({ ...req, ...(form.paidDate ? { paidAt: form.paidDate } : {}) }, localHouseCtx()) as unknown as Result, supplierHier),
+    remote: () => ({ ...req, ...(form.paidDate ? { paidDate: form.paidDate } : {}) }),
   }, supplierHier);
 }
 
