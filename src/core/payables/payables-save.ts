@@ -27,7 +27,7 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import {
   EXPENSE_EDIT_FIELDS, TEMPLATE_EDIT_FIELDS, localHouseCtx,
   expenseCreateIntent, expenseEditFields, templateCreateIntent, templateEditFields,
-  createExpenseFromIntent, updateExpenseInHouse, recordExpensePaymentInHouse,
+  createExpenseFromIntent, updateExpenseInHouse, recordExpensePaymentInHouse, recordExpensePaymentsInHouse,
   createTemplateInHouse, updateTemplateInHouse,
   recordPurchasePaymentInHouse, applyCreditToPurchaseInHouse,
   refundStandaloneCreditInHouse, paySupplierInHouse, applySupplierCreditToExpensesInHouse,
@@ -180,6 +180,8 @@ export async function saveExpenseUpdate(write: PayablesWrite<Result>, base: Expe
 /** „Record Payment" (ExpenseList, Lieferant, Reparatur, Auftrag — ein Modal). */
 export async function saveExpensePayment(
   write: PayablesWrite<Result>, expense: Expense, amount: number, method: string, partnerId?: string,
+  /** Owner 12.11.2026 — der gewählte Zahlungstag (JJJJ-MM-TT); ohne Angabe heute. */
+  paidDate?: string,
 ): Promise<WriteOutcome<Result>> {
   const nein = rechtFehlt<Result>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
   if (nein) return nein;
@@ -188,10 +190,35 @@ export async function saveExpensePayment(
   if (write.remote && rev === undefined) return ohneFassung();
   return speichern(write, {
     local: () => runOnPrimary(
-      () => recordExpensePaymentInHouse(expense.id, amount, method, localHouseCtx(), { expectedRevision: rev, ...(partnerId ? { partnerId } : {}) }) as unknown as Result,
+      () => recordExpensePaymentInHouse(expense.id, amount, method, localHouseCtx(), { expectedRevision: rev, ...(partnerId ? { partnerId } : {}), ...(paidDate ? { paidAt: paidDate } : {}) }) as unknown as Result,
       () => { expensesHier(); reloadLinkedExpenseViews(expense.id); },
     ),
-    remote: () => ({ expenseId: expense.id, expectedRevision: rev, amount, method, ...(partnerId ? { partnerId } : {}) }),
+    remote: () => ({ expenseId: expense.id, expectedRevision: rev, amount, method, ...(partnerId ? { partnerId } : {}), ...(paidDate ? { paidDate } : {}) }),
+  }, () => { expensesHier(); linkedViewsFern(expense); });
+}
+
+/**
+ * Owner 12.11.2026 — „Record Expense Payment" mit mehreren Zahlwegen (je Betrag, Weg und Tag): EINE Handlung, atomar am
+ * Primary; auf PC2 derselbe Befehl mit `payments`. Ein gewählter Tag reist nur mit, wenn er nicht heute ist.
+ */
+export async function saveExpensePayments(
+  write: PayablesWrite<Result>, expense: Expense, rows: ReadonlyArray<{ amount: number; method: string; paidDate?: string }>,
+): Promise<WriteOutcome<Result>> {
+  const nein = rechtFehlt<Result>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
+  if (nein) return nein;
+  if (rows.length === 0 || rows.some((r) => !(F(r.amount) > 0))) {
+    return absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'every payment needs a positive amount' });
+  }
+  const rev = seenRevision(expense);
+  if (write.remote && rev === undefined) return ohneFassung();
+  const zeilen = rows.map((r) => ({ amount: r.amount, method: r.method, ...(r.paidDate ? { paidDate: r.paidDate } : {}) }));
+  return speichern(write, {
+    local: () => runOnPrimary(
+      () => recordExpensePaymentsInHouse(expense.id, zeilen.map((z) => ({ amount: z.amount, method: z.method, ...(z.paidDate ? { paidAt: z.paidDate } : {}) })),
+        localHouseCtx(), { expectedRevision: rev }) as unknown as Result,
+      () => { expensesHier(); reloadLinkedExpenseViews(expense.id); },
+    ),
+    remote: () => ({ expenseId: expense.id, expectedRevision: rev, payments: zeilen }),
   }, () => { expensesHier(); linkedViewsFern(expense); });
 }
 

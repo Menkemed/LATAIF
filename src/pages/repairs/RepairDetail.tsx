@@ -1544,6 +1544,7 @@ export function RepairDetail() {
                                 // PayExpenseModal direkt aus Repair-Kontext.
                                 <button
                                   onClick={() => setPayExpenseId(l.expenseId!)}
+                                  data-repair-expense-pay={l.expenseId}
                                   className="cursor-pointer"
                                   style={{
                                     background: l.paymentStatus === 'PARTIALLY_PAID' ? 'rgba(217,119,6,0.08)' : 'rgba(15,15,16,0.04)',

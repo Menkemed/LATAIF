@@ -1,0 +1,505 @@
+// ════════════════════════════════════════════════════════════════════════════
+// Owner 12.11.2026 — Ausgaben bezahlen mit Zahlungstag und mehreren Zahlwegen. Zwei-App-E2E (Primary + PC2), Maus/Tastatur.
+// Run: node test/e2e/expense-pay-date-split.e2e.mjs
+//
+//   A  Primary: Ausgabenliste → „Record payment" ⇒ 300 Cash am 03.11. + „Add payment method" 200 Bank heute; zu viel gesperrt;
+//      Datenbank, Hauptbuch (Tag je Zahlung) und Banking (eine Zeile je Zahlung, Konto = Zahlweg).
+//   B  PC2: Reparatur (hybrid) → A/P-Chip ⇒ Tag vor der Werkstattkost abgewiesen; dann 150 Cash am 06.11. (paidDate).
+//   C  PC2: Ausgabenliste → geteilt 100 Benefit am 04.11. + 300 Cash heute ⇒ EIN Fernauftrag mit payments; Banking am PC2.
+//
+// PROZESS-ISOLATION (Gerüst aus b23-purchase-offset.e2e.mjs): gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf
+// gestartet hat oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
+// Die installierte Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 werden nie berührt. Nur künstliche Testdaten.
+// ════════════════════════════════════════════════════════════════════════════
+import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
+import { maus, tippe } from './_e2e-mouse.mjs';
+import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses, closeTestWindow, startedPids, clearTestClientPendingSaves } from './_e2e-process.mjs';
+import { execFileSync } from 'node:child_process';
+import { join } from 'node:path';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
+
+const IDENT = 'com.lataif.app.e2e';
+const CLIENT_IDENT = 'com.lataif.app.e2e.client';
+const APP_CDP = 9223, CLIENT_CDP = 9224, PORT = 3011;
+const APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif.exe');
+const CLIENT_APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif-e2e-client.exe');
+const OWNER_EMAIL = 'admin@lataif.com';
+const ONBOARD_PW = 'e2epass123';
+const OWNER_PW = 'eps-owner-' + Math.random().toString(36).slice(2);
+
+const RUN = join(os.tmpdir(), 'lataif-eps-split', 'run-' + Date.now());
+const REAL_APPDATA = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming');
+const APP_DATA_DIR = join(REAL_APPDATA, IDENT);
+const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
+const SERVER_DB = join(APP_DATA_DIR, 'lataif_sync_server.db');
+const SEED = join(process.cwd(), 'src-tauri', 'target', 'debug', 'examples', 'e2e_scope_seed.exe');
+const CLIENT_HOME = join(RUN, 'client-home');
+const CLIENT_APPDATA = join(CLIENT_HOME, 'Roaming');
+const CLIENT_DATA_DIR = join(CLIENT_APPDATA, CLIENT_IDENT);
+
+let PASS = 0, FAIL = 0; const fails = [];
+const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const S = (v) => JSON.stringify(v);
+const T0 = Date.now();
+const aufraeumen = () => { killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe'); };
+const WACHHUND = setTimeout(() => {
+  console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
+  aufraeumen();
+  process.exit(1);
+}, 40 * 60 * 1000);
+
+const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
+const clientEnv = () => ({
+  ...process.env,
+  APPDATA: CLIENT_APPDATA, LOCALAPPDATA: join(CLIENT_HOME, 'Local'),
+  TEMP: join(CLIENT_HOME, 'tmp'), TMP: join(CLIENT_HOME, 'tmp'),
+  LATAIF_E2E_SYNC_PORT: String(PORT),
+});
+function dbQ(file, sql, params = []) {
+  let db;
+  try { db = new DatabaseSync(file, { readOnly: true }); return db.prepare(sql).all(...params); }
+  catch (e) { console.log('      (db) ' + String(e)); return []; }
+  finally { try { db?.close(); } catch { /* zu */ } }
+}
+
+class CDP {
+  constructor(wsUrl) {
+    this.ws = new WebSocket(wsUrl); this.id = 0; this.pending = new Map();
+    this.ready = new Promise((res, rej) => { this.ws.addEventListener('open', res); this.ws.addEventListener('error', rej); });
+    this.ws.addEventListener('message', (e) => {
+      const m = JSON.parse(e.data);
+      if (m.id && this.pending.has(m.id)) {
+        const { res, rej } = this.pending.get(m.id); this.pending.delete(m.id);
+        m.error ? rej(new Error(m.error.message)) : res(m.result);
+      }
+    });
+  }
+  async send(method, params = {}) {
+    await this.ready; const id = ++this.id;
+    return new Promise((res, rej) => { this.pending.set(id, { res, rej }); this.ws.send(JSON.stringify({ id, method, params })); });
+  }
+  async ev(expr) {
+    const r = await this.send('Runtime.evaluate', { expression: `(async () => { ${expr} })()`, awaitPromise: true, returnByValue: true });
+    if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description || ''));
+    return r.result?.value;
+  }
+  close() { try { this.ws.close(); } catch { /* zu */ } }
+}
+
+async function attachOnly(cdpPort, budget = 60000) {
+  const end = Date.now() + budget; let page = null;
+  while (Date.now() < end) {
+    try {
+      const l = await (await fetch(`http://127.0.0.1:${cdpPort}/json/list`)).json();
+      page = l.find((t) => t.type === 'page' && /tauri\.localhost/.test(t.url) && t.webSocketDebuggerUrl);
+      if (page) break;
+    } catch { /* noch nicht oben */ }
+    await sleep(500);
+  }
+  if (!page) throw new Error('no CDP page on ' + cdpPort);
+  const c = new CDP(page.webSocketDebuggerUrl);
+  await c.send('Runtime.enable');
+  return c;
+}
+async function attach(cdpPort, exe, env) {
+  spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
+  return attachOnly(cdpPort, 120000);
+}
+const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
+const setVal = (c, sel, v) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO:'+${S(sel)}; const p=e.tagName==='SELECT'?HTMLSelectElement.prototype:(e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype); Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+async function click(c, sel) {
+  const r = await c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO'; if (e.disabled) return 'DISABLED'; e.click(); return 'OK';`);
+  if (r !== 'OK') throw new Error(`click ${sel} → ${r}`);
+}
+const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO:'+${S(t)}; if (b.disabled) return 'DISABLED'; b.click(); return 'OK';`);
+async function waitFor(c, sel, t = 45000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) { if (await exists(c, sel)) return true; await sleep(300); }
+  let seen = '(nichts)';
+  try { seen = String(await c.ev('return document.body.innerText.slice(0,300);')).replace(/\s+/g, ' '); } catch { /* egal */ }
+  throw new Error(`waitFor ${sel} — Bildschirm sagt: ${seen}`);
+}
+async function warteBis(c, ausdruck, t = 30000) {
+  const end = Date.now() + t;
+  while (Date.now() < end) { if (await c.ev(`return !!(${ausdruck});`)) return true; await sleep(350); }
+  return false;
+}
+async function waitInvoke(c) {
+  const end = Date.now() + 60000;
+  while (Date.now() < end) { if (await c.ev('return !!(window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);')) return; await sleep(400); }
+  throw new Error('no invoke');
+}
+const SHELL = 'a[href="/settings"]';
+
+// Beobachter am PC2: Fernaufträge und jeder Griff nach einer lokalen Datenbank.
+const BEOBACHTER = `
+  if (!window.__b1Installiert) {
+  window.__b1Installiert = true;
+  window.__cmds = []; window.__dbHits = [];
+  window.alert = () => {}; window.confirm = () => true;
+  const merke = (t) => window.__dbHits.push(String(t).slice(0, 200));
+  window.addEventListener('error', (e) => { if (/Database not initialized/.test(String(e.message))) merke(e.message); });
+  window.addEventListener('unhandledrejection', (e) => { if (/Database not initialized/.test(String(e.reason))) merke(e.reason); });
+  const of = window.fetch;
+  window.fetch = async (...a) => {
+    let url = '';
+    try { url = String(a[0] && a[0].url ? a[0].url : a[0]); } catch (e) { url = ''; }
+    if (/\\/api\\/command$/.test(url)) {
+      try { const body = JSON.parse((a[1] && a[1].body) || '{}'); window.__cmds.push({ op: body.op, payload: body.payload }); } catch (e) { /* kein Rumpf */ }
+    }
+    return of(...a);
+  };
+  }
+`;
+const DIALOGE_PRIMARY = 'window.alert = () => {}; window.confirm = () => true; return 1;';
+
+function insert(db, tabelle, werte) {
+  const spalten = db.prepare(`PRAGMA table_info(${tabelle})`).all();
+  const namen = spalten.map((r) => r.name);
+  const daten = { ...werte };
+  for (const sp of spalten) {
+    if (!sp.notnull || sp.dflt_value !== null || sp.pk) continue;
+    if (daten[sp.name] !== undefined) continue;
+    const t = String(sp.type || '').toUpperCase();
+    daten[sp.name] = /INT|REAL|NUM/.test(t) ? 0 : (/_at$|date/i.test(sp.name) ? new Date().toISOString() : '');
+  }
+  const nutzbar = Object.keys(daten).filter((k) => namen.includes(k));
+  db.prepare(`INSERT INTO ${tabelle} (${nutzbar.join(', ')}) VALUES (${nutzbar.map(() => '?').join(', ')})`).run(...nutzbar.map((k) => daten[k]));
+}
+
+let steuer = null;
+async function beobachterLegen() {
+  steuer = await attachOnly(CLIENT_CDP, 30000);
+  await steuer.send('Page.enable', {});
+  await steuer.send('Page.addScriptToEvaluateOnNewDocument', { source: BEOBACHTER });
+}
+async function lade(c, route) {
+  await steuer.ev(`location.replace(${S(route)}); return 1;`);
+  try { c.close(); } catch { /* zu */ }
+  await sleep(3200);
+  return attachOnly(CLIENT_CDP, 30000);
+}
+const geh = (p, route) => p.ev(`history.pushState({}, '', ${S(route)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+async function gehFrisch(p, route) { await geh(p, '/tasks'); await sleep(700); await geh(p, route); await sleep(900); }
+const kommandos = (c) => c.ev('return JSON.stringify(window.__cmds || []);').then((s) => JSON.parse(s || '[]'));
+const treffer = (c) => c.ev('return JSON.stringify(window.__dbHits || []);').then((s) => JSON.parse(s || '[]'));
+const spuelen = (p) => p.ev('return await window.__TAURI_INTERNALS__.invoke("flush_database_now").catch((e)=>String(e));');
+const zahl = (sql, params = []) => Number(Object.values(dbQ(BIZ_DB, sql, params)[0] || { n: 0 })[0] || 0);
+let primary = null, client = null;
+
+/** Der Primary spielt seine eigenen Änderungen als Echo wieder ein — vor jedem Vergleich zur Ruhe kommen lassen. */
+async function syncRuhe(t = 75000) {
+  const end = Date.now() + t;
+  let angestossen = false;
+  while (Date.now() < end) {
+    await spuelen(primary);
+    const offen = zahl('SELECT COUNT(*) AS n FROM sync_changelog WHERE synced = 0');
+    const stand = zahl('SELECT COALESCE(MAX(last_sync_id), 0) AS m FROM sync_cursor');
+    const kopf = Number(dbQ(SERVER_DB, 'SELECT COALESCE(MAX(id), 0) AS m FROM sync_changelog')[0]?.m || 0);
+    if (offen === 0 && stand >= kopf) return true;
+    if (!angestossen) {
+      angestossen = true;
+      await geh(primary, '/settings?tab=sync');
+      if (await warteBis(primary, "[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Sync Now')", 8000)) await clickText(primary, 'Sync Now');
+    }
+    await sleep(700);
+  }
+  console.log('      (sync) der Echo-Lauf des Primary kam nicht zur Ruhe');
+  return false;
+}
+
+/** Echte Maus über CDP: Element in die Mitte holen, Mitte anfahren, drücken, loslassen. */
+async function mausKlick(c, sel) {
+  const p = await c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return null; if (e.disabled) return 'DISABLED'; e.scrollIntoView({block:'center'}); const r=e.getBoundingClientRect(); return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2});`);
+  if (!p || p === 'DISABLED') return 'NO-MAUS:' + sel + (p ? ':DISABLED' : '');
+  const { x, y } = JSON.parse(p);
+  await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+  await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  return 'OK';
+}
+async function foto(c, name, sel) {
+  const dir = process.env.LATAIF_SHOTS || '';
+  if (!dir) return;
+  try {
+    const fsx = await import('node:fs');
+    fsx.mkdirSync(dir, { recursive: true });
+    if (sel) { await c.ev(`document.querySelector(${S(sel)})?.scrollIntoView({ block: 'start' }); return 1;`); await sleep(250); }
+    const r = await c.send('Page.captureScreenshot', { format: 'png' });
+    fsx.writeFileSync(join(dir, name + '.png'), Buffer.from(r.data, 'base64'));
+  } catch (e) { console.log('  (Foto ' + name + ' nicht möglich: ' + String(e).slice(0, 80) + ')'); }
+}
+
+
+
+
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Die Welt des Laufs (künstliche Testdaten): Werkstatt „Eps Workshop".
+//   A  Ausgabe Rent 500 (Tag 01.11., offen)         — Primary: geteilt 300 Cash am 03.11. + 200 Bank heute
+//   B  Ausgabe Utilities 400 (Tag 02.11., offen)    — PC2: geteilt 100 Benefit am 04.11. + 300 Cash heute
+//   R  Reparatur (hybrid) mit Werkstattzeile 150 (Ausgabe Tag 05.11., offen) — PC2 über den A/P-Chip, Tag 06.11.
+// ══════════════════════════════════════════════════════════════════════════════
+const SUP = 'eps-sup';
+const EXP_A = 'eps-exp-a', EXP_B = 'eps-exp-b', EXP_R = 'eps-exp-r', REP = 'eps-rep';
+const NUM_A = 'EXP-2026-000971', NUM_B = 'EXP-2026-000972', NUM_R = 'EXP-2026-000973';
+function seed() {
+  const db = new DatabaseSync(BIZ_DB);
+  try {
+    const branch_id = (db.prepare('SELECT id FROM branches LIMIT 1').get() || {}).id || 'branch-main';
+    const now = new Date().toISOString();
+    insert(db, 'suppliers', { id: SUP, branch_id, name: 'Eps Workshop', active: 1, created_at: now, updated_at: now });
+    let nr = 970000;
+    const le = (id, acc, dir, amount, sid, date) => insert(db, 'ledger_entries', { id, branch_id, entry_no: ++nr, transaction_id: 'eps-tx-' + sid,
+      occurred_at: `${date}T09:00:00.000Z`, recorded_at: now, account: acc, direction: dir, amount, currency: 'BHD', counterparty_type: 'SUPPLIER',
+      counterparty_id: SUP, source_module: 'EXPENSE', source_id: sid, created_by: 'e2e', created_at: now });
+    const ausgabe = (id, num, category, amount, date, extra = {}) => {
+      insert(db, 'expenses', { id, branch_id, expense_number: num, category, amount, paid_amount: 0, payment_method: 'bank', expense_date: date,
+        description: 'E2E ' + category, supplier_id: SUP, status: 'PENDING', created_at: now, revision: 1, ...extra });
+      le(`eps-le-${id}-d`, category === 'Inventory' ? 'INVENTORY' : 'EXPENSES_OPERATING', 'DEBIT', amount, id, date);
+      le(`eps-le-${id}-c`, 'ACCOUNTS_PAYABLE', 'CREDIT', amount, id, date);
+    };
+    ausgabe(EXP_A, NUM_A, 'Rent', 500, '2026-11-01');
+    ausgabe(EXP_B, NUM_B, 'Utilities', 400, '2026-11-02');
+    let cat = (db.prepare('SELECT id FROM categories WHERE branch_id = ? LIMIT 1').get(branch_id) || {}).id;
+    if (!cat) { cat = 'eps-cat'; insert(db, 'categories', { id: cat, branch_id, name: 'Watches', icon: 'w', color: '#000', created_at: now, updated_at: now }); }
+    insert(db, 'products', { id: 'eps-prod', branch_id, category_id: cat, brand: 'Rolex', name: 'Datejust', sku: 'EPS-1', quantity: 1, condition: 'Pre-Owned',
+      scope_of_delivery: '[]', purchase_price: 1000, purchase_currency: 'BHD', stock_status: 'in_stock', tax_scheme: 'MARGIN', images: '[]', attributes: '{}',
+      source_type: 'OWN', created_at: now, updated_at: now });
+    insert(db, 'purchases', { id: 'eps-pur', branch_id, purchase_number: 'PUR-2026-000971', supplier_id: SUP, status: 'PAID', total_amount: 1000,
+      paid_amount: 1000, remaining_amount: 0, purchase_date: '2026-10-20', created_at: now, updated_at: now });
+    insert(db, 'purchase_lines', { id: 'eps-pl', purchase_id: 'eps-pur', product_id: 'eps-prod', description: 'Datejust', quantity: 1, unit_price: 1000,
+      line_total: 1000, position: 0, tax_scheme: 'ZERO', vat_rate: 0, vat_amount: 0 });
+    insert(db, 'stock_lots', { id: 'eps-lot', branch_id, product_id: 'eps-prod', purchase_id: 'eps-pur', purchase_line_id: 'eps-pl', qty_total: 1, qty_remaining: 1,
+      unit_cost: 1000, status: 'ACTIVE', acquired_at: '2026-10-20T09:00:00.000Z', created_at: now });
+    insert(db, 'customers', { id: 'eps-kunde', branch_id, first_name: 'Eva', last_name: 'Repair', phone: '+973 3300 0471', created_at: now, updated_at: now });
+    insert(db, 'repairs', { id: REP, branch_id, repair_number: 'REP-2026-000971', customer_id: 'eps-kunde', product_id: 'eps-prod', lot_id: 'eps-lot', status: 'in_progress',
+      repair_scope: 'OWN', repair_type: 'hybrid', workshop_supplier_id: SUP, issue_description: 'Service + polish', received_at: '2026-11-05T09:00:00.000Z',
+      created_at: now, updated_at: now });
+    ausgabe(EXP_R, NUM_R, 'Inventory', 150, '2026-11-05', { related_module: 'repair', related_entity_id: REP, description: 'Workshop' });
+    insert(db, 'repair_lines', { id: 'eps-rl', branch_id, repair_id: REP, position: 1, supplier_id: SUP, work_type: 'service', description: 'Service',
+      cost_amount: 150, expense_id: EXP_R, status: 'OPEN', created_at: now, updated_at: now });
+  } finally { db.close(); }
+}
+const HEUTE = () => new Date().toISOString().slice(0, 10);
+const zahlungen = (ex) => dbQ(BIZ_DB, 'SELECT amount, method, substr(paid_at, 1, 10) AS tag FROM expense_payments WHERE expense_id = ? ORDER BY paid_at, amount DESC', [ex])
+  .map((r) => `${Number(r.amount)} ${r.method} ${r.tag}`);
+const geld = (ex) => dbQ(BIZ_DB, `SELECT le.account, le.amount, substr(le.occurred_at, 1, 10) AS tag FROM ledger_entries le JOIN expense_payments ep ON ep.id = le.source_id
+  WHERE le.source_module = 'EXPENSE_PAYMENT' AND ep.expense_id = ? AND le.account != 'ACCOUNTS_PAYABLE' ORDER BY le.occurred_at, le.account`, [ex])
+  .map((r) => `${r.account} ${Number(r.amount)} ${r.tag}`);
+const ausgabeZeile = (ex) => dbQ(BIZ_DB, 'SELECT paid_amount, status FROM expenses WHERE id = ?', [ex])[0] || {};
+async function dateiBis(pruefe, ms = 30000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { await spuelen(primary).catch(() => null); if (pruefe()) return true; await sleep(700); }
+  return false;
+}
+const text = (c, sel) => c.ev(`return (document.querySelector(${S(sel)})?.textContent || '').replace(/\\s+/g, ' ').trim();`);
+const wert = (c, sel) => c.ev(`return document.querySelector(${S(sel)})?.value ?? null;`);
+const aktiv = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return e ? getComputedStyle(e).borderColor : null;`);
+const zeile = (i, feld) => `[data-expense-pay-row="${i}"] [data-expense-pay-${feld}]`;
+const methode = (i, m) => `[data-expense-pay-row="${i}"] [data-expense-pay-method="${m}"]`;
+const bankZeilen = (c, num) => c.ev(`return JSON.stringify([...document.querySelectorAll('div')]
+  .filter((d) => d.style.gridTemplateColumns === '100px 120px 80px 1fr 110px 40px' && (d.children[3]?.textContent || '').includes(${S(num)}))
+  .map((d) => [d.children[0].textContent.trim(), d.children[2].textContent.replace(/[^A-Za-z]/g, ''), (d.children[4]?.textContent || '').replace(/[^0-9.]/g, '')]).sort());`)
+  .then((x) => JSON.parse(x || '[]'));
+
+try {
+  assertE2eClientBinary(CLIENT_APP);
+  const fremdVorher = foreignProcesses('lataif.exe').map((p) => p.pid).sort();
+  aufraeumen(); await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
+  clearTestClientPendingSaves();
+  for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
+  if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+  console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
+
+  primary = await attach(APP_CDP, APP, appEnv());
+  await waitInvoke(primary);
+  await waitFor(primary, '[data-first-run-gate], input[type="email"], input[placeholder="e.g. Al-Khalifa Luxury"]', 90000);
+  if (await exists(primary, '[data-first-run-new]')) { await click(primary, '[data-first-run-new]'); await sleep(1500); }
+  await waitFor(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"], input[type="email"]', 60000);
+  if (await exists(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]')) {
+    await setVal(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'CA Co');
+    await setVal(primary, 'input[placeholder="e.g. Main Store"]', 'CA Branch');
+    await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="Full name"]');
+    await setVal(primary, 'input[placeholder="Full name"]', 'CA Admin');
+    await setVal(primary, 'input[placeholder="you@company.com"]', OWNER_EMAIL);
+    await setVal(primary, 'input[placeholder="Choose a password"]', ONBOARD_PW);
+    await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="10"]');
+    await setVal(primary, 'input[placeholder="10"]', '10');
+    await primary.ev("[...document.querySelectorAll('button')].find(b=>b.textContent.includes('Start Using LATAIF'))?.click(); return 1;");
+  }
+  await waitFor(primary, SHELL, 60000);
+  await spuelen(primary).catch(() => null);
+  await sleep(1200);
+  const onboardingPid = startedPids().pop();
+  primary.close(); primary = null;
+  await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
+  seed();
+  execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
+
+  primary = await attach(APP_CDP, APP, appEnv());
+  await waitInvoke(primary);
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
+  await waitFor(primary, SHELL, 90000);
+  await primary.ev(DIALOGE_PRIMARY);
+  await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
+  {
+    const end = Date.now() + 60000; let oben = false;
+    while (Date.now() < end) {
+      try { if ((await fetch(`http://127.0.0.1:${PORT}/api/health`)).ok) { oben = true; break; } } catch { /* noch nicht */ }
+      await sleep(500);
+    }
+    ok(oben, 'SETUP der Primary antwortet auf dem Netz');
+  }
+  client = await attach(CLIENT_CDP, CLIENT_APP, clientEnv());
+  await waitInvoke(client);
+  await client.ev('localStorage.clear(); return 1;');
+  await client.ev('location.reload(); return 1;'); await sleep(3500);
+  client.close(); client = await attachOnly(CLIENT_CDP);
+  await waitFor(client, '[data-first-run-gate]', 90000);
+  await click(client, '[data-first-run-connect]');
+  await waitFor(client, '[data-first-run-server]', 20000);
+  await setVal(client, '[data-first-run-server]', `127.0.0.1:${PORT}`);
+  await click(client, '[data-first-run-connect-go]');
+  await sleep(3500);
+  client.close(); client = await attachOnly(CLIENT_CDP);
+  await waitFor(client, 'input[type="password"]', 60000);
+  await setVal(client, 'input[type="email"]', OWNER_EMAIL);
+  await setVal(client, 'input[type="password"]', OWNER_PW);
+  await click(client, '[data-client-signin]');
+  await waitFor(client, SHELL, 90000);
+  ok(true, 'CONNECT frischer PC2 ohne Datenbank, Anmeldung');
+  await beobachterLegen();
+
+  await syncRuhe();
+
+  // ── A Primary: Ausgabenliste → „Record payment" ⇒ 300 Cash am 03.11. + „Add payment method" ⇒ 200 Bank heute ───────
+  {
+    await gehFrisch(primary, '/expenses');
+    await waitFor(primary, `[data-expense-pay-open="${EXP_A}"]`, 45000);
+    ok(await mausKlick(primary, `[data-expense-pay-open="${EXP_A}"]`) === 'OK', 'A Primary: Maus auf „Record payment" an Ausgabe A');
+    await waitFor(primary, '[data-expense-pay-save]', 15000);
+    ok(await wert(primary, zeile(0, 'amount')) === '500' && await wert(primary, zeile(0, 'date')) === HEUTE(),
+      `A Vorbelegung: offener Betrag 500, Tag heute (${await wert(primary, zeile(0, 'amount'))} / ${await wert(primary, zeile(0, 'date'))})`);
+    const minMax = await primary.ev(`const e=document.querySelector(${S(zeile(0, 'date'))}); return e ? e.min + '|' + e.max : '';`);
+    ok(minMax.startsWith('2026-11-01|'), `A Datumsfeld: frühestens der Ausgabetag, spätestens heute (+1) (${minMax})`);
+    ok(await tippe(primary, zeile(0, 'amount'), '300') === 'OK', 'A Tastatur: 300');
+    ok(await setVal(primary, zeile(0, 'date'), '2026-11-03') === 'OK', 'A Zahlungstag 03.11.');
+    ok(await mausKlick(primary, methode(0, 'cash')) === 'OK', 'A Maus: Cash');
+    ok(await mausKlick(primary, '[data-expense-pay-add]') === 'OK', 'A Maus auf „Add payment method"');
+    await waitFor(primary, zeile(1, 'amount'), 10000);
+    ok(await wert(primary, zeile(1, 'amount')) === '200' && await aktiv(primary, methode(1, 'bank')) !== await aktiv(primary, methode(1, 'cash')),
+      `A zweite Zeile: Rest 200 vorbelegt, ein anderer Zahlweg (Bank) gewählt (${await wert(primary, zeile(1, 'amount'))})`);
+    const summe = await text(primary, '[data-expense-pay-sum]');
+    ok(/Total of 2 payments/.test(summe) && /500\.000/.test(summe), `A Summe beider Zahlungen 500 (${summe})`);
+    ok(await tippe(primary, zeile(1, 'amount'), '250') === 'OK', 'A Tastatur: zu viel (250)');
+    await warteBis(primary, "document.querySelector('[data-expense-pay-too-much]')", 5000);
+    ok(await exists(primary, '[data-expense-pay-too-much]') && await primary.ev("return document.querySelector('[data-expense-pay-save]').disabled;") === true,
+      'A mehr als offen: Hinweis, „Record Payment" gesperrt');
+    ok(await tippe(primary, zeile(1, 'amount'), '200') === 'OK', 'A Tastatur: zurück auf 200');
+    await warteBis(primary, "!document.querySelector('[data-expense-pay-too-much]')", 5000);
+    await foto(primary, 'eps-a-primary-split');
+    ok(await mausKlick(primary, '[data-expense-pay-save]') === 'OK', 'A Maus auf „Record Payment"');
+    await dateiBis(() => zahlungen(EXP_A).length === 2);
+    ok(S(zahlungen(EXP_A)) === S(['300 cash 2026-11-03', `200 bank ${HEUTE()}`]), `A Datenbank: zwei Zahlungen je Zahlweg und Tag (${S(zahlungen(EXP_A))})`);
+    ok(S(geld(EXP_A)) === S(['CASH 300 2026-11-03', `BANK 200 ${HEUTE()}`]), `A Hauptbuch: Cash am 03.11., Bank heute (${S(geld(EXP_A))})`);
+    const a = ausgabeZeile(EXP_A);
+    ok(Number(a.paid_amount) === 500 && a.status === 'PAID', `A Ausgabe bezahlt (${S(a)})`);
+    await warteBis(primary, "!document.querySelector('[data-expense-pay-save]')", 10000);
+    await gehFrisch(primary, '/banking');
+    await warteBis(primary, `document.body.innerText.includes(${S(NUM_A)})`, 20000);
+    const bz = await bankZeilen(primary, NUM_A);
+    ok(S(bz) === S([['2026-11-03', 'Cash', '300.000'], [HEUTE(), 'Bank', '200.000']].sort()), `A Banking: zwei Zeilen — Cash 300 am 03.11., Bank 200 heute (${S(bz)})`);
+    await foto(primary, 'eps-a-primary-banking');
+  }
+
+  // ── B PC2: Reparatur (hybrid) → A/P-Chip „Unpaid · Pay" ⇒ Tag vor der Ausgabe abgewiesen, dann 150 Cash am 06.11. ────
+  {
+    await syncRuhe();
+    client = await lade(client, `/repairs/${REP}`);
+    await waitFor(client, `[data-repair-expense-pay="${EXP_R}"]`, 45000);
+    ok(await mausKlick(client, `[data-repair-expense-pay="${EXP_R}"]`) === 'OK', 'B PC2: Maus auf den A/P-Chip der Werkstattzeile');
+    await waitFor(client, '[data-expense-pay-save]', 15000);
+    ok(await wert(client, zeile(0, 'amount')) === '150', 'B Vorbelegung 150');
+    ok(await mausKlick(client, methode(0, 'cash')) === 'OK', 'B Maus: Cash');
+    ok(await setVal(client, zeile(0, 'date'), '2026-11-04') === 'OK', 'B Tag 04.11. (vor der Werkstattkost 05.11.)');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment').length;
+    ok(await mausKlick(client, '[data-expense-pay-save]') === 'OK', 'B Maus auf „Record Payment"');
+    await warteBis(client, "/cannot be before the expense date/.test(document.body.innerText)", 20000);
+    ok(/cannot be before the expense date/.test(await client.ev('return document.body.innerText;')) && zahlungen(EXP_R).length === 0
+      && await exists(client, '[data-expense-pay-save]'), 'B Primary weist ab („cannot be before the expense date"), Maske bleibt offen, nichts gebucht');
+    ok(await setVal(client, zeile(0, 'date'), '2026-11-06') === 'OK', 'B Tag 06.11.');
+    await foto(client, 'eps-b-pc2-repair-date');
+    ok(await mausKlick(client, '[data-expense-pay-save]') === 'OK', 'B Maus auf „Record Payment"');
+    await dateiBis(() => zahlungen(EXP_R).length === 1);
+    ok(S(zahlungen(EXP_R)) === S(['150 cash 2026-11-06']) && S(geld(EXP_R)) === S(['CASH 150 2026-11-06']),
+      `B Werkstatt bezahlt am gewählten Tag: Zahlung und Hauptbuch 06.11. (${S(zahlungen(EXP_R))} ${S(geld(EXP_R))})`);
+    const r = ausgabeZeile(EXP_R);
+    ok(Number(r.paid_amount) === 150 && r.status === 'PAID', `B Werkstattkost bezahlt (${S(r)})`);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment');
+    const letzte = cmds.at(-1)?.payload || {};
+    ok(cmds.length === vor + 2 && letzte.paidDate === '2026-11-06' && letzte.amount === 150 && letzte.method === 'cash' && letzte.payments === undefined && letzte.paidAt === undefined,
+      `B PC2 schickt EINE Zahlung mit paidDate (kein paidAt, keine payments) (${S(letzte)})`);
+    await warteBis(client, "!document.querySelector('[data-expense-pay-save]')", 10000);
+    await warteBis(client, `!document.querySelector('[data-repair-expense-pay="${EXP_R}"]')`, 20000);
+    await foto(client, 'eps-b-pc2-repair-paid');
+  }
+
+  // ── C PC2: Ausgabenliste → geteilt 100 Benefit am 04.11. + 300 Cash heute — EIN Fernauftrag mit payments ─────────────
+  {
+    await syncRuhe();
+    client = await lade(client, '/expenses');
+    await waitFor(client, `[data-expense-pay-open="${EXP_B}"]`, 45000);
+    ok(await mausKlick(client, `[data-expense-pay-open="${EXP_B}"]`) === 'OK', 'C PC2: Maus auf „Record payment" an Ausgabe B');
+    await waitFor(client, '[data-expense-pay-save]', 15000);
+    ok(await tippe(client, zeile(0, 'amount'), '100') === 'OK', 'C Tastatur: 100');
+    ok(await mausKlick(client, methode(0, 'benefit')) === 'OK', 'C Maus: Benefit');
+    ok(await setVal(client, zeile(0, 'date'), '2026-11-04') === 'OK', 'C Tag 04.11.');
+    ok(await mausKlick(client, '[data-expense-pay-add]') === 'OK', 'C Maus auf „Add payment method"');
+    await waitFor(client, zeile(1, 'amount'), 10000);
+    ok(await wert(client, zeile(1, 'amount')) === '300', `C zweite Zeile: Rest 300 vorbelegt (${await wert(client, zeile(1, 'amount'))})`);
+    ok(await mausKlick(client, methode(1, 'cash')) === 'OK', 'C Maus: Cash in Zeile 2');
+    await foto(client, 'eps-c-pc2-split');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment').length;
+    ok(await mausKlick(client, '[data-expense-pay-save]') === 'OK', 'C Maus auf „Record Payment"');
+    await dateiBis(() => zahlungen(EXP_B).length === 2);
+    ok(S(zahlungen(EXP_B)) === S(['100 benefit 2026-11-04', `300 cash ${HEUTE()}`]) && S(geld(EXP_B)) === S(['BENEFIT 100 2026-11-04', `CASH 300 ${HEUTE()}`]),
+      `C Datenbank und Hauptbuch: Benefit 100 am 04.11., Cash 300 heute (${S(zahlungen(EXP_B))} ${S(geld(EXP_B))})`);
+    const b = ausgabeZeile(EXP_B);
+    ok(Number(b.paid_amount) === 400 && b.status === 'PAID', `C Ausgabe bezahlt (${S(b)})`);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'expenses.record_payment');
+    const p = cmds.at(-1)?.payload || {};
+    ok(cmds.length === vor + 1 && Array.isArray(p.payments) && p.payments.length === 2 && p.amount === undefined && p.method === undefined
+      && p.payments[0].paidDate === '2026-11-04' && p.payments[0].method === 'benefit' && p.payments[1].paidDate === undefined && p.payments[1].method === 'cash',
+      `C PC2 schickt EINEN Auftrag mit payments (Tag nur, wo nicht heute) (${S(p)})`);
+    await warteBis(client, "!document.querySelector('[data-expense-pay-save]')", 10000);
+    client = await lade(client, '/banking');
+    await warteBis(client, `document.body.innerText.includes(${S(NUM_B)})`, 30000);
+    const bz = await bankZeilen(client, NUM_B);
+    ok(S(bz) === S([['2026-11-04', 'Benefit', '100.000'], [HEUTE(), 'Cash', '300.000']].sort()), `C Banking am PC2: Benefit 100 am 04.11., Cash 300 heute (${S(bz)})`);
+    await foto(client, 'eps-c-pc2-banking');
+    ok(S(await treffer(client)) === '[]', 'C PC2 griff nie nach einer lokalen Datenbank');
+  }
+
+} catch (e) {
+  ok(false, 'ABBRUCH: ' + (e && e.stack ? e.stack.split('\n').slice(0, 4).join(' | ') : String(e)));
+} finally {
+  clearTimeout(WACHHUND);
+  try { client?.close(); } catch { /* zu */ }
+  try { primary?.close(); } catch { /* zu */ }
+  try { steuer?.close(); } catch { /* zu */ }
+  aufraeumen();
+}
+console.log(`\nexpense-pay-date-split e2e: ${PASS} passed, ${FAIL} failed (${Math.round((Date.now() - T0) / 1000)} s)`);
+if (FAIL) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
+console.log('EXPENSE_PAY_DATE_SPLIT_E2E_PROVED');
+process.exit(0);

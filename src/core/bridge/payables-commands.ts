@@ -17,6 +17,7 @@
 //     Zielwert `active`, kein Umschalter; der Guthaben-Modus von „Pay Supplier" ist `suppliers.apply_credit`.
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { businessDateIssue } from '@/core/utils/business-date';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
@@ -27,7 +28,7 @@ import { assertHouseBranch } from './remote-create-support';
 import {
   PAYABLES_OP, PayablesRejected, EXPENSE_EDIT_FIELDS, TEMPLATE_EDIT_FIELDS,
   expenseCreateIntent, expenseEditFields, templateCreateIntent, templateEditFields,
-  createExpenseFromIntent, updateExpenseInHouse, recordExpensePaymentInHouse,
+  createExpenseFromIntent, updateExpenseInHouse, recordExpensePaymentInHouse, recordExpensePaymentsInHouse,
   createTemplateInHouse, updateTemplateInHouse,
   recordPurchasePaymentInHouse, applyCreditToPurchaseInHouse,
   refundStandaloneCreditInHouse, paySupplierInHouse, applySupplierCreditToExpensesInHouse,
@@ -139,13 +140,44 @@ export function parseExpenseUpdate(raw: unknown): { expenseId: string; expectedR
   return { expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision), fields };
 }
 
-export function parseExpensePayment(raw: unknown): { expenseId: string; expectedRevision: number; amount: number; method: string; partnerId?: string } {
-  const r = strict(raw, ['expenseId', 'expectedRevision', 'amount', 'method', 'partnerId']);
+/** Owner 12.11.2026 — der gewählte Zahlungstag (JJJJ-MM-TT, nicht in der Zukunft); ohne Angabe bucht der Primary heute. */
+function paidDateOf(v: unknown): string | undefined {
+  if (v === undefined) return undefined;
+  const issue = businessDateIssue(v, 'Payment date');
+  if (issue || typeof v !== 'string' || v === '') throw new PayablesPayloadError(issue || 'Payment date is not a valid date');
+  return v;
+}
+
+export interface ExpensePaymentCommand {
+  expenseId: string; expectedRevision: number; amount: number; method: string; partnerId?: string; paidDate?: string;
+  /** Owner 12.11.2026 — mehrere Zahlwege in EINER Handlung (statt amount/method). */
+  payments?: Array<{ amount: number; method: string; paidDate?: string }>;
+}
+
+export function parseExpensePayment(raw: unknown): ExpensePaymentCommand {
+  const r = strict(raw, ['expenseId', 'expectedRevision', 'amount', 'method', 'partnerId', 'paidDate', 'payments']);
+  const kopf = { expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision) };
+  if (r.payments !== undefined) {
+    // Entweder eine Zahlung (amount/method) ODER mehrere (payments) — nie beides; ein Partner zahlt nicht geteilt.
+    if (r.amount !== undefined || r.method !== undefined || r.paidDate !== undefined || r.partnerId !== undefined) {
+      throw new PayablesPayloadError('send either amount/method or payments, not both');
+    }
+    if (!Array.isArray(r.payments) || r.payments.length === 0 || r.payments.length > 5) {
+      throw new PayablesPayloadError('payments must list 1 to 5 payments');
+    }
+    const payments = r.payments.map((x, i) => {
+      const z = strict(x, ['amount', 'method', 'paidDate'], `payment ${i + 1}`);
+      const tag = paidDateOf(z.paidDate);
+      return { amount: numberOf(z.amount, 'amount'), method: idOf(z.method, 'method'), ...(tag ? { paidDate: tag } : {}) };
+    });
+    return { ...kopf, amount: 0, method: '', payments };
+  }
+  const tag = paidDateOf(r.paidDate);
   return {
-    expenseId: idOf(r.expenseId, 'expenseId'), expectedRevision: revisionOf(r.expectedRevision),
-    amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'),
+    ...kopf, amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'),
     // v0.8.101 S3 — nur beim Zahlweg 'partner': der Partner, der die Werkstatt direkt bezahlt hat.
     ...(r.partnerId !== undefined ? { partnerId: idOf(r.partnerId, 'partnerId') } : {}),
+    ...(tag ? { paidDate: tag } : {}),
   };
 }
 
@@ -282,8 +314,12 @@ export const runExpenseUpdate: Run = (deps, identity, raw) => {
 
 export const runExpensePayment: Run = (deps, identity, raw) => {
   const req = parseExpensePayment(raw);
+  if (req.payments) {
+    const rows = req.payments.map((x) => ({ amount: x.amount, method: x.method, ...(x.paidDate ? { paidAt: x.paidDate } : {}) }));
+    return lauf(deps, identity, (ctx) => recordExpensePaymentsInHouse(req.expenseId, rows, ctx, { expectedRevision: req.expectedRevision }));
+  }
   return lauf(deps, identity, (ctx) => recordExpensePaymentInHouse(req.expenseId, req.amount, req.method, ctx,
-    { expectedRevision: req.expectedRevision, ...(req.partnerId ? { partnerId: req.partnerId } : {}) }));
+    { expectedRevision: req.expectedRevision, ...(req.partnerId ? { partnerId: req.partnerId } : {}), ...(req.paidDate ? { paidAt: req.paidDate } : {}) }));
 };
 
 export const runTemplateCreate: Run = (deps, identity, raw) => {

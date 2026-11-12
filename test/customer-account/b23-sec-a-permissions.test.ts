@@ -450,7 +450,8 @@ marker('B23_SEC_CLOSE_REMOTE_PROVED');
   const pc = codeOf(src('src/pages/purchases/PurchaseCreate.tsx'));
   const sd = codeOf(src('src/pages/suppliers/SupplierDetail.tsx'));
   const cd = codeOf(src('src/pages/consignments/ConsignmentDetail.tsx'));
-  ok(/disabled=\{amount <= 0 \|\| zahlen\.busy \|\| !perm\.canRecordPayments\}/.test(pem) && /data-expense-pay-no-right/.test(pem), 'A6 Maske: „Record Payment" der Ausgabe nur mit perm.canRecordPayments');
+  // Owner 12.11.2026 — die Maske hat Zeilen (Tag, mehrere Zahlwege): gesperrt bei ungültiger Zeile, zu viel, laufend oder ohne Recht.
+  ok(/disabled=\{ungueltig \|\| zuViel \|\| zahlen\.busy \|\| !perm\.canRecordPayments\}/.test(pem) && /data-expense-pay-no-right/.test(pem), 'A6 Maske: „Record Payment" der Ausgabe nur mit perm.canRecordPayments');
   ok(/disabled=\{t !== 'later' && !perm\.canRecordPayments\}/.test(el) && /const payTiming: PayTiming = perm\.canRecordPayments \? payTimingWahl : 'later';/.test(el),
     'A6 Maske: „Pay now"/„Partial" nur mit perm.canRecordPayments, sonst „Pay later"');
   ok(/\{!perm\.canRecordPayments \? \(\s*<p[^>]*data-purchase-pay-no-right/.test(pc), 'A6 Maske: Zahlungen beim Anlegen eines Einkaufs nur mit perm.canRecordPayments');

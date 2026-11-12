@@ -555,7 +555,19 @@ export function recordExpensePaymentInHouse(
   if (payF > remainingF) {
     throw nein('EXPENSE_OVERPAYMENT', `the payment (${fmt(payF)}) is more than what is open on this expense (${fmt(remainingF)})`);
   }
-  const paidAt = opts.paidAt ? isoDateOf(opts.paidAt, 'PAYMENT_DATE_INVALID', 'the payment date') : dayOf(ctx.now);
+  // Owner 12.11.2026 — der Tag, an dem WIRKLICH bezahlt wurde (in „Record Expense Payment" wählbar; ohne Angabe heute):
+  // ein echter Tag, nicht in der Zukunft (business-date, ein Tag Spielraum), nicht vor dem Tag der Ausgabe (wie beim Einkauf).
+  let paidAt = dayOf(ctx.now);
+  if (opts.paidAt !== undefined && opts.paidAt !== null && opts.paidAt !== '') {
+    paidAt = isoDateOf(opts.paidAt, 'PAYMENT_DATE_INVALID', 'the payment date');
+    const issue = businessDateIssue(paidAt, 'The payment date', Date.parse(ctx.now) || Date.now());
+    if (issue) throw nein('PAYMENT_DATE_INVALID', issue);
+    const ausgabeTag = String(row.expense_date ?? '').slice(0, 10);
+    if (ausgabeTag && paidAt < ausgabeTag) {
+      throw nein('PAYMENT_DATE_BEFORE_EXPENSE',
+        `the payment date (${paidAt}) cannot be before the expense date (${ausgabeTag}) — if the cost was earlier, correct the expense date first`);
+    }
+  }
   const paid = B(payF);
   const newPaid = B(F(row.paid_amount) + payF);
   const status = computeExpenseSettlement(Number(row.amount), newPaid, creditPaid, String(row.status)).status;
@@ -599,6 +611,47 @@ export function recordExpensePaymentInHouse(
     expenseId, paymentId, amount: paid, paidAmount: newPaid, remainingAmount: B(remainingF - payF),
     status, revision: revisionOf('expenses', expenseId),
   };
+}
+
+/** Owner 12.11.2026 — höchstens so viele Zahlwege in EINER Zahlung (Cash, Bank, Benefit, je mit eigenem Tag). */
+export const EXPENSE_SPLIT_MAX = 5;
+
+export interface ExpensePaymentRow { amount: number; method: string; paidAt?: string }
+export interface ExpensePaymentsPaid { expenseId: string; payments: ExpensePaid[]; paidAmount: number; remainingAmount: number; status: string; revision: number }
+
+/**
+ * Owner 12.11.2026 — „Record Expense Payment" mit MEHREREN Zahlwegen (z. B. 300 Cash + 200 Bank, je mit eigenem Tag):
+ * EINE Handlung, atomar in der Transaktion des Aufrufers — scheitert eine Zeile, gibt es keine. Jede Zeile ist eine
+ * gewöhnliche Ausgabenzahlung (dieselbe Prüfung, Buchung und Anzeige wie einzeln). Die gesehene Fassung gilt für den
+ * Stand VOR der ersten Zeile; die Summe darf den offenen Rest nicht übersteigen. Ein Partner zahlt hier nicht (eigener Weg).
+ */
+export function recordExpensePaymentsInHouse(
+  expenseId: string, rows: ReadonlyArray<ExpensePaymentRow>, ctx: HouseCtx, opts: { expectedRevision?: number } = {},
+): ExpensePaymentsPaid {
+  assertHouseBooks();
+  if (!Array.isArray(rows) || rows.length === 0) throw nein('PAYMENT_ROWS_REQUIRED', 'add at least one payment');
+  if (rows.length > EXPENSE_SPLIT_MAX) throw nein('PAYMENT_ROWS_TOO_MANY', `at most ${EXPENSE_SPLIT_MAX} payment methods in one payment`);
+  const row = liveExpense(expenseId, ctx.branchId);
+  assertSeen('expenses', expenseId, opts.expectedRevision);
+  let sumF = 0;
+  for (const [i, r] of rows.entries()) {
+    if (typeof r?.amount !== 'number' || !Number.isFinite(r.amount) || F(r.amount) <= 0) {
+      throw nein('PAYMENT_AMOUNT_INVALID', `payment ${i + 1}: the amount must be positive`);
+    }
+    if (r.method === PARTNER_DIRECT_PAY_METHOD) throw nein('PAYMENT_METHOD_INVALID', 'a partner payment is recorded on its own, not in a split payment');
+    methodOf(r.method);
+    sumF += F(r.amount);
+  }
+  const remainingF = Math.max(0, F(row.amount) - F(row.paid_amount) - F(creditPaidForExpense(expenseId)));
+  if (sumF > remainingF) {
+    throw nein('EXPENSE_OVERPAYMENT', `the payments together (${fmt(sumF)}) are more than what is open on this expense (${fmt(remainingF)})`);
+  }
+  const payments = rows.map((r, i) => recordExpensePaymentInHouse(expenseId, r.amount, r.method, ctx, {
+    ...(i === 0 ? { expectedRevision: opts.expectedRevision } : {}),
+    ...(r.paidAt ? { paidAt: r.paidAt } : {}),
+  }));
+  const last = payments[payments.length - 1];
+  return { expenseId, payments, paidAmount: last.paidAmount, remainingAmount: last.remainingAmount, status: last.status, revision: last.revision };
 }
 
 // ── Dauerauftraege ──────────────────────────────────────────────────────────

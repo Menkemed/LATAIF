@@ -419,7 +419,8 @@ const vorRechnung = (db: Db): string => { void db; return anlegen({ ...ORD2, dep
     && ap(db) === 0 && sc(db) === 10 && saldo(db, 'INVENTORY') === r3(inv0 - 25),
     `K5 teilweise bezahlt löschen + Rückforderung: Zeile weg, Ausgabe storniert, Zahlung bleibt, 10 Rückforderung, Lager −25 (${S(r)})`);
   ok(abgleich(db) === '', `K5 Abgleich nach Löschen (${abgleich(db)})`);
-  const out5 = loadBankingFor(RCTX).transactions.filter((t: { id: string }) => t.id === `exp-${exp}`);
+  // Owner 12.11.2026 — Banking zeigt eine Zeile je Zahlung (id exp-<Ausgabe>-<Zahlung>): nach der Ausgabe filtern.
+  const out5 = loadBankingFor(RCTX).transactions.filter((t: { relatedEntityId?: string; type?: string }) => t.relatedEntityId === exp && t.type === 'EXPENSE_OUT');
   ok(out5.length === 1 && Number(out5[0].amount) === 10 && out5[0].flow === 'out',
     `K5 Banking: der echte Abfluss 10 der gelöschten Zeile bleibt sichtbar (${S(out5)})`);
   const blk = orderDeleteBlocker(oid);

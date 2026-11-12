@@ -933,7 +933,9 @@ marker('CENTRAL_UI_R6D_PAYABLES_CLIENT_NO_LOCAL_WRITE_PROVED');
 // ══ §15 — Oberfläche: jede Maske ein Anschluss ══════════════════════════════
 {
   const pe = codeOf(src('src/components/expenses/PayExpenseModal.tsx'));
-  ok(/saveExpensePayment\(zahlen, exp, amount, method\)/.test(pe) && !/recordExpensePayment\(/.test(pe) && /data-expense-pay-save/.test(pe) && /data-expense-pay-amount/.test(pe) && /data-expense-pay-method/.test(pe),
+  // Owner 12.11.2026 — eine Zeile über saveExpensePayment (mit Tag), mehrere Zahlwege über saveExpensePayments: je EINE Buchung.
+  ok(/saveExpensePayment\(zahlen, exp, rows\[0\]\.amount, rows\[0\]\.method,/.test(pe) && /saveExpensePayments\(zahlen, exp, rows\.map\(/.test(pe)
+    && !/recordExpensePayments?InHouse\(|recordExpensePayment\(/.test(pe) && /data-expense-pay-save/.test(pe) && /data-expense-pay-amount/.test(pe) && /data-expense-pay-method/.test(pe),
     'UI PayExpenseModal: EINE Buchung — erbt ExpenseList, SupplierDetail, RepairDetail, OrderDetail');
   const el = codeOf(src('src/pages/expenses/ExpenseList.tsx'));
   ok(/saveExpenseCreate\(/.test(el) && /saveTemplateCreate\(/.test(el) && /saveTemplateUpdate\(/.test(el) && /saveExpenseUpdate\(/.test(el)

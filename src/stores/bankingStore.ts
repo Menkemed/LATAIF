@@ -383,21 +383,61 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
        AND NOT (category = 'CardFees' AND related_module IN ('invoice', 'order', 'repair'))`,
     [branchId]
   );
+  // Owner 12.11.2026 — eine Zeile JE ZAHLUNG (Tag = Zahlungstag, Konto = ihr Zahlweg): eine Ausgabe kann geteilt
+  // (z. B. Cash + Bank) und an einem früheren Tag bezahlt sein. Vorher stand der ganze Betrag am Ausgabetag auf dem
+  // zuletzt benutzten Zahlweg. Die Summe je Ausgabe bleibt genau wie bisher (paid_amount ohne Partnerzahlung); was keine
+  // Zahlungszeile hat (Altbestand), bleibt EINE Zeile am Ausgabetag mit dem Zahlweg der Ausgabe.
+  // Guthaben ('credit') und Partner-Direktzahlung ('partner') sind kein Geld von LATAIF.
+  const expensePays = new Map<string, Record<string, unknown>[]>();
+  for (const p of safeQuery('expense_payments',
+    `SELECT ep.id, ep.expense_id, ep.amount, ep.method, ep.paid_at, ep.created_at
+       FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id
+      WHERE e.branch_id = ? AND COALESCE(ep.method, '') NOT IN ('partner', 'credit')
+      ORDER BY ep.paid_at, ep.created_at, ep.id`,
+    [branchId]
+  )) {
+    const k = String(p.expense_id);
+    const list = expensePays.get(k);
+    if (list) list.push(p); else expensePays.set(k, [p]);
+  }
+  const r3 = (x: number): number => Math.round(x * 1000) / 1000;
   for (const e of expenses) {
     // v0.8.101 S3 — nur das, was LATAIF selbst gezahlt hat; die Direktzahlung eines Partners bewegt kein Geld von LATAIF.
-    if (!((Number(e.paid_amount) || 0) > 0.0005)) continue;
+    let rest = r3(Number(e.paid_amount) || 0);
+    if (!(rest > 0.0005)) continue;
     const date = (e.expense_date as string) || '';
+    const description = `${e.expense_number || ''} · ${e.category || ''}${e.description ? ' · ' + e.description : ''}`;
+    for (const p of expensePays.get(String(e.id)) ?? []) {
+      if (!(rest > 0.0005)) break;
+      const amount = r3(Math.min(Number(p.amount) || 0, rest));
+      if (!(amount > 0.0005)) continue;
+      rest = r3(rest - amount);
+      const payDate = (p.paid_at as string) || date;
+      txs.push({
+        id: `exp-${e.id}-${p.id}`,
+        date: payDate,
+        createdAt: (p.created_at as string) || payDate,
+        type: 'EXPENSE_OUT',
+        account: accountFor(p.method as string),
+        amount,
+        flow: 'out',
+        relatedModule: 'expense',
+        relatedEntityId: e.id as string,
+        description,
+      });
+    }
+    if (!(rest > 0.0005)) continue;
     txs.push({
       id: `exp-${e.id}`,
       date,
       createdAt: (e.created_at as string) || date,
       type: 'EXPENSE_OUT',
       account: accountFor(e.payment_method as string),
-      amount: (e.paid_amount as number) || 0,
+      amount: rest,
       flow: 'out',
       relatedModule: 'expense',
       relatedEntityId: e.id as string,
-      description: `${e.expense_number || ''} · ${e.category || ''}${e.description ? ' · ' + e.description : ''}`,
+      description,
     });
   }
 
