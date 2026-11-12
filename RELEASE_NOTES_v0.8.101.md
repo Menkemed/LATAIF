@@ -46,11 +46,16 @@ Items bought together with a partner: costs, VAT and repairs are shared by the a
   - When a return is cancelled, its unused supplier credit is removed; its bookings remain.
 - **Partners:** production with a joint item and correcting a joint purchase line stay blocked.
 
-**Before you update:**
+**Before you update the main computer:**
 
-1. Check that **Unresolved saves** on the second computer is empty. Clarify open entries; do not remove them blindly. Partner money entered there by a sales user is refused after the update.
-2. Stop entering anything on the phone.
-3. Close the second computer, then the main computer.
-4. Make a full archive copy of both databases, the complete media folder (all files, no cleanup) and the key files, and check it.
+1. Stop entering anything on the phone.
+2. Close the main computer. Keep the second computer closed.
+3. Make a full archive copy of both databases, the complete media folder (all files, no cleanup) and the key files, and check it.
 
-**Update** the main computer first and the second computer straight after it. Cancel return, Partner paid directly and Settle Balance with partners need v0.8.101 on both computers.
+**Update** the main computer (from v0.8.100). The second computer may stay on its older version (for example v0.8.97) as long as it is not used; keep it closed.
+
+Before the second computer is used again:
+- Check **Unresolved saves** on it. Clarify open entries; do not remove them blindly. Partner money that a sales user entered there is refused by v0.8.101.
+- Then update it to v0.8.101.
+
+Cancel return, Partner paid directly and Settle Balance with partners need v0.8.101 on both computers. A second computer on an older version does not offer them.
