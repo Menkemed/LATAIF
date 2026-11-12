@@ -267,15 +267,24 @@ function welt(): Db {
   return db;
 }
 const WERKSTATT = { repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 100 };
+// Owner 12.11.2026 — eigene Kopfkosten entstehen beim Anlegen nicht mehr (neue Kosten sind Kostenzeilen). Die Kopfbuchung
+// gilt weiter für Altbestand: der Testaufbau setzt die eigenen Kosten wie bei einer älteren Reparatur direkt an den Datensatz.
+const { getDatabase: aktuelleDb } = await import('../sync/_db-shim.ts');
+async function mitKopf(form: Record<string, unknown>, anlegen: (f: Record<string, unknown>) => Promise<string>): Promise<string> {
+  const kopf = form.repairType !== 'external' ? Number(form.internalCost) || 0 : 0;
+  const id = await anlegen(kopf > 0 ? { ...form, internalCost: undefined } : form);
+  if (kopf > 0) { aktuelleDb().run('UPDATE repairs SET internal_cost = ? WHERE id = ?', [kopf, id]); reload(); }
+  return id;
+}
 async function eigene(form: Record<string, unknown>): Promise<string> {
-  return (await house.createRepairOnPrimary({
-    repairScope: 'OWN', productId: 'p1', lotId: 'lot-p1', issueDescription: 'Service', ...form,
-  } as never)).id;
+  return mitKopf(form, async (f) => (await house.createRepairOnPrimary({
+    repairScope: 'OWN', productId: 'p1', lotId: 'lot-p1', issueDescription: 'Service', ...f,
+  } as never)).id);
 }
 async function kunde(form: Record<string, unknown>): Promise<string> {
-  return (await house.createRepairOnPrimary({
-    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Service', chargeToCustomer: 300, taxScheme: 'ZERO', ...form,
-  } as never)).id;
+  return mitKopf(form, async (f) => (await house.createRepairOnPrimary({
+    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Service', chargeToCustomer: 300, taxScheme: 'ZERO', ...f,
+  } as never)).id);
 }
 async function status(weg: Weg, db: Db, id: string, st: string, x?: string): Promise<Aus> {
   rs().loadRepairs();
@@ -423,7 +432,10 @@ const M: Record<string, boolean> = {};
   for (const weg of ['P', 'C'] as Weg[]) {
     const db = welt();
     const id = await eigene({ repairType: 'internal', internalCost: 100 });
-    amStore(() => { rs().loadRepairs(); rs().updateRepair(id, { repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 100 }); });
+    // Owner 12.11.2026 — die Werkstatt im Kopf ohne Zeile entsteht nicht mehr über „Save" (der Voranschlag würde Gebühr):
+    // der Altbestand steht wie bei einer älteren Reparatur direkt am Datensatz.
+    db.run("UPDATE repairs SET repair_type = 'external', workshop_supplier_id = 'sup-1', estimated_cost = 100 WHERE id = ?", [id]);
+    reload();
     const lines = n(db, 'SELECT COUNT(*) FROM repair_lines WHERE repair_id = ?', [id]);
     const a = await status(weg, db, id, 'in_progress');
     const c = await status(weg, db, id, 'ready');

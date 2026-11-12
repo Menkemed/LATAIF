@@ -640,13 +640,21 @@ for (const weg of ['lokal', 'fern'] as const) {
   const a = await reparatur({ issueDescription: 'Quick', chargeToCustomer: 90 });
   reload();
   const rA = useRepairStore.getState().getRepair(a)!;
-  const neu = { ...rA, chargeToCustomer: 120, actualCost: 25 };
+  // Owner 12.11.2026 — „Actual" von Hand an einer neuen Reparatur ohne Zeilen wäre neue Kopfkosten: Nein (lokal == fern);
+  // die eigenen Kosten 25 sind eine In-house-Zeile (mit Kostendatum), der Preis wird wie bisher gespeichert.
+  const mitKopf = { ...rA, chargeToCustomer: 120, actualCost: 25 };
+  const kopfNein = weg === 'lokal' ? await nein(house.updateRepairOnPrimary(a, mitKopf, rev(db, a)))
+    : code(await cmd.runRepairUpdate(deps(db), identity(nx(), 'repairs.update'), rules.repairEditBody(a, rev(db, a), rA, mitKopf)));
+  ok(kopfNein === 'REPAIR_COST_AS_LINE' && n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [a]) === 0,
+    `QUICK (${weg}) „Actual" 25 von Hand an einer neuen Reparatur: Nein, keine Kopfkosten (${kopfNein})`);
+  const neu = { ...rA, chargeToCustomer: 120 };
   if (weg === 'lokal') await house.updateRepairOnPrimary(a, neu, rev(db, a));
   else { const o = await cmd.runRepairUpdate(deps(db), identity(nx(), 'repairs.update'), rules.repairEditBody(a, rev(db, a), rA, neu)) as Out; ok(o.kind === 'ok', `QUICK (fern) Beträge angenommen (${o.code || 'ok'})`); }
+  await house.addRepairLineOnPrimary(a, { workType: 'polishing', costAmount: 25 });
   reload();
-  ok(n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [a]) === 120 && n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [a]) === 25
+  ok(n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [a]) === 120 && n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [a]) === 0
     && n(db, 'SELECT margin FROM repairs WHERE id = ?', [a]) === 95,
-    `QUICK (${weg}) Preis 90→120, Kosten 25: Marge 95 abgeleitet`);
+    `QUICK (${weg}) Preis 90→120, eigene Kosten 25 als In-house-Zeile: Marge 95 abgeleitet`);
   // Arbeitszeile an einer Werkstatt: ab „in Arbeit" gebucht — Betrag ändern folgt der Ausgabe, Werkstatt wechseln nicht.
   await house.addRepairLineOnPrimary(a, { supplierId: 'sup-1', workType: 'service', description: 'Werk', costAmount: 30 });
   await schritt(a, 'in_progress');
@@ -675,7 +683,7 @@ for (const weg of ['lokal', 'fern'] as const) {
   const r2 = useRepairStore.getState().getRepair(a)!;
   const offen = useRepairStore.getState().getRepairLines(a).filter((l) => l.status === 'OPEN').reduce((x, l) => x + l.costAmount, 0);
   const { computeRepairTotalCost } = await import('../../src/stores/repairStore.ts');
-  ok(offen === 35 && computeRepairTotalCost(r2, offen) === 60, `QUICK (${weg}) Summen: Zeilen 35 + eigene 25 = 60 (${computeRepairTotalCost(r2, offen)})`);
+  ok(offen === 60 && computeRepairTotalCost(r2, offen) === 60, `QUICK (${weg}) Summen: Werkstattzeile 35 + In-house-Zeile 25 = 60 (${computeRepairTotalCost(r2, offen)})`);
   // Abgerechnet: der Preis steht auf der Rechnung — keine stille Änderung mehr.
   await schritt(a, 'ready');
   await house.invoiceRepairsOnPrimary([a]);

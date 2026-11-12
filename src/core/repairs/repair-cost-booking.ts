@@ -60,13 +60,17 @@ function openLineTotal(repairId: string): number {
     [repairId])[0]?.t) || 0;
 }
 
-/** REPAIR COST FINAL SAFETY — `repairHeaderFeeKept` aus der Datenbank. */
-export function repairHeaderFeeKeptInDb(repairId: string): boolean {
+/**
+ * REPAIR COST FINAL SAFETY — `repairHeaderFeeKept` aus der Datenbank. Owner 12.11.2026 — `statt`: Art/Werkstatt, wie sie
+ * NACH einer Änderung gelten würden (die Zeilen bleiben dieselben) — für die Regel „keine neuen Kopfkosten".
+ */
+export function repairHeaderFeeKeptInDb(repairId: string, statt?: { repairType?: string | null; workshopSupplierId?: string | null }): boolean {
   const r = query('SELECT repair_type, workshop_supplier_id FROM repairs WHERE id = ?', [repairId])[0];
   if (!r) return false;
   const zeilen = query(`SELECT supplier_id, material_kind, material_details FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`, [repairId]);
   return repairHeaderFeeKept(
-    { repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) },
+    statt ? { repairType: str(statt.repairType), workshopSupplierId: str(statt.workshopSupplierId) }
+      : { repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) },
     zeilen.map((l) => {
       let materialDetails: { headerFeeSeparate?: boolean } | null = null;
       try { materialDetails = l.material_details ? JSON.parse(String(l.material_details)) : null; } catch { /* kein Zeichen */ }

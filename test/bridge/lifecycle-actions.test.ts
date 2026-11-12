@@ -856,11 +856,17 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   let nr = 900;
   const next = (): string => String(nr++);
 
+  // Owner 12.11.2026 — eigene Kopfkosten entstehen beim Anlegen nicht mehr (neue Kosten sind Kostenzeilen); der Testaufbau
+  // setzt sie wie bei einer älteren Reparatur direkt an den Datensatz — der Kostenvertrag selbst bleibt derselbe.
   const anlegen = async (body: Record<string, unknown>): Promise<string> => {
+    const kopf = body.repairType !== 'external' ? Number(body.internalCost) || 0 : 0;
     const v = must(await cmdS.runRepairCreate(d, identity(next(), 'repairs.create'), {
       customerId: 'cust-1', itemBrand: 'Rolex', issueDescription: 'Kosten', taxScheme: 'ZERO', ...body,
+      ...(kopf > 0 ? { internalCost: undefined } : {}),
     }), 'repair');
-    return String(v.repairId ?? v.id);
+    const id = String(v.repairId ?? v.id);
+    if (kopf > 0) db.run('UPDATE repairs SET internal_cost = ? WHERE id = ?', [kopf, id]);
+    return id;
   };
   const zeile = async (rid: string, cost: number, supplierId?: string): Promise<void> => {
     must(await life.runAddRepairLine(d, identity(next(), 'repairs.add_line'), {
@@ -960,10 +966,16 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   await fertig(z);
   ok(await rechnung(z) === 45, 'COST …bis in die Rechnung');
 
-  // Ohne Kostenzeilen bleibt die alte Ableitung, wie sie war: dort IST `actual_cost` der Aufwand.
+  // Owner 12.11.2026 — an einer NEUEN Reparatur ohne Zeilen ist ein von Hand erfasster Aufwand keine Eingabe mehr (er würde
+  // eigene Kopfkosten): verständliches Nein, nichts geschrieben. Altbestand (Aufwand schon erfasst) bleibt wie er war: dort
+  // IST `actual_cost` der Aufwand.
   const o = await anlegen({ repairType: 'internal', estimatedCost: 40, chargeToCustomer: 100 });
+  const neinO = await cmdS.runRepairUpdate(d, identity(next(), 'repairs.update'), { id: o, expectedRevision: prev(db, o), actualCost: 55 }) as { kind: string; code?: string };
+  ok(neinO.kind !== 'ok' && neinO.code === 'REPAIR_COST_AS_LINE' && intern(o) === 0,
+    `COST neue Reparatur: „Actual" 55 von Hand abgewiesen, keine eigenen Kopfkosten (${neinO.code})`);
+  db.run('UPDATE repairs SET actual_cost = 40 WHERE id = ?', [o]);
   await speichern(o, { actualCost: 55 });
-  ok(intern(o) === 55 && ssot(o) === 55, `COST ohne Zeilen gilt ein eingetragener Aufwand weiter als eigene Arbeit (${intern(o)})`);
+  ok(intern(o) === 55 && ssot(o) === 55, `COST Altbestand ohne Zeilen: ein eingetragener Aufwand gilt weiter als eigene Arbeit (${intern(o)})`);
 }
 
 console.log(`\n${PASS} passed, ${fails.length} failed`);

@@ -126,6 +126,59 @@ export function repairCostParts(
   return { own, lines, fee, total: own + lines + fee };
 }
 
+// ── Owner 12.11.2026 — Reparaturkosten vereinfachen: NEUE Kosten nur noch als Kostenzeile ─────────────────────────────
+// Eigene Arbeit: „+ Add Work" → In-house; eine Werkstatt (oder wer sonst bezahlt wird): „+ Add Work" → External workshop
+// (Verbindlichkeit, Zahlung mit eigenem Tag); Material: „+ Add Material" — jede Zeile mit ihrem Kostendatum. Die Kopfkosten
+// (eigene Kosten im Kopf — auch aus einem von Hand erfassten „Actual" — und die Werkstattgebühr im Kopf, deren Betrag der
+// Voranschlag ist) gelten nur noch, wo es sie schon gibt (Altbestand): dort bleiben sie wie bisher änderbar und gebucht.
+// Ein Voranschlag allein bucht nie etwas. Keine Umstellung bestehender Reparaturen, keine zweite Kostenlogik: dieselben
+// drei Teile (`repairCostParts`) wie Marge, Einstand und Rechnung.
+
+export const REPAIR_COST_AS_LINE = 'REPAIR_COST_AS_LINE';
+export const REPAIR_OWN_COST_AS_LINE_MESSAGE =
+  'Own work and extra costs are recorded as a cost line: “+ Add Work” → In-house (with its cost date). '
+  + 'A cost you pay to someone goes on an External workshop line and is paid from there. Older repairs keep their header cost.';
+export const REPAIR_FEE_AS_LINE_MESSAGE =
+  'A workshop’s cost is recorded as a work line: “+ Add Work” → External workshop (with its cost date). '
+  + 'The estimate is information only and is never booked as cost.';
+
+export interface RepairHeaderCostInput {
+  repairType?: string | null; internalCost?: number | null; estimatedCost?: number | null;
+  actualCost?: number | null; workshopSupplierId?: string | null;
+}
+
+/**
+ * Trägt die Reparatur Kopfkosten (Altbestand)? `own`: eigene Kosten im Kopf — gebucht (`internalCost`, außer bei
+ * „external") oder als von Hand erfasster Aufwand ohne Zeilen bei eigener Arbeit (`actualCost`, wurde bisher beim nächsten
+ * „Save" zu eigenen Kosten); `fee`: die Werkstattgebühr im Kopf (Werkstatt ohne Arbeitszeile, Voranschlag als Gebühr).
+ */
+export function repairHeaderCostState(
+  r: RepairHeaderCostInput, openLineTotal = 0, opts?: { headerFeeKept?: boolean },
+): { own: boolean; fee: boolean } {
+  const parts = repairCostParts(r, openLineTotal, opts);
+  const eigeneArbeit = r.repairType !== 'external' && r.repairType !== 'hybrid';
+  const ohneZeilen = !(Number.isFinite(openLineTotal) && openLineTotal > 0);
+  return {
+    own: parts.own > 0.0005 || (eigeneArbeit && ohneZeilen && (num(r.actualCost) ?? 0) > 0.0005),
+    fee: parts.fee > 0.0005,
+  };
+}
+
+/**
+ * Ließe diese Änderung NEUE Kopfkosten entstehen (vorher keine, danach welche)? Dann das verständliche Nein — sonst null.
+ * Rein: dieselbe Regel am Primary, am zweiten Rechner (Fernbefehl) und in der Maske.
+ */
+export function newRepairHeaderCostIssue(
+  before: RepairHeaderCostInput, after: RepairHeaderCostInput, openLineTotal: number,
+  keptBefore?: boolean, keptAfter?: boolean,
+): { code: string; message: string } | null {
+  const a = repairHeaderCostState(before, openLineTotal, { headerFeeKept: keptBefore });
+  const b = repairHeaderCostState(after, openLineTotal, { headerFeeKept: keptAfter });
+  if (!a.own && b.own) return { code: REPAIR_COST_AS_LINE, message: REPAIR_OWN_COST_AS_LINE_MESSAGE };
+  if (!a.fee && b.fee) return { code: REPAIR_COST_AS_LINE, message: REPAIR_FEE_AS_LINE_MESSAGE };
+  return null;
+}
+
 /**
  * REPAIR COST FINAL SAFETY — gilt die Werkstatt-Gebühr im Kopf (Altbestand) neben offenen Zeilen weiter? Ja, solange die
  * Werkstatt im Kopf nicht aus diesen Zeilen stammt: keine Werkstatt-Arbeitszeile.

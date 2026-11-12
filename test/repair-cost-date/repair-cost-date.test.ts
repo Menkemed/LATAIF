@@ -131,7 +131,7 @@ function freshDb(): Db {
     db.run(`INSERT INTO partners (id, branch_id, name, share_percentage, active, created_at, updated_at)
       VALUES (?, 'branch-main', ?, 0, ?, ?, ?)`, [id, name, active, NOW, NOW]);
   }
-  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10']) {
+  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15']) {
     db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
         scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
         tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
@@ -548,6 +548,85 @@ let L2 = '';
     'R11 Annahmetag im eingereichten Quartal: Zeile ohne Tag abgewiesen');
   quartalAuf(2026, 4);
   abgleich('R11');
+}
+
+// ── R12 Reparaturkosten vereinfacht: NEUE Kosten nur als Kostenzeile; Altbestand unverändert; Voranschlag bucht nie ───────
+{
+  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000e1`;
+  const deps = () => ({ db: DB as never, begin: () => { setTestDatabase(DB as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => new Date().toISOString() });
+  const ident = (k: number, op: string) => ({ commandId: ID(k), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN', op, payloadHash: 'h' + k });
+  const run = async (fn: (d: never, i: never, b: unknown) => Promise<unknown>, k: number, op: string, body: unknown): Promise<{ kind: string; code?: string }> => {
+    try { return await fn(deps() as never, ident(k, op) as never, body) as { kind: string; code?: string }; }
+    catch (e) { return { kind: 'thrown', code: String((e as { code?: unknown }).code ?? '') }; }
+  };
+  const form = (rid: string, extra: Record<string, unknown>) => ({ ...useRepairStore.getState().getRepair(rid), ...extra });
+  const speichern = (rid: string, extra: Record<string, unknown>) => repairs.updateRepairOnPrimary(rid, form(rid, extra) as never, rev(rid));
+  const kopf = (rid: string) => S(DB.exec('SELECT internal_cost, actual_cost, estimated_cost, workshop_supplier_id, repair_type FROM repairs WHERE id = ?', [rid])[0]?.values ?? []);
+  const kopfBuchungen = (rid: string): number => n(DB, `SELECT COUNT(*) FROM ledger_entries WHERE (source_module = 'REPAIR_OWN_WORK' AND source_id = ?)
+     OR (source_module = 'EXPENSE' AND source_id IN (SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?
+       AND NOT EXISTS (SELECT 1 FROM repair_lines l WHERE l.expense_id = expenses.id)))`, [rid, rid]);
+
+  // a) Neue Reparatur ohne Kopfkosten: eigene Kosten / „Actual" von Hand → verständliches Nein, nichts geschrieben (Primary + PC2).
+  const a = await kauf('pw11', 1000);
+  const R = await reparatur('pw11', lotOf(DB, a.line), '2026-10-20');
+  const v = S([kopf(R), stand()]);
+  const m = await meldung(() => speichern(R, { internalCost: 30 }));
+  ok(await fehler(() => speichern(R, { internalCost: 30 })) === 'REPAIR_COST_AS_LINE' && /\+ Add Work” → In-house/.test(m) && S([kopf(R), stand()]) === v,
+    `R12 Primary: neue eigene Kosten im Kopf abgewiesen, nichts geschrieben (${m.slice(0, 80)})`);
+  ok(await fehler(() => speichern(R, { actualCost: 40 })) === 'REPAIR_COST_AS_LINE' && S([kopf(R), stand()]) === v, 'R12 Primary: „Actual" von Hand ohne Zeilen abgewiesen');
+  const p1 = await run(svc.runRepairUpdate as never, 1, 'repairs.update', { id: R, expectedRevision: rev(R), internalCost: 30 });
+  const p2 = await run(svc.runRepairUpdate as never, 2, 'repairs.update', { id: R, expectedRevision: rev(R), actualCost: 40 });
+  ok(p1.code === 'REPAIR_COST_AS_LINE' && p2.code === 'REPAIR_COST_AS_LINE' && S([kopf(R), stand()]) === v,
+    `R12 PC2 (auch alter Befehl): internalCost / actualCost abgewiesen, nichts geschrieben (${p1.code}/${p2.code})`);
+  // Voranschlag bleibt Information: speichern geht, gebucht wird bis „Ready" nichts davon.
+  const p3 = await run(svc.runRepairUpdate as never, 3, 'repairs.update', { id: R, expectedRevision: rev(R), estimatedCost: 50, notes: 'quote 50' });
+  ok(p3.kind === 'ok' && n(DB, 'SELECT estimated_cost FROM repairs WHERE id = ?', [R]) === 50, 'R12 Voranschlag 50 gespeichert (Information)');
+  const p4 = await run(svc.runRepairUpdate as never, 4, 'repairs.update', { id: R, expectedRevision: rev(R), repairType: 'external', workshopSupplierId: 'sup-1' });
+  ok(p4.code === 'REPAIR_COST_AS_LINE' && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ? AND workshop_supplier_id IS NOT NULL', [R]) === 0,
+    `R12 Werkstatt in den Kopf (Voranschlag würde Gebühr): abgewiesen (${p4.code})`);
+  const L = await zeileNeu(R, { workType: 'polishing', costAmount: 20, costDate: '2026-10-21' });
+  await status(R, 'in_progress');
+  await status(R, 'ready');
+  ok(kopfBuchungen(R) === 0 && S(lebend('REPAIR_OWN_WORK', L)) === S(['EXPENSES_OPERATING CREDIT 20 2026-10-21', 'INVENTORY DEBIT 20 2026-10-21']),
+    `R12 „Ready": keine Kopfbuchung, kein Voranschlag gebucht — nur die In-house-Zeile am Kostendatum (${S(lebend('REPAIR_OWN_WORK', L))})`);
+  abgleich('R12a');
+
+  // b) Ein Spiegel wird nicht über einen Artwechsel zu eigenen Kosten (alter Befehl).
+  const b = await kauf('pw12', 1000);
+  const Rb = await reparatur('pw12', lotOf(DB, b.line), '2026-10-20');
+  DB.run("UPDATE repairs SET repair_type = 'external', estimated_cost = 100, internal_cost = 100 WHERE id = ?", [Rb]);
+  reload();
+  const vb = S([kopf(Rb), stand()]);
+  const pb = await run(svc.runRepairUpdate as never, 5, 'repairs.update', { id: Rb, expectedRevision: rev(Rb), repairType: 'internal' });
+  ok(pb.code === 'REPAIR_COST_AS_LINE' && S([kopf(Rb), stand()]) === vb, `R12 Artwechsel external → internal (Spiegel 100 würde eigene Kosten): abgewiesen (${pb.code})`);
+
+  // c) Altbestand: eigene Kopfkosten bleiben änderbar, wie bisher.
+  const c = await kauf('pw13', 1000);
+  const Rc = await reparatur('pw13', lotOf(DB, c.line), '2026-10-20');
+  DB.run('UPDATE repairs SET internal_cost = 25 WHERE id = ?', [Rc]);
+  reload();
+  await speichern(Rc, { internalCost: 35, notes: 'more polishing' });
+  const pc = await run(svc.runRepairUpdate as never, 6, 'repairs.update', { id: Rc, expectedRevision: rev(Rc), notes: 'checked' });
+  ok(n(DB, 'SELECT internal_cost FROM repairs WHERE id = ?', [Rc]) === 35 && pc.kind === 'ok', 'R12 Altbestand: eigene Kopfkosten 25 → 35 änderbar, Notiz am PC2 geht');
+
+  // d) Altbestand Werkstattgebühr im Kopf (ohne Zeile): der Voranschlag ist dort die Gebühr — bleibt änderbar.
+  const d = await kauf('pw14', 1000);
+  const Rd = await reparatur('pw14', lotOf(DB, d.line), '2026-10-20');
+  DB.run("UPDATE repairs SET repair_type = 'external', workshop_supplier_id = 'sup-1', estimated_cost = 80, internal_cost = 80 WHERE id = ?", [Rd]);
+  reload();
+  const pd = await run(svc.runRepairUpdate as never, 7, 'repairs.update', { id: Rd, expectedRevision: rev(Rd), estimatedCost: 90 });
+  ok(pd.kind === 'ok' && n(DB, 'SELECT estimated_cost FROM repairs WHERE id = ?', [Rd]) === 90, `R12 Altbestand Gebühr im Kopf: 80 → 90 änderbar (${pd.kind})`);
+
+  // e) Anlegen mit eigenen Kosten im Kopf (alter Auftrag): Nein, nichts angelegt — Primary und PC2 gleich.
+  const e = await kauf('pw15', 1000);
+  const vr = S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]);
+  const anlage = { repairScope: 'OWN', productId: 'pw15', lotId: lotOf(DB, e.line), issueDescription: 'Old client form', repairType: 'internal', internalCost: 20 };
+  const ea = await fehler(() => repairs.createRepairOnPrimary(anlage as never));
+  const eb = await run(svc.runRepairCreate as never, 8, 'repairs.create', anlage);
+  ok(ea === 'REPAIR_COST_AS_LINE' && eb.code === 'REPAIR_COST_AS_LINE' && S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]) === vr,
+    `R12 Anlegen mit internalCost: Primary und PC2 abgewiesen, nichts angelegt (${ea}/${eb.code})`);
+  abgleich('R12');
 }
 
 console.log(`\nrepair-cost-date: ${PASS} passed, ${fails.length} failed`);

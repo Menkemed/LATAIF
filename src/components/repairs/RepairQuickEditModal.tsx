@@ -40,6 +40,7 @@ import {
 import { addRepairMaterialOnPrimary, materialRowsFromModal, repairMaterialBody, type RepairMaterialRequest } from '@/core/gold/gold-house';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { defaultRepairCostDay, repairCostDatePrompt, repairReceivedDay } from '@/core/repairs/repair-cost-date';
+import { repairHeaderCostState, repairHeaderFeeKept } from '@/core/repairs/repair-cost';
 import { bahrainTodayIso } from '@/core/utils/payment-date';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import type { Repair, RepairLine, RepairStatus, RepairWorkType } from '@/core/models/types';
@@ -111,6 +112,9 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
   const eigene = arbeitsZeilen.filter((l) => !l.supplierId);
   const werkstaetten = arbeitsZeilen.map((l) => l.supplierId).filter((x, i, a): x is string => !!x && a.indexOf(x) === i);
   const schaetzung = repairEstimateRole(rep, kosten.hasLines);
+  // Owner 12.11.2026 — von Hand erfasster Aufwand nur noch bei Altbestand (Kopfkosten); neue Kosten sind Kostenzeilen.
+  const kopfKosten = repairHeaderCostState(rep, kosten.linesTotal, { headerFeeKept: repairHeaderFeeKept(rep, offen) });
+  const kopfAlt = kopfKosten.own || kopfKosten.fee;
 
   /** Die gesehene Fassung — ohne sie schickt PC2 gar nicht erst (wie an der Detailseite). */
   function fassung(was: string): number | null {
@@ -128,7 +132,7 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
       ...ohneFotos,
       estimatedCost: geld(betrag.estimated) as number | undefined,
       // Mit Kostenzeilen ist Actual Cost deren Summe (das Haus schreibt sie bei jeder Zeile) — hier nicht überschreibbar.
-      actualCost: kosten.hasLines ? rep.actualCost : geld(betrag.actual) as number | undefined,
+      actualCost: kosten.hasLines ? rep.actualCost : (kopfAlt ? geld(betrag.actual) as number | undefined : rep.actualCost),
       chargeToCustomer: geld(betrag.charge) as number | undefined,
     };
     if (!await w.ok('repairs.update', {
@@ -445,10 +449,13 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
                   </p>
                 </div>
                 <div>
-                  {kosten.hasLines ? (
+                  {kosten.hasLines || !kopfAlt ? (
                     <>
                       <Input label="ACTUAL COST (BHD)" value={fmt(kosten.linesTotal)} disabled readOnly data-quick-actual />
-                      <p style={{ fontSize: 11, color: '#4B5563', marginTop: 4, lineHeight: 1.4 }}>Calculated from the cost lines — change a line instead.</p>
+                      <p style={{ fontSize: 11, color: '#4B5563', marginTop: 4, lineHeight: 1.4 }}>
+                        {kosten.hasLines ? 'Calculated from the cost lines — change a line instead.'
+                          : 'New costs are cost lines (with cost date): + Add Work or + Add Material above.'}
+                      </p>
                     </>
                   ) : (
                     <>

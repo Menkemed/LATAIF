@@ -237,7 +237,8 @@ const REPAIR_COMPARE = [
     ['im eigenen Haus', { repairType: 'internal', estimatedCost: 40, chargeToCustomer: 100 }],
     ['Fremdarbeit ohne eigene Kostenangabe', { repairType: 'external', estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
     ['Fremdarbeit MIT eigener Angabe', { repairType: 'external', estimatedCost: 40, internalCost: 15, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
-    ['Mischarbeit', { repairType: 'hybrid', estimatedCost: 40, internalCost: 25, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
+    // Owner 12.11.2026 — ohne eigene Kopfkosten (`internalCost`): die gibt es beim Anlegen nicht mehr (s. u. das Nein).
+    ['Mischarbeit', { repairType: 'hybrid', estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
   ];
 
   let idx = 0;
@@ -282,6 +283,17 @@ const REPAIR_COMPARE = [
     ok(Number(rowA.internal_cost) === costs.internalCostOnCreate(input as never),
       `PARITY (${label}) die eigenen Kosten sind die der geteilten Ableitung (${rowA.internal_cost})`);
   }
+
+  // Owner 12.11.2026 — eigene Kopfkosten beim Anlegen (Mischarbeit mit `internalCost`, z. B. ein alter Auftrag): der
+  // Fernauftrag sagt dasselbe Nein wie der Primary (`planRepairCreate`), nichts angelegt.
+  resetDurabilityStateForTest();
+  const dbN = freshDb();
+  const neinFern = await cmd.runRepairCreate(deps(dbN), identity('99', 'repairs.create'), {
+    customerId: 'cust-1', itemBrand: 'Rolex', itemModel: 'Submariner', issueDescription: 'Krone klemmt', taxScheme: 'VAT_10',
+    repairType: 'hybrid', estimatedCost: 40, internalCost: 25, workshopSupplierId: 'sup-1', chargeToCustomer: 100,
+  });
+  ok(code(neinFern) === 'REPAIR_COST_AS_LINE' && n(dbN, 'SELECT COUNT(*) FROM repairs') === 0,
+    `PARITY Mischarbeit mit eigenen Kopfkosten: Nein, nichts angelegt (${code(neinFern)})`);
 
   // Die Aufnahme setzt KEINE Marge — beide Seiten nicht. Das ist der Vertrag des Hauses.
   resetDurabilityStateForTest();

@@ -14,6 +14,7 @@
 //   F  PC2: „Pay Supplier" 150 auf 120 offen → 30 Vorauszahlung: Banking zeigt den vollen Geldabgang, je Zeile genau einmal.
 //   G  PC2: Annahme vor der Eröffnung — „Add Work", „Add Material" und „New Repair" bitten um ein Kostendatum (kein stilles
 //      „heute"); „Add Line" erst mit Tag; Zeile am gewählten Tag; Primary gleich. Nur G: E2E_SZENEN=G.
+//   H  PC2 + Primary: neue Reparatur — „Edit" ohne Kopffelder (Kosten nur als Zeilen); Altbestand: Kopfkosten 25 → 35 änderbar.
 //
 // PROZESS-ISOLATION (Gerüst aus b23-purchase-offset.e2e.mjs): gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf
 // gestartet hat oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -313,6 +314,13 @@ function seed() {
     // G: eine Kundenreparatur, angenommen VOR der Eröffnung (10.10.2026) — keine stille Vorgabe für das Kostendatum.
     insert(db, 'repairs', { id: 'eps-rep-alt', branch_id, repair_number: 'REP-2026-000977', customer_id: 'eps-kunde', status: 'received',
       repair_scope: 'CUSTOMER', repair_type: 'internal', issue_description: 'Old intake', received_at: '2026-10-10T09:00:00.000Z',
+      created_at: now, updated_at: now });
+    // H: neue Reparatur ohne Kopfkosten (Kosten nur als Zeilen) und Altbestand mit eigenen Kopfkosten 25.
+    insert(db, 'repairs', { id: 'eps-rep-neu', branch_id, repair_number: 'REP-2026-000978', customer_id: 'eps-kunde', status: 'received',
+      repair_scope: 'CUSTOMER', repair_type: 'internal', issue_description: 'New intake', received_at: '2026-10-25T09:00:00.000Z',
+      created_at: now, updated_at: now });
+    insert(db, 'repairs', { id: 'eps-rep-kopf', branch_id, repair_number: 'REP-2026-000979', customer_id: 'eps-kunde', status: 'received',
+      repair_scope: 'CUSTOMER', repair_type: 'internal', issue_description: 'Older repair', internal_cost: 25, received_at: '2026-10-25T09:00:00.000Z',
       created_at: now, updated_at: now });
     le('eps-le-pur-s-d', 'INVENTORY', 'DEBIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
     le('eps-le-pur-s-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
@@ -777,6 +785,45 @@ try {
     const prim = await text(primary, sel);
     ok(/21 Oct 2026/.test(prim), `G Primary zeigt dasselbe Kostendatum (${prim})`);
     ok(S(await treffer(client)) === '[]', 'G PC2 griff nie nach einer lokalen Datenbank');
+  }
+
+  // ── H PC2 + Primary: Reparaturkosten vereinfacht — neue Reparatur: „Edit" ohne Kopffelder (Own cost / Internal paid from /
+  //    „Actual" von Hand), Hinweis auf „+ Add Work"; Altbestand: eigene Kopfkosten bleiben änderbar ────────────────────────
+  if (szene('H')) {
+    await syncRuhe();
+    client = await lade(client, '/repairs/eps-rep-neu');
+    await waitFor(client, '[data-repair-edit-open]', 45000);
+    ok(await mausKlick(client, '[data-repair-edit-open]') === 'OK', 'H PC2: Maus auf „Edit" (neue Reparatur)');
+    await waitFor(client, '[data-repair-save]', 15000);
+    const hinweis = await text(client, '[data-repair-costs-as-lines]');
+    ok(!(await exists(client, '[data-repair-header-own-cost]')) && !/INTERNAL PAID FROM/.test(String(await client.ev('return document.body.innerText;')))
+      && await gesperrt(client, '[data-repair-actual-from-lines]') === true && /\+ Add Work/.test(hinweis) && /In-house/.test(hinweis),
+      `H neue Reparatur: keine Kopffelder, „Actual" nur aus Zeilen, Hinweis auf „+ Add Work" (${hinweis.slice(0, 70)})`);
+    await foto(client, 'eps-h-pc2-edit-new-repair', '[data-repair-costs-as-lines]');
+    await clickText(client, 'Cancel');
+    // Altbestand: das Kopffeld ist da und bleibt änderbar (25 → 35), am PC2 gespeichert.
+    client = await lade(client, '/repairs/eps-rep-kopf');
+    await waitFor(client, '[data-repair-edit-open]', 45000);
+    ok(await mausKlick(client, '[data-repair-edit-open]') === 'OK', 'H PC2: Maus auf „Edit" (Altbestand)');
+    await waitFor(client, '[data-repair-header-own-cost]', 15000);
+    ok(await wert(client, '[data-repair-header-own-cost]') === '25' && !(await exists(client, '[data-repair-costs-as-lines]')),
+      `H Altbestand: eigene Kopfkosten 25 sichtbar und änderbar (${await wert(client, '[data-repair-header-own-cost]')})`);
+    ok(await tippe(client, '[data-repair-header-own-cost]', '35') === 'OK', 'H Tastatur: 35');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'repairs.update').length;
+    ok(await mausKlick(client, '[data-repair-save]') === 'OK', 'H Maus auf „Save"');
+    await dateiBis(() => Number(dbQ(BIZ_DB, "SELECT internal_cost AS c FROM repairs WHERE id = 'eps-rep-kopf'")[0]?.c) === 35);
+    const cm = (await kommandos(client)).filter((x) => x.op === 'repairs.update');
+    ok(Number(dbQ(BIZ_DB, "SELECT internal_cost AS c FROM repairs WHERE id = 'eps-rep-kopf'")[0]?.c) === 35 && cm.length === vor + 1,
+      `H Altbestand am PC2 geändert: 35, EIN Auftrag (${S(cm.at(-1)?.payload)})`);
+    // Primary: dieselbe Maske — neue Reparatur ohne Kopffelder.
+    await syncRuhe();
+    await gehFrisch(primary, '/repairs/eps-rep-neu');
+    await warteBis(primary, "document.querySelector('[data-repair-edit-open]')", 30000);
+    ok(await mausKlick(primary, '[data-repair-edit-open]') === 'OK', 'H Primary: Maus auf „Edit"');
+    await warteBis(primary, "document.querySelector('[data-repair-save]')", 15000);
+    ok(!(await exists(primary, '[data-repair-header-own-cost]')) && await exists(primary, '[data-repair-costs-as-lines]'), 'H Primary: dieselbe Regel — keine Kopffelder, Hinweis');
+    await clickText(primary, 'Cancel');
+    ok(S(await treffer(client)) === '[]', 'H PC2 griff nie nach einer lokalen Datenbank');
   }
 
 } catch (e) {

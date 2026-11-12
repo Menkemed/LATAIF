@@ -23,7 +23,7 @@ import {
 } from '@/core/models/types';
 import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { REPAIR_FIELDS } from '@/core/models/repair-fields';
-import { internalCostOnCreate, internalCostOnEdit, repairMargin } from './repair-cost';
+import { REPAIR_COST_AS_LINE, internalCostOnCreate, internalCostOnEdit, repairMargin } from './repair-cost';
 import { normalizeStoneAttributes } from '@/core/products/stones';
 import { businessDateIssue, businessTimestamp, todayIso } from '@/core/utils/business-date';
 
@@ -329,6 +329,13 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
   }
   if (input.staffId && !port.employeeExists(input.staffId)) {
     throw new RepairActionRejected('EMPLOYEE_NOT_FOUND', 'no such active employee in this branch');
+  }
+  // Owner 12.11.2026 — eigene Kosten im Kopf entstehen nicht mehr (auch nicht über einen alten Auftrag): eigene Arbeit ist
+  // die In-house-Zeile der Anlage („In-house cost", mit Kostendatum). Bei „external" ist der Betrag die Werkstattgebühr der
+  // Werkstattzeile (Rückfall, wie bisher) — keine Kopfkosten.
+  if (input.repairType !== 'external' && (Number(input.internalCost) || 0) > 0) {
+    throw new RepairActionRejected(REPAIR_COST_AS_LINE,
+      'Own work and extra costs are entered as “In-house” cost — it becomes a cost line with its cost date (no cost in the repair header).');
   }
   return {
     repairScope: input.repairScope,

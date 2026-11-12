@@ -72,7 +72,7 @@ import {
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { isRepairWorkLine, repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
 import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
-import { repairHeaderFeeKept } from '@/core/repairs/repair-cost';
+import { repairHeaderCostState, repairHeaderFeeKept } from '@/core/repairs/repair-cost';
 import {
   EMPTY_WORK_LINE, RepairTypeConflictNote, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
 } from '@/components/repairs/RepairWorkParts';
@@ -513,6 +513,8 @@ export function RepairDetail() {
   const offeneZeilen = thisRepairLines.filter(l => l.status === 'OPEN');
   const quelle = repairWorkSource(repair, offeneZeilen);
   const kostenSicht = repairCostView(repair, offeneZeilen);
+  // Owner 12.11.2026 — trägt die Reparatur Kopfkosten (Altbestand)? Nur dann bietet „Edit" die alten Kopffelder an.
+  const kopfAlt = repairHeaderCostState(repair, kostenSicht.linesTotal, { headerFeeKept: repairHeaderFeeKept(repair, offeneZeilen) });
   const lieferantName = (sid: string): string => suppliers.find(s => s.id === sid)?.name || 'Supplier';
   // REPAIR-REOPEN — von „Returned" zurück: dieselbe Regel wie Liste, PC2, Handy und Haus.
   const reopenZiele = repair.status === 'returned' ? repairStatusTargets(repairTransitionFacts(repair, thisRepairLines)) : [];
@@ -811,7 +813,7 @@ export function RepairDetail() {
                 )}
                 <Button variant="secondary" onClick={handleDownloadVoucher}><Download size={14} /> Voucher</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
-                {perm.canManageRepairs && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
+                {perm.canManageRepairs && <Button variant="secondary" onClick={() => setEditing(true)} data-repair-edit-open><Edit3 size={14} /> Edit</Button>}
               </>
             )}
           </div>
@@ -1046,14 +1048,26 @@ export function RepairDetail() {
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <Input label={`${repairEstimateRole(repair, kostenSicht.hasLines && kostenSicht.fee <= 0) === 'fee' ? repairCostLabels(form.repairType).estimated : 'ESTIMATED COST'} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : 'optional'} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
-                  {kostenSicht.hasLines ? (
+                  {kostenSicht.hasLines || !(kopfAlt.own || kopfAlt.fee) ? (
                     // REPAIR-REDESIGN — mit Kostenzeilen ist der Aufwand ihre Summe (das Haus schreibt sie bei jeder Zeile).
+                    // Owner 12.11.2026 — ohne Altbestand ebenso: neue Kosten sind Kostenzeilen, kein von Hand erfasster Aufwand.
                     <Input label="ACTUAL COST (BHD)" value={String(kostenSicht.linesTotal)} disabled readOnly data-repair-actual-from-lines />
                   ) : (
                     <Input label={`${repairCostLabels(form.repairType).actual} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
                   )}
-                  <Input label={`${repairCostLabels(form.repairType).own} (BHD)`} type="number" placeholder={form.repairType !== 'external' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.internalCost || ''} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} />
+                  {/* Owner 12.11.2026 — eigene Kosten im Kopf nur noch bei Altbestand (bei „external" der Spiegel der Gebühr). */}
+                  {(kopfAlt.own || (repair.repairType === 'external' && kopfAlt.fee)) && (
+                    <Input label={`${repairCostLabels(form.repairType).own} (BHD)`} type="number" placeholder={form.repairType !== 'external' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.internalCost || ''} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} data-repair-header-own-cost />
+                  )}
                   <Input label="CHARGE TO CUSTOMER (BHD)" type="number" value={form.chargeToCustomer ?? ''} onChange={e => setForm({ ...form, chargeToCustomer: e.target.value ? Number(e.target.value) : undefined })} />
+                  {!kopfAlt.own && (
+                    <p style={{ gridColumn: '1 / -1', fontSize: 12, color: '#4B5563', margin: 0, lineHeight: 1.5, padding: '8px 10px', background: '#F7F8FA', borderRadius: 6 }} data-repair-costs-as-lines>
+                      New costs are cost lines, each with its cost date: <strong>+ Add Work</strong> → In-house for own staff (no payment),
+                      External workshop for anyone you pay (payable, paid with its own payment date); <strong>+ Add Material</strong> for parts.
+                      The estimate is information only.
+                    </p>
+                  )}
+                  {kopfAlt.own && (
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>INTERNAL PAID FROM</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
@@ -1071,6 +1085,7 @@ export function RepairDetail() {
                       })}
                     </div>
                   </div>
+                  )}
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>CUSTOMER PAID WITH</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
@@ -1105,7 +1120,7 @@ export function RepairDetail() {
                       </div>
                     )}
                   </div>
-                  {form.repairType !== 'external' && (
+                  {form.repairType !== 'external' && kopfAlt.own && (
                     <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280', margin: 0 }}>
                       {IN_HOUSE_COST_HINT}{form.repairType !== 'hybrid' && !kostenSicht.hasLines ? ` ${IN_HOUSE_ESTIMATE_HINT}` : ''}
                     </p>
@@ -1148,10 +1163,13 @@ export function RepairDetail() {
                       <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.actualCost}/> BHD</span>
                     </div>
                   )}
-                  <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                    <span className="text-overline">{repairCostLabels(repair.repairType).own}</span>
-                    <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.internalCost}/> BHD</span>
-                  </div>
+                  {/* Owner 12.11.2026 — die Kopfkosten nur, wo es sie gibt (Altbestand); neue Kosten stehen als Zeilen. */}
+                  {(Number(repair.internalCost) || 0) > 0 && (
+                    <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                      <span className="text-overline">{repairCostLabels(repair.repairType).own}</span>
+                      <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.internalCost}/> BHD</span>
+                    </div>
+                  )}
                   {repair.chargeToCustomer != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">CHARGE TO CUSTOMER</span>

@@ -249,14 +249,19 @@ function kopf(db: Db, id: string) {
 }
 
 async function anlegen(db: Db, weg: 'lokal' | 'fern', form: Record<string, unknown>): Promise<string> {
+  // Owner 12.11.2026 — eigene Kopfkosten entstehen beim Anlegen nicht mehr (neue Kosten sind Kostenzeilen); der Testaufbau
+  // setzt sie wie bei einer älteren Reparatur direkt an den Datensatz — die Typ- und Kostenregel selbst bleibt dieselbe.
+  const kopf = form.repairType !== 'external' ? Number(form.internalCost) || 0 : 0;
   const basis = { repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Service', taxScheme: 'VAT_10',
-    chargeToCustomer: 70, receivedAt: HEUTE, ...form };
+    chargeToCustomer: 70, receivedAt: HEUTE, ...form, ...(kopf > 0 ? { internalCost: undefined } : {}) };
   const anlage = ws.repairCreateWorkshopSplit(basis as never);
-  if (weg === 'lokal') { const id = (await house.createRepairOnPrimary(anlage as never)).id; reload(); return id; }
+  const altKopf = (id: string): string => { if (kopf > 0) db.run('UPDATE repairs SET internal_cost = ? WHERE id = ?', [kopf, id]); return id; };
+  if (weg === 'lokal') { const id = altKopf((await house.createRepairOnPrimary(anlage as never)).id); reload(); return id; }
   const o = await cmd.runRepairCreate(deps(db), identity(nx(), 'repairs.create'), rules.repairCreateBody(anlage as never, [])) as Out;
   ok(o.kind === 'ok', `NEW (fern) angenommen (${o.code || 'ok'})`);
+  const id = altKopf(String(o.value?.repairId ?? o.value?.id ?? ''));
   reload();
-  return String(o.value?.repairId ?? o.value?.id ?? '');
+  return id;
 }
 
 const tr = await import('../../src/core/repairs/repair-type-rule.ts');

@@ -5,7 +5,7 @@ import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
 import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
-import { repairCostParts } from '@/core/repairs/repair-cost';
+import { newRepairHeaderCostIssue, repairCostParts } from '@/core/repairs/repair-cost';
 import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair-type-rule';
 import {
   assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
@@ -903,6 +903,17 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       && Math.abs((Number(data.chargeToCustomer) || 0) - (Number(before.chargeToCustomer) || 0)) > 0.0005) {
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED',
         'this repair is already invoiced — its charge is on the invoice and is not changed here (correct it with Edit Invoice)');
+    }
+
+    // Owner 12.11.2026 — NEUE Kopfkosten entstehen nicht mehr (eigene Kosten im Kopf, „Actual" von Hand, eine Werkstatt im
+    // Kopf, deren Voranschlag als Gebühr bucht): neue Kosten sind Kostenzeilen mit Kostendatum. Altbestand bleibt änderbar.
+    // Dieselbe Regel für „Save", Quick Edit und den Fernbefehl (auch einen alten PC2) — ein Nein VOR jedem Schreiben.
+    if (before) {
+      const nachher = { ...before, ...data } as Repair;
+      const kopf = newRepairHeaderCostIssue(before, nachher, sumOpenRepairLineCosts(id),
+        repairHeaderFeeKeptInDb(id),
+        repairHeaderFeeKeptInDb(id, { repairType: nachher.repairType, workshopSupplierId: nachher.workshopSupplierId }));
+      if (kopf) throw new RepairActionRejected(kopf.code, kopf.message);
     }
 
     // v0.8.87 — Kundenzahlung per Debitkarte ohne gespeicherten Satz: Nein VOR dem Update (die Gebühr bucht

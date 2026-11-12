@@ -324,12 +324,23 @@ let lokalKunde: ReturnType<typeof bildDerReparatur>;
 // ── §2 Anlegen: EIGENE Ware — Artikel, Los, Platzhalter-Kunde, in_repair ───
 const FORM_OWN = {
   repairScope: 'OWN', productId: 'p2', lotId: 'lot-p2', issueDescription: 'Politur',
-  repairType: 'hybrid', workshopSupplierId: 'sup-1', internalCost: 10, estimatedCost: 25,
+  // Owner 12.11.2026 — ohne eigene Kopfkosten (`internalCost`): neue Kosten sind Kostenzeilen (s. u. das gemeinsame Nein).
+  repairType: 'hybrid', workshopSupplierId: 'sup-1', estimatedCost: 25,
   estimatedReady: '2026-09-22', staffId: 'emp-1', notes: 'eigene Ware',
   // Liegengeblieben vom Umschalten — die Maske zeigt das bei eigener Ware nicht.
   customerId: 'cust-1', chargeToCustomer: 70, taxScheme: 'ZERO', itemDescription: 'alt',
   itemAttributes: { dial: 'Blue' }, itemBrand: 'Falsch',
 } as never;
+{
+  // Owner 12.11.2026 — eigene Kopfkosten beim Anlegen (alter Auftrag): lokal == fern dasselbe Nein, nichts angelegt.
+  const db = freshDb();
+  let lokalNein = '';
+  try { await house.createRepairOnPrimary({ ...(FORM_OWN as object), internalCost: 10 } as never); } catch (e) { lokalNein = String((e as { code?: string }).code ?? e); }
+  const fernNein = await cmd.runRepairCreate(deps(db), identity('299', 'repairs.create'), rules.repairCreateBody({ ...(FORM_OWN as object), internalCost: 10 } as never, []));
+  ok(lokalNein === 'REPAIR_COST_AS_LINE' && (fernNein as { code?: string }).code === 'REPAIR_COST_AS_LINE'
+    && Number(db.exec('SELECT COUNT(*) FROM repairs')[0]?.values?.[0]?.[0] ?? 0) === 0,
+    `OWN mit eigenen Kopfkosten: lokal == fern abgewiesen, nichts angelegt (${lokalNein} / ${JSON.stringify(fernNein).slice(0, 80)})`);
+}
 let lokalOwn: ReturnType<typeof bildDerReparatur>;
 {
   const db = freshDb();
@@ -445,7 +456,8 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
   const rid = r.id;
   // Altbestand ohne Feld in der „Save"-Maske: ein freier Werkstattname und die Steuer MARGIN. Vor R5C
   // schrieb Save beides aus dem Formular zurück — MARGIN dabei still als VAT_10 (`rowToRepair`).
-  db.run("UPDATE repairs SET external_vendor = 'Alt-Werkstatt', tax_scheme = 'MARGIN' WHERE id = ?", [rid]);
+  // Owner 12.11.2026 — dazu ein von Hand erfasster Aufwand (Altbestand ohne Zeilen): nur dort bleibt „Actual" eine Eingabe.
+  db.run("UPDATE repairs SET external_vendor = 'Alt-Werkstatt', tax_scheme = 'MARGIN', actual_cost = 40 WHERE id = ?", [rid]);
   const rs = useRepairStore.getState();
   const schritte: Array<(seen: Record<string, unknown>) => Record<string, unknown>> = [
     (seen) => ({

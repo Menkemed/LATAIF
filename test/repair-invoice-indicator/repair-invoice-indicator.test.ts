@@ -192,11 +192,18 @@ async function lokal(fn: () => Promise<unknown>): Promise<{ ok: boolean; code: s
     return { ok: false, code: String((e as { code?: string }).code ?? (e as Error).message) };
   }
 }
+// Owner 12.11.2026 — eigene Kopfkosten entstehen beim Anlegen nicht mehr (neue Kosten sind Kostenzeilen); der Testaufbau setzt
+// sie wie bei einer älteren Reparatur direkt an den Datensatz — die Kopfbuchung selbst bleibt dieselbe.
+const { getDatabase: aktuelleDb } = await import('../sync/_db-shim.ts');
 async function kunde(form: Record<string, unknown>): Promise<string> {
-  return (await house.createRepairOnPrimary({
+  const f = { repairType: 'internal', internalCost: 50, ...form };
+  const kopf = f.repairType !== 'external' ? Number(f.internalCost) || 0 : 0;
+  const id = (await house.createRepairOnPrimary({
     repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'Service', chargeToCustomer: 300, taxScheme: 'ZERO',
-    repairType: 'internal', internalCost: 50, ...form,
+    ...f, ...(kopf > 0 ? { internalCost: undefined } : {}),
   } as never)).id;
+  if (kopf > 0) { aktuelleDb().run('UPDATE repairs SET internal_cost = ? WHERE id = ?', [kopf, id]); rs().loadRepairs(); }
+  return id;
 }
 async function fertig(id: string): Promise<void> {
   rs().loadRepairs();
