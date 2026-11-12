@@ -131,7 +131,7 @@ function freshDb(): Db {
     db.run(`INSERT INTO partners (id, branch_id, name, share_percentage, active, created_at, updated_at)
       VALUES (?, 'branch-main', ?, 0, ?, ?, ?)`, [id, name, active, NOW, NOW]);
   }
-  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5']) {
+  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10']) {
     db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
         scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
         tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
@@ -212,6 +212,7 @@ const payables = await import('../../src/core/payables/payables-house.ts');
 const gold = await import('../../src/core/gold/gold-house.ts');
 const lc = await import('../../src/core/bridge/lifecycle-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
+const svc = await import('../../src/core/bridge/service-commands.ts');
 const { useRepairStore } = await import('../../src/stores/repairStore.ts');
 const pd = await import('../../src/core/utils/payment-date.ts');
 const DB = freshDb();
@@ -457,6 +458,96 @@ let L2 = '';
     { commandId: '00000097-0000-4000-8000-0000000000c1', tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'SALES', payloadHash: 'h97' } as never) as { kind: string; code?: string };
   ok(sales.kind !== 'ok' && stand() === v2, `R10 SALES: kein Umbuchen (${S(sales)})`);
   abgleich('R10');
+}
+
+// ── R11 Annahme VOR der Eröffnung: keine stille Vorgabe „heute" — die Maske bittet, der Primary lehnt verständlich ab ─────
+{
+  const cd = await import('../../src/core/repairs/repair-cost-date.ts');
+  const p = cd.repairCostDatePrompt('2026-10-10') ?? '';
+  ok(cd.defaultRepairCostDay('2026-10-10') === '' && /received on 10 Oct 2026, before the opening \(15 Oct 2026\)/.test(p) && /choose the cost date/.test(p),
+    `R11 Maske: keine Vorgabe, verständliche Aufforderung (${p})`);
+  ok(cd.defaultRepairCostDay('2026-10-20') === '2026-10-20' && cd.repairCostDatePrompt('2026-10-20') === null
+    && cd.defaultRepairCostDay(MORGEN) === '' && cd.defaultRepairCostDay('kaputt') === '',
+    'R11 Maske: offener Annahmetag bleibt Vorgabe; künftig/ungültig ohne Vorgabe');
+
+  const a = await kauf('pw6', 1000);
+  const R = await reparatur('pw6', lotOf(DB, a.line), '2026-10-10');
+  const v = stand();
+  const m = await meldung(() => zeileNeu(R, { supplierId: 'sup-1', workType: 'service', costAmount: 50 }));
+  ok(await fehler(() => zeileNeu(R, { supplierId: 'sup-1', workType: 'service', costAmount: 50 })) === 'REPAIR_COST_DATE_REQUIRED'
+    && /before the opening/.test(m) && stand() === v, `R11 Zeile mit Betrag ohne Tag: abgewiesen, nichts geschrieben (${m.slice(0, 80)})`);
+  ok(await fehler(() => imHaus(() => gold.addRepairMaterialInHouse({ branchId: 'branch-main', userId: 'user-test' }, {
+    repairId: R, expectedRevision: rev(R),
+    rows: [{ materialKind: 'diamond', description: 'Diamond', quantity: 1, caratPerPiece: 0.1, totalCost: 50, supplierId: 'sup-1' }],
+  }))) === 'REPAIR_COST_DATE_REQUIRED' && stand() === v, 'R11 Material ohne Tag: abgewiesen, nichts geschrieben');
+  const Lw = await zeileNeu(R, { supplierId: 'sup-1', workType: 'service', costAmount: 50, costDate: '2026-10-20' });
+  ok(tagDerZeile(Lw) === '2026-10-20', 'R11 mit gewähltem Tag: angelegt am gewählten Kostendatum');
+
+  // Eigene Arbeit 0.000 braucht keinen Tag; bekommt sie einen Betrag, gilt dieselbe Regel (erst „Edit date").
+  const L0 = await zeileNeu(R, { workType: 'polishing', costAmount: 0 });
+  ok(!!L0 && tagDerZeile(L0) === '', 'R11 eigene Arbeit 0.000 ohne Tag: angelegt, ohne Kostendatum');
+  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000d1`;
+  const deps = () => ({ db: DB as never, begin: () => { setTestDatabase(DB as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => new Date().toISOString() });
+  const ident = (k: number, op: string) => ({ commandId: ID(k), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN', op, payloadHash: 'h' + k });
+  const run = async (fn: (d: never, i: never, b: unknown) => Promise<unknown>, k: number, op: string, body: unknown): Promise<{ kind: string; code?: string; message?: string }> => {
+    try { return await fn(deps() as never, ident(k, op) as never, body) as { kind: string; code?: string; message?: string }; }
+    catch (e) { return { kind: 'thrown', code: String((e as { code?: unknown }).code ?? ''), message: String((e as Error).message) }; }
+  };
+  const v0 = stand();
+  const hoch = await run(lc.runUpdateRepairLine as never, 1, 'repairs.update_line', { repairId: R, lineId: L0, expectedRevision: rev(R), costAmount: 30 });
+  ok(hoch.code === 'REPAIR_COST_DATE_REQUIRED' && n(DB, 'SELECT cost_amount FROM repair_lines WHERE id = ?', [L0]) === 0 && stand() === v0,
+    `R11 0.000 → 30 ohne Tag (PC2): abgewiesen, nichts geschrieben (${S(hoch).slice(0, 120)})`);
+  await aendern(R, L0, '2026-10-21', 'polished on 21.10.');
+  const hoch2 = await run(lc.runUpdateRepairLine as never, 2, 'repairs.update_line', { repairId: R, lineId: L0, expectedRevision: rev(R), costAmount: 30 });
+  await status(R, 'in_progress');
+  ok(hoch2.kind === 'ok' && S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 30 2026-10-21', 'INVENTORY DEBIT 30 2026-10-21']),
+    `R11 nach „Edit date": 30 gebucht am gewählten Tag (${S(lebend('REPAIR_OWN_WORK', L0))})`);
+  abgleich('R11a');
+
+  // Anlegen mit Kosten: ohne Tag abgewiesen (nichts angelegt), mit Tag beide Zeilen am gewählten Tag.
+  const b = await kauf('pw7', 1000);
+  const anlage = (extra: Record<string, unknown>) => repairs.createRepairOnPrimary({
+    repairScope: 'OWN', productId: 'pw7', lotId: lotOf(DB, b.line), issueDescription: 'Old repair', receivedAt: '2026-10-10',
+    repairType: 'hybrid', inHouseWorkType: 'polishing', inHouseCost: 25, workshopSupplierId: 'sup-1', estimatedCost: 40, ...extra,
+  } as never);
+  const vr = S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]);
+  const ma = await meldung(() => anlage({}));
+  ok(await fehler(() => anlage({})) === 'REPAIR_COST_DATE_REQUIRED' && /before the opening/.test(ma) && S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]) === vr,
+    `R11 Anlegen mit Kosten ohne Tag: abgewiesen, nichts angelegt (${ma.slice(0, 70)})`);
+  const neu = await anlage({ costDate: '2026-10-22' });
+  const tage = (DB.exec('SELECT supplier_id IS NOT NULL, cost_date FROM repair_lines WHERE repair_id = ? ORDER BY position', [neu.id])[0]?.values ?? []).map((x) => `${x[0] ? 'W' : 'I'} ${x[1]}`);
+  ok(S(tage) === S(['W 2026-10-22', 'I 2026-10-22']), `R11 Anlegen mit Tag: Werkstatt- und eigene Zeile am gewählten Tag (${S(tage)})`);
+
+  // Anlegen nach der Eröffnung: die Werkstattzeile trägt den Annahmetag (vorher ohne Datum → Buchungstag).
+  const c = await kauf('pw8', 1000);
+  const neu2 = await repairs.createRepairOnPrimary({
+    repairScope: 'OWN', productId: 'pw8', lotId: lotOf(DB, c.line), issueDescription: 'Recent', receivedAt: '2026-10-23',
+    repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 35,
+  } as never);
+  ok(s(DB, 'SELECT cost_date FROM repair_lines WHERE repair_id = ?', [neu2.id]) === '2026-10-23', 'R11 Werkstattzeile beim Anlegen: Kostendatum = Annahmetag');
+
+  // PC2 legt an: dieselbe Regel, dasselbe Nein.
+  const d = await kauf('pw9', 1000);
+  const body = { repairScope: 'OWN', productId: 'pw9', lotId: lotOf(DB, d.line), issueDescription: 'PC2 old', receivedAt: '2026-10-10',
+    repairType: 'internal', inHouseWorkType: 'polishing', inHouseCost: 15 };
+  const vp = S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]);
+  const pc2a = await run(svc.runRepairCreate as never, 3, 'repairs.create', body);
+  ok(pc2a.kind !== 'ok' && pc2a.code === 'REPAIR_COST_DATE_REQUIRED' && S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]) === vp,
+    `R11 PC2 Anlegen ohne Tag: abgewiesen, nichts angelegt (${S(pc2a).slice(0, 100)})`);
+  const pc2b = await run(svc.runRepairCreate as never, 4, 'repairs.create', { ...body, costDate: '2026-10-24' });
+  ok(pc2b.kind === 'ok' && s(DB, "SELECT l.cost_date FROM repair_lines l JOIN repairs r ON r.id = l.repair_id WHERE r.product_id = 'pw9'") === '2026-10-24',
+    `R11 PC2 Anlegen mit Tag: eigene Zeile am gewählten Tag (${pc2b.kind})`);
+
+  // Annahmetag in einem eingereichten Quartal: ebenfalls kein stilles „heute".
+  const e = await kauf('pw10', 1000);
+  const R2 = await reparatur('pw10', lotOf(DB, e.line), '2026-10-20');
+  quartalZu(2026, 4);
+  const vq = stand();
+  ok(await fehler(() => zeileNeu(R2, { supplierId: 'sup-1', workType: 'service', costAmount: 10 })) === 'REPAIR_COST_DATE_REQUIRED' && stand() === vq,
+    'R11 Annahmetag im eingereichten Quartal: Zeile ohne Tag abgewiesen');
+  quartalAuf(2026, 4);
+  abgleich('R11');
 }
 
 console.log(`\nrepair-cost-date: ${PASS} passed, ${fails.length} failed`);

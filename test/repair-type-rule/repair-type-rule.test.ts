@@ -84,6 +84,8 @@ const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m
 const src = (p: string): string => readFileSync(resolvePath(repo, p), 'utf8');
 const codeOf = (t: string): string => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
 const NOW = '2026-09-10T10:00:00.000Z';
+// Owner 12.11.2026 — die Fixture-Reparaturen sind nach dem Eröffnungsstichtag angenommen: ihr Annahmetag ist die Vorgabe des Kostendatums.
+const ANNAHME = '2026-10-20T10:00:00.000Z';
 
 interface Db {
   run(sql: string, p?: unknown[]): unknown;
@@ -514,7 +516,7 @@ for (const weg of WEGE) {
   const alt = (id: string, typ: string, extra: Record<string, unknown>) => insert(db, 'repairs', {
     id, branch_id: 'branch-main', repair_number: 'ALT-' + id, customer_id: 'cust-1', repair_scope: 'CUSTOMER', repair_type: typ,
     issue_description: 'Alt', charge_to_customer: 70, internal_cost: 0, status: 'in_progress', tax_scheme: 'VAT_10', images: '[]',
-    item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: NOW, created_at: NOW, updated_at: NOW, ...extra });
+    item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: ANNAHME, created_at: NOW, updated_at: NOW, ...extra });
   alt('l-int', 'internal', {});
   alt('l-ext', 'external', { workshop_supplier_id: 'sup-1', estimated_cost: 30, internal_cost: 30 });
   alt('l-hyb', 'hybrid', { workshop_supplier_id: 'sup-1', estimated_cost: 20 });
@@ -584,7 +586,7 @@ for (const weg of WEGE) {
   const altGebuehr = (id: string): string => {
     insert(db, 'repairs', { id, branch_id: 'branch-main', repair_number: 'ALT-' + id, customer_id: 'cust-1', repair_scope: 'CUSTOMER',
       repair_type: 'external', workshop_supplier_id: 'sup-1', estimated_cost: 25, internal_cost: 25, issue_description: 'Alt', charge_to_customer: 70,
-      status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: NOW, created_at: NOW, updated_at: NOW });
+      status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: ANNAHME, created_at: NOW, updated_at: NOW });
     reload();
     return id;
   };
@@ -669,7 +671,7 @@ for (const weg of WEGE) {
   const alt = (id: string, extra: Record<string, unknown> = {}): string => {
     insert(db, 'repairs', { id, branch_id: 'branch-main', repair_number: 'ALT-' + id, customer_id: 'cust-1', repair_scope: 'CUSTOMER',
       repair_type: 'external', workshop_supplier_id: 'sup-1', estimated_cost: 25, internal_cost: 25, issue_description: 'Alt', charge_to_customer: 70,
-      status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: NOW, created_at: NOW, updated_at: NOW, ...extra });
+      status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: ANNAHME, created_at: NOW, updated_at: NOW, ...extra });
     reload();
     return id;
   };

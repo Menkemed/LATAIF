@@ -1,7 +1,9 @@
 // ════════════════════════════════════════════════════════════════════════════
 // REPAIR COST DATE (Owner 12.11.2026) — das Kostendatum einer Reparatur-Kostenzeile (Arbeit, Material, In-house).
 //
-//   • Vorgabe: das Annahmedatum der Reparatur (`received_at`). Liegt es vor dem Eröffnungsstichtag, gilt heute.
+//   • Vorgabe: das Annahmedatum der Reparatur (`received_at`). Liegt es vor dem Eröffnungsstichtag (oder in einem
+//     geschlossenen Quartal), gibt es KEINE Vorgabe — nie still „heute": die Maske bittet um einen zulässigen Tag, und
+//     der Primary lehnt eine Kostenzeile mit Betrag ohne gewählten Tag verständlich ab (`REPAIR_COST_DATE_REQUIRED`).
 //   • Wählbar: ein echter Kalendertag bis heute in Bahrain (dieselbe Regel wie ein Zahlungstag, `payment-date`),
 //     in einer offenen Periode — nicht vor dem Eröffnungsstichtag, nicht in einem eingereichten/VAT-bezahlten Quartal.
 //   • Die Ausgabe (Werkstatt/Material) und die Kostenbuchung (Ausgabe bzw. aktivierte Eigenleistung) stehen an diesem
@@ -18,20 +20,40 @@ import { RepairActionRejected } from './repair-rules';
 export const REPAIR_COST_DATE_INVALID = 'REPAIR_COST_DATE_INVALID';
 export const REPAIR_COST_DATE_BEFORE_OPENING = 'REPAIR_COST_DATE_BEFORE_OPENING';
 export const REPAIR_COST_DATE_PERIOD_FILED = 'VAT_PERIOD_FILED';
+export const REPAIR_COST_DATE_REQUIRED = 'REPAIR_COST_DATE_REQUIRED';
+
+const TAG_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Der Annahmetag der Reparatur (JJJJ-MM-TT) aus `received_at`, sonst `created_at`. */
 export function repairReceivedDay(r: { receivedAt?: string | null; createdAt?: string | null }): string {
   return String(r.receivedAt || r.createdAt || '').slice(0, 10);
 }
 
+/** Ein Tag lesbar („05 Nov 2026") — für Hinweise und Ablehnungen. */
+function tagText(d: string): string {
+  const t = Date.parse(`${d}T00:00:00.000Z`);
+  if (!TAG_RE.test(d) || Number.isNaN(t)) return d;
+  return new Date(t).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
+}
+
 /**
- * Die Vorgabe für die Maske (rein, ohne Datenbank): der Annahmetag — liegt er vor dem Eröffnungsstichtag, ungültig oder
- * in der Zukunft, dann heute in Bahrain. Ein eingereichtes Quartal kennt erst der Primary (er lehnt dann verständlich ab).
+ * Die Vorgabe für die Maske (rein, ohne Datenbank): der Annahmetag — oder '' (KEINE Vorgabe), wenn er vor dem
+ * Eröffnungsstichtag liegt, ungültig ist oder in der Zukunft. Dann wählt der Nutzer den Tag ausdrücklich
+ * (`repairCostDatePrompt`). Ein eingereichtes Quartal kennt erst der Primary (er lehnt dann verständlich ab).
  */
-export function defaultRepairCostDay(receivedDay: string, nowMs: number = Date.now()): string {
-  const heute = bahrainTodayIso(nowMs);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(receivedDay) || receivedDay < OPENING_CUTOFF_DATE || receivedDay > heute) return heute;
+export function defaultRepairCostDay(receivedDay: string, nowMs: number = Date.now(), cutoff: string = OPENING_CUTOFF_DATE): string {
+  if (!TAG_RE.test(receivedDay) || receivedDay < cutoff || receivedDay > bahrainTodayIso(nowMs)) return '';
   return receivedDay;
+}
+
+/** Die Aufforderung der Maske, wenn es keine Vorgabe gibt — sonst null. */
+export function repairCostDatePrompt(receivedDay: string, nowMs: number = Date.now(), cutoff: string = OPENING_CUTOFF_DATE): string | null {
+  if (defaultRepairCostDay(receivedDay, nowMs, cutoff)) return null;
+  if (TAG_RE.test(receivedDay) && receivedDay < cutoff) {
+    return `This repair was received on ${tagText(receivedDay)}, before the opening (${tagText(cutoff)}). `
+      + `Please choose the cost date — a day from ${tagText(cutoff)} up to today.`;
+  }
+  return 'Please choose the cost date — a day up to today.';
 }
 
 /** Warum dieser Tag als Kostendatum nicht geht — oder null. Rein lesend, vor jedem Schreiben. */
@@ -62,12 +84,28 @@ export function assertRepairCostDay(day: unknown, branchId: string, nowMs: numbe
 }
 
 /**
- * Das Kostendatum einer NEUEN Zeile am Primary: das gewählte (geprüft) — sonst der Annahmetag, wenn er offen ist, sonst
- * heute in Bahrain.
+ * Das Kostendatum einer NEUEN Kostenzeile am Primary — nie still „heute":
+ *   • gewählt → geprüft (offene Periode, nicht künftig);
+ *   • sonst der Annahmetag, wenn er ein offener Kostentag ist;
+ *   • sonst: mit Betrag ein verständliches Nein (`REPAIR_COST_DATE_REQUIRED`, die Aufforderung der Maske); ohne Betrag
+ *     (bucht nichts, z. B. eigene Arbeit 0.000) bleibt die Zeile ohne Datum (`null`) — bekommt sie später einen Betrag,
+ *     gilt dieselbe Regel (`updateRepairLine`).
  */
-export function newLineCostDay(repairId: string, branchId: string, chosen: unknown, nowMs: number): string {
+export function lineCostDayFor(receivedDay: string, branchId: string, chosen: unknown, nowMs: number, amount: number): string | null {
+  if (chosen !== undefined && chosen !== null && chosen !== '') return assertRepairCostDay(chosen, branchId, nowMs);
+  const cutoff = openingCutoffDay();
+  const vorgabe = defaultRepairCostDay(receivedDay, nowMs, cutoff);
+  const issue = vorgabe ? repairCostDayIssue(vorgabe, branchId, nowMs, 'The received day') : null;
+  if (vorgabe && !issue) return vorgabe;
+  if (!(Number(amount) > 0)) return null;
+  throw new RepairActionRejected(REPAIR_COST_DATE_REQUIRED, issue
+    ? `${issue.message} — please choose the cost date (a day in an open period, up to today)`
+    : (repairCostDatePrompt(receivedDay, nowMs, cutoff) ?? 'Please choose the cost date'));
+}
+
+/** `lineCostDayFor` für eine bestehende Reparatur (Annahmetag aus der Datenbank). */
+export function newLineCostDay(repairId: string, branchId: string, chosen: unknown, nowMs: number, amount: number): string | null {
   if (chosen !== undefined && chosen !== null && chosen !== '') return assertRepairCostDay(chosen, branchId, nowMs);
   const r = query('SELECT received_at, created_at FROM repairs WHERE id = ?', [repairId])[0];
-  const vorgabe = defaultRepairCostDay(repairReceivedDay({ receivedAt: r?.received_at as string, createdAt: r?.created_at as string }), nowMs);
-  return repairCostDayIssue(vorgabe, branchId, nowMs) ? bahrainTodayIso(nowMs) : vorgabe;
+  return lineCostDayFor(repairReceivedDay({ receivedAt: r?.received_at as string, createdAt: r?.created_at as string }), branchId, chosen, nowMs, amount);
 }

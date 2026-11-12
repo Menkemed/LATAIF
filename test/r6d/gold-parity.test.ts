@@ -82,6 +82,8 @@ const src = (p: string): string => readFileSync(resolvePath(repo, p), 'utf8');
 const codeOf = (s: string): string => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
 const S = (v: unknown): string => JSON.stringify(v);
 const NOW = '2026-09-13T10:00:00.000Z';
+// Owner 12.11.2026 — die Fixture-Reparaturen sind nach dem Eröffnungsstichtag angenommen: ihr Annahmetag ist die Vorgabe des Kostendatums.
+const ANNAHME = '2026-10-20T10:00:00.000Z';
 
 interface Db {
   run(sql: string, p?: unknown[]): unknown;
@@ -141,9 +143,9 @@ function freshDb(): Db {
     insert(db, 'suppliers', { id, branch_id: branch, name: 'Lieferant ' + id, active, created_at: NOW, updated_at: NOW });
   }
   insert(db, 'repairs', { id: 'rep-1', branch_id: 'branch-main', repair_number: 'REP-1', customer_id: 'c1', status: 'in_progress',
-    repair_type: 'internal', repair_scope: 'CUSTOMER', tax_scheme: 'ZERO', received_at: NOW, created_at: NOW, updated_at: NOW });
+    repair_type: 'internal', repair_scope: 'CUSTOMER', tax_scheme: 'ZERO', received_at: ANNAHME, created_at: NOW, updated_at: NOW });
   insert(db, 'repairs', { id: 'rep-x', branch_id: 'branch-other', repair_number: 'REP-X', customer_id: 'cx', status: 'in_progress',
-    repair_type: 'internal', repair_scope: 'CUSTOMER', tax_scheme: 'ZERO', received_at: NOW, created_at: NOW, updated_at: NOW });
+    repair_type: 'internal', repair_scope: 'CUSTOMER', tax_scheme: 'ZERO', received_at: ANNAHME, created_at: NOW, updated_at: NOW });
   for (const [id, branch, st, cust] of [['ord-1', 'branch-main', 'pending', 'c1'], ['ord-2', 'branch-main', 'pending', 'c1'],
     ['ord-c', 'branch-main', 'cancelled', 'c1'], ['ord-x', 'branch-other', 'pending', 'cx']]) {
     insert(db, 'orders', { id, branch_id: branch, order_number: id.toUpperCase(), customer_id: cust, status: st, created_at: NOW, updated_at: NOW });

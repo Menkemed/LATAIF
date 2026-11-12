@@ -12,6 +12,8 @@
 //   E  PC2: Reparatur-Kostendatum — „Edit date" an der bezahlten Werkstattzeile: nach der Zahlung abgewiesen, davor
 //      gebucht (Storno am alten, Neubuchung am neuen Tag, Zahlung unverändert); In-house-Zeile mit Kostendatum; Primary gleich.
 //   F  PC2: „Pay Supplier" 150 auf 120 offen → 30 Vorauszahlung: Banking zeigt den vollen Geldabgang, je Zeile genau einmal.
+//   G  PC2: Annahme vor der Eröffnung — „Add Work", „Add Material" und „New Repair" bitten um ein Kostendatum (kein stilles
+//      „heute"); „Add Line" erst mit Tag; Zeile am gewählten Tag; Primary gleich. Nur G: E2E_SZENEN=G.
 //
 // PROZESS-ISOLATION (Gerüst aus b23-purchase-offset.e2e.mjs): gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf
 // gestartet hat oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -308,10 +310,17 @@ function seed() {
       created_at: now, updated_at: now });
     ausgabe(EXP_T, NUM_T, 'Miscellaneous', 120, '2026-11-03', { related_module: 'repair', related_entity_id: 'eps-rep-t', description: 'Workshop prepaid' }, SUP3);
     artikel('-s', PUR_S, PNUM_S, SUP2, 'UNPAID', 200, 0, '2026-11-04');
+    // G: eine Kundenreparatur, angenommen VOR der Eröffnung (10.10.2026) — keine stille Vorgabe für das Kostendatum.
+    insert(db, 'repairs', { id: 'eps-rep-alt', branch_id, repair_number: 'REP-2026-000977', customer_id: 'eps-kunde', status: 'received',
+      repair_scope: 'CUSTOMER', repair_type: 'internal', issue_description: 'Old intake', received_at: '2026-10-10T09:00:00.000Z',
+      created_at: now, updated_at: now });
     le('eps-le-pur-s-d', 'INVENTORY', 'DEBIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
     le('eps-le-pur-s-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
   } finally { db.close(); }
 }
+// Szenenwahl (optional): E2E_SZENEN=G führt nur Szene G aus — Aufbau, Anmeldung und Welt laufen immer.
+const SZENEN = (process.env.E2E_SZENEN || '').toUpperCase();
+const szene = (k) => !SZENEN || SZENEN.includes(k);
 /** Der heutige Kalendertag in Bahrain (wie die Masken vorbelegen und was gebucht wird). */
 const HEUTE = () => new Date(Date.now() + 3 * 3600 * 1000).toISOString().slice(0, 10);
 /** Der Standardtag des Primary ohne Angabe (UTC) — nur ein ANDERER Tag reist im Auftrag. */
@@ -456,7 +465,7 @@ try {
   const heuteImAuftrag = () => (HEUTE() === UTC_HEUTE() ? undefined : HEUTE());
 
   // ── A Primary: Ausgabenliste → „Record payment" ⇒ 300 Cash am 03.11. (Tastatur) + „Add payment method" ⇒ 200 Bank heute ──
-  {
+  if (szene('A')) {
     await gehFrisch(primary, '/expenses');
     await waitFor(primary, `[data-expense-pay-open="${EXP_A}"]`, 45000);
     ok(await mausKlick(primary, `[data-expense-pay-open="${EXP_A}"]`) === 'OK', 'A Primary: Maus auf „Record payment" an Ausgabe A');
@@ -496,7 +505,7 @@ try {
   }
 
   // ── B PC2: Reparatur (hybrid) → A/P-Chip ⇒ Tag vor der Werkstattkost schon in der Maske gesperrt; dann 150 Cash am 06.11. ─
-  {
+  if (szene('B')) {
     await syncRuhe();
     client = await lade(client, `/repairs/${REP}`);
     await waitFor(client, `[data-repair-expense-pay="${EXP_R}"]`, 45000);
@@ -531,7 +540,7 @@ try {
   }
 
   // ── C PC2: Ausgabenliste → geteilt 100 Benefit am 04.11. (Tastatur) + 300 Cash heute — EIN Fernauftrag mit payments ──────
-  {
+  if (szene('C')) {
     await syncRuhe();
     client = await lade(client, '/expenses');
     await waitFor(client, `[data-expense-pay-open="${EXP_B}"]`, 45000);
@@ -567,7 +576,7 @@ try {
   }
 
   // ── D PC2: Lieferant → „Pay Supplier" 320 Bank (FIFO: Ausgabe 120 + Einkauf 200); Tag per Tastatur: 03.11. gesperrt, 05.11. ──
-  {
+  if (szene('D')) {
     await syncRuhe();
     const ap0 = apSaldo(SUP2);
     client = await lade(client, `/suppliers/${SUP2}`);
@@ -617,7 +626,7 @@ try {
 
   // ── E PC2: Reparatur-Kostendatum — „Edit date" an der bezahlten Werkstattzeile (nach der Zahlung abgewiesen, davor
   //    gebucht), dann eine In-house-Zeile mit Kostendatum per Tastatur; der Primary zeigt dasselbe ────────────────────
-  {
+  if (szene('E')) {
     await syncRuhe();
     const rlAnzeige = '[data-repair-line-cost-date-show="eps-rl"]';
     client = await lade(client, `/repairs/${REP}`);
@@ -683,7 +692,7 @@ try {
   }
 
   // ── F PC2: Banking nach „Pay Supplier" mit Überzahlung — 150 bezahlt, 120 offen → 30 Vorauszahlung als eigene Zeile ───
-  {
+  if (szene('F')) {
     await syncRuhe();
     client = await lade(client, `/suppliers/${SUP3}`);
     await waitFor(client, '[data-supplier-pay-open]', 45000);
@@ -709,6 +718,65 @@ try {
     ok(S(bzE) === S([[HEUTE(), 'Cash', '120.000']]) && S(bzV) === S([[HEUTE(), 'Cash', '30.000']]),
       `F Banking am PC2: 120 Ausgabe + 30 Vorauszahlung = der volle Geldabgang 150, je genau einmal (${S(bzE)} ${S(bzV)})`);
     await foto(client, 'eps-f-pc2-banking-prepayment');
+  }
+
+  // ── G PC2: Annahme VOR der Eröffnung (10.10.) — kein stilles „heute": „Add Work", „Add Material" und „New Repair" bitten
+  //    um einen Tag; erst mit gewähltem Tag wird gespeichert; der Primary zeigt dasselbe Kostendatum ─────────────────────
+  if (szene('G')) {
+    await syncRuhe();
+    client = await lade(client, '/repairs/eps-rep-alt');
+    await waitFor(client, '[data-repair-add-work]', 45000);
+    ok(await mausKlick(client, '[data-repair-add-work]') === 'OK', 'G PC2: Maus auf „+ Add Work"');
+    await waitFor(client, '[data-repair-line-cost-date]', 15000);
+    const hinweis = await text(client, '[data-repair-line-cost-date-prompt]');
+    ok(await wert(client, '[data-repair-line-cost-date]') === '' && /received on 10 Oct 2026, before the opening \(15 Oct 2026\)/.test(hinweis) && /choose the cost date/.test(hinweis),
+      `G Add Work: Kostendatum leer, verständliche Aufforderung (${hinweis})`);
+    ok(await tippe(client, '[data-repair-line-cost]', '40') === 'OK', 'G Tastatur: Kosten 40 (In-house)');
+    ok(await gesperrt(client, '[data-add-repair-line]') === true, 'G ohne Kostendatum: „Add Line" gesperrt');
+    await foto(client, 'eps-g-pc2-add-work-prompt');
+    const t1 = await datumTippen(client, '[data-repair-line-cost-date]', '2026-10-21');
+    ok(t1 === 'OK', `G Maus + Tastatur ins Kostendatum: 21.10. (${t1})`);
+    ok(await gesperrt(client, '[data-add-repair-line]') === false && !(await exists(client, '[data-repair-line-cost-date-prompt]')),
+      'G mit gewähltem Tag: „Add Line" frei, Aufforderung weg');
+    const vorA = (await kommandos(client)).filter((x) => x.op === 'repairs.add_line').length;
+    ok(await mausKlick(client, '[data-add-repair-line]') === 'OK', 'G Maus auf „Add Line"');
+    await dateiBis(() => Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = 'eps-rep-alt' AND cost_amount = 40")[0]?.n) === 1);
+    const neu = dbQ(BIZ_DB, "SELECT id, cost_date FROM repair_lines WHERE repair_id = 'eps-rep-alt' AND cost_amount = 40")[0] || {};
+    const pa = (await kommandos(client)).filter((x) => x.op === 'repairs.add_line');
+    ok(neu.cost_date === '2026-10-21' && pa.length === vorA + 1 && pa.at(-1)?.payload?.costDate === '2026-10-21',
+      `G Zeile am gewählten Kostendatum 21.10., EIN Auftrag mit costDate (${S(neu)} ${S(pa.at(-1)?.payload)})`);
+    // „Add Material": dieselbe Aufforderung im Feld.
+    await warteBis(client, "!document.querySelector('[data-add-repair-line]')", 10000);
+    ok(await mausKlick(client, '[data-material-open]') === 'OK', 'G Maus auf „+ Add Material"');
+    await waitFor(client, '[data-material-cost-date]', 15000);
+    const mHinweis = await text(client, '[data-material-cost-date-prompt]');
+    ok(await wert(client, '[data-material-cost-date]') === '' && /before the opening/.test(mHinweis), `G Add Material: Kostendatum leer, Aufforderung (${mHinweis.slice(0, 60)})`);
+    await foto(client, 'eps-g-pc2-material-prompt');
+    await clickText(client, 'Cancel');
+    // „New Repair": Annahme 10.10. + eigene Arbeit mit Kosten ⇒ „COST DATE *" mit Aufforderung.
+    client = await lade(client, '/repairs');
+    await waitFor(client, '[data-repair-new]', 45000);
+    ok(await mausKlick(client, '[data-repair-new]') === 'OK', 'G Maus auf „New Repair"');
+    await waitFor(client, '[data-repair-received-date] input', 15000);
+    const t2 = await datumTippen(client, '[data-repair-received-date] input', '2026-10-10');
+    ok(t2 === 'OK', `G Maus + Tastatur: Annahme 10.10. (${t2})`);
+    ok(!(await exists(client, '[data-repair-create-cost-date]')), 'G ohne Kosten: kein Kostendatum gefragt');
+    ok(await mausKlick(client, '[data-repair-create-inhouse]') === 'OK', 'G Maus: „In-house" ankreuzen');
+    await waitFor(client, '[data-repair-create-inhouse-cost]', 10000);
+    ok(await tippe(client, '[data-repair-create-inhouse-cost]', '25') === 'OK', 'G Tastatur: eigene Kosten 25');
+    await waitFor(client, '[data-repair-create-cost-date]', 10000);
+    const aHinweis = await text(client, '[data-repair-create-cost-date-prompt]');
+    ok(await wert(client, '[data-repair-create-cost-date]') === '' && /received on 10 Oct 2026, before the opening/.test(aHinweis),
+      `G New Repair: „COST DATE *" leer, Aufforderung (${aHinweis.slice(0, 70)})`);
+    await foto(client, 'eps-g-pc2-new-repair-cost-date', '[data-repair-received-date]');
+    // Der Primary zeigt das Kostendatum der neuen Zeile.
+    await syncRuhe();
+    await gehFrisch(primary, '/repairs/eps-rep-alt');
+    const sel = `[data-repair-line-cost-date-show="${String(neu.id)}"]`;
+    await warteBis(primary, `document.querySelector(${S(sel)})`, 30000);
+    const prim = await text(primary, sel);
+    ok(/21 Oct 2026/.test(prim), `G Primary zeigt dasselbe Kostendatum (${prim})`);
+    ok(S(await treffer(client)) === '[]', 'G PC2 griff nie nach einer lokalen Datenbank');
   }
 
 } catch (e) {

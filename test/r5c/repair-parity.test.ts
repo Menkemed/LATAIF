@@ -1137,14 +1137,25 @@ for (const weg of ['fern', 'lokal'] as const) {
   const tag = (db: Db, id: string): string => String(db.exec('SELECT received_at FROM repairs WHERE id = ?', [id])[0]?.values?.[0]?.[0] ?? '');
   const zahl = (db: Db): number => Number(db.exec('SELECT COUNT(*) FROM repairs')[0]?.values?.[0]?.[0] ?? 0);
   let db = freshDb();
-  const lokal = await house.createRepairOnPrimary({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never);
-  const tLokal = tag(db, lokal.id);
+  // Owner 12.11.2026 — Annahme vor der Eröffnung (15.10.) MIT Werkstattgebühr: das Kostendatum der Zeile wird gewählt (kein stilles
+  // „heute") — ohne Wahl lehnen beide Wege gleich ab, nichts angelegt.
+  let lokalOhneTag = '';
+  try { await house.createRepairOnPrimary({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never); } catch (e) { lokalOhneTag = String((e as { code?: string }).code ?? e); }
+  const fernOhneTag = await cmd.runRepairCreate(deps(db), identity('900', 'repairs.create'), rules.repairCreateBody({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never, []));
+  ok(lokalOhneTag === 'REPAIR_COST_DATE_REQUIRED' && fernOhneTag.kind !== 'ok' && (fernOhneTag as { code?: string }).code === 'REPAIR_COST_DATE_REQUIRED' && zahl(db) === 0,
+    `DATUM rückwirkend vor der Eröffnung mit Gebühr, ohne Kostendatum: lokal == fern abgewiesen, nichts angelegt (${lokalOhneTag} / ${JSON.stringify(fernOhneTag)})`);
   db = freshDb();
-  const body = rules.repairCreateBody({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never, []);
+  const lokal = await house.createRepairOnPrimary({ ...FORM_KUNDE, receivedAt: '2026-08-15', costDate: '2026-10-20' } as never);
+  const tLokal = tag(db, lokal.id);
+  const kLokal = String(db.exec('SELECT cost_date FROM repair_lines WHERE repair_id = ?', [lokal.id])[0]?.values?.[0]?.[0] ?? '');
+  db = freshDb();
+  const body = rules.repairCreateBody({ ...FORM_KUNDE, receivedAt: '2026-08-15', costDate: '2026-10-20' } as never, []);
   const out = await cmd.runRepairCreate(deps(db), identity('901', 'repairs.create'), body);
   const tFern = out.kind === 'ok' ? tag(db, val<{ repairId: string }>(out).repairId) : '';
-  ok(body.receivedAt === '2026-08-15' && out.kind === 'ok' && tLokal === '2026-08-15T12:00:00.000Z' && tFern === tLokal,
-    `DATUM Reparatur rückwirkend: Annahme am gewählten Tag, lokal == fern (${tLokal} / ${tFern})`);
+  const kFern = out.kind === 'ok' ? String(db.exec('SELECT cost_date FROM repair_lines WHERE repair_id = ?', [val<{ repairId: string }>(out).repairId])[0]?.values?.[0]?.[0] ?? '') : '';
+  ok(body.receivedAt === '2026-08-15' && out.kind === 'ok' && tLokal === '2026-08-15T12:00:00.000Z' && tFern === tLokal
+    && kLokal === '2026-10-20' && kFern === kLokal,
+    `DATUM Reparatur rückwirkend: Annahme am gewählten Tag, Werkstattzeile am gewählten Kostendatum, lokal == fern (${tLokal} / ${tFern}; ${kLokal} / ${kFern})`);
   db = freshDb();
   const ohne = await house.createRepairOnPrimary(FORM_KUNDE);
   ok(!('receivedAt' in rules.repairCreateBody(FORM_KUNDE, [])) && tag(db, ohne.id).startsWith(heute), 'DATUM ohne Wahl: kein Datum im Rumpf, Annahme heute (wie bisher)');

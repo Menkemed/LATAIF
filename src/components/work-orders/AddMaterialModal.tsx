@@ -70,6 +70,8 @@ interface AddMaterialModalProps {
   costDate?: string;
   onCostDateChange?: (day: string) => void;
   maxCostDate?: string;
+  /** Ohne Vorgabe (Annahme vor der Eröffnung): die Aufforderung — gespeichert wird erst mit gewähltem Tag. */
+  costDatePrompt?: string | null;
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
@@ -89,8 +91,9 @@ function round3(n: number): string {
 
 export function AddMaterialModal({
   open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false, ownStockNote, workshopOnlyKinds,
-  costDate, onCostDateChange, maxCostDate,
+  costDate, onCostDateChange, maxCostDate, costDatePrompt,
 }: AddMaterialModalProps) {
+  const tagFehlt = costDate !== undefined && !!onCostDateChange && !costDate;
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [kind, setKind] = useState<Kind>('diamond');
   const [description, setDescription] = useState('');
@@ -275,6 +278,8 @@ export function AddMaterialModal({
       all = [...all, entry];
     }
     if (all.length === 0) { setError('Add at least one cost position'); return; }
+    // Owner 12.11.2026 — kein stilles „heute": ohne Vorgabe erst einen Tag wählen.
+    if (tagFehlt) { setError(costDatePrompt || 'Please choose the cost date — a day up to today.'); return; }
     if (onSubmitAll) {
       // Nur bei Erfolg schliessen — sonst bleibt alles stehen, und „Save" wiederholt denselben Versuch.
       if (await onSubmitAll(all)) onClose();
@@ -576,9 +581,15 @@ export function AddMaterialModal({
           <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: 10, alignItems: 'end' }}>
             <Input label="COST DATE" type="date" value={costDate} max={maxCostDate} disabled={busy}
               onChange={(e) => onCostDateChange(e.target.value)} data-material-cost-date />
-            <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
-              The day of these costs (default: the day the repair was received). The payment date is set when paying.
-            </p>
+            {tagFehlt ? (
+              <p style={{ fontSize: 11, color: '#B45309', margin: 0, lineHeight: 1.45 }} data-material-cost-date-prompt>
+                {costDatePrompt || 'Please choose the cost date — a day up to today.'}
+              </p>
+            ) : (
+              <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
+                The day of these costs (default: the day the repair was received). The payment date is set when paying.
+              </p>
+            )}
           </div>
         )}
 

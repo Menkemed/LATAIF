@@ -252,7 +252,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription',
     'repairType', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
     'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos', 'receivedAt',
-    'inHouseWorkType', 'inHouseCost', 'workshopWorkType',
+    'inHouseWorkType', 'inHouseCost', 'workshopWorkType', 'costDate',
   ]);
   const scope = raw.repairScope === undefined ? 'CUSTOMER' : String(raw.repairScope);
   if (scope !== 'CUSTOMER' && scope !== 'OWN') throw new ServicePayloadError(`unknown repair scope: ${scope || '(none)'}`);
@@ -280,7 +280,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     if (raw[k] !== undefined && raw[k] !== null) money(raw[k], k);
   }
   for (const k of ['customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel',
-    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedReady', 'staffId', 'notes', 'receivedAt'] as const) {
+    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedReady', 'staffId', 'notes', 'receivedAt', 'costDate'] as const) {
     optString(raw[k], k);
   }
   if (raw.itemAttributes !== undefined) plainAttributes(raw.itemAttributes, 'itemAttributes');
@@ -351,7 +351,8 @@ export async function runRepairCreate(
     // Werkstatt und Kosten zusammenkommen — die erste Arbeitszeile.
     // MEDIA-REPAIR — die Zeile hält keine Bytes mehr; die Fotos hängen als Verknüpfungen daran,
     // in DERSELBEN Klammer wie die Reparatur.
-    const repair = useRepairStore.getState().createRepair({ ...data, images: [] });
+    // Owner 12.11.2026 — `createRepair` kann verständlich ablehnen (Kostendatum fehlt): als Nein des Hauses, VOR jedem Schreiben.
+    const repair = house(() => useRepairStore.getState().createRepair({ ...data, images: [] }));
     if (mediaIds.length > 0) house(() => applyRepairGallery(repair.id, mediaIds));
     return repairState(repair.id) as unknown as Record<string, unknown>;
   });

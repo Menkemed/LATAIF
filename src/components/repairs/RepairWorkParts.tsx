@@ -124,16 +124,23 @@ interface WorkLineFormProps {
   prefix: string;
   /** Die Kennung des Speichern-Knopfs (bestehende Prüfungen greifen darauf zu). */
   saveAttr: string;
-  /** Owner 12.11.2026 — mit Vorgabe (Annahmetag) zeigt die Form das Feld „COST DATE"; ohne nicht. */
+  /**
+   * Owner 12.11.2026 — gesetzt (auch '') zeigt die Form das Feld „COST DATE": vorbelegt mit dem Annahmetag; '' = keine
+   * Vorgabe (Annahme vor der Eröffnung) — dann bittet die Form um einen Tag (`costDatePrompt`) und speichert erst danach.
+   */
   defaultCostDate?: string;
+  /** Die Aufforderung, wenn es keine Vorgabe gibt (`repairCostDatePrompt`). */
+  costDatePrompt?: string | null;
   /** Der späteste wählbare Tag (heute in Bahrain). */
   maxCostDate?: string;
 }
 
-export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppliers, busy, showDueDate, prefix, saveAttr, defaultCostDate, maxCostDate }: WorkLineFormProps) {
+export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppliers, busy, showDueDate, prefix, saveAttr, defaultCostDate, costDatePrompt, maxCostDate }: WorkLineFormProps) {
   const options = useMemo(() => workshopOptions(suppliers, [draft.supplierId]), [suppliers, draft.supplierId]);
   const result = workLineValues(draft);
   const ext = draft.source === 'external';
+  // Ohne Vorgabe und ohne gewählten Tag: kein stilles „heute" — erst einen Tag wählen.
+  const tagFehlt = defaultCostDate !== undefined && !defaultCostDate && !draft.costDate;
   const seg = (on: boolean): React.CSSProperties => ({
     flex: 1, padding: '8px 10px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', cursor: 'pointer',
     color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#715DE3' : 'transparent',
@@ -179,9 +186,15 @@ export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppli
         <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: 10, alignItems: 'end' }}>
           <Input label="COST DATE" type="date" value={draft.costDate || defaultCostDate} max={maxCostDate}
             onChange={(e) => onChange({ ...draft, costDate: e.target.value })} {...attr('cost-date')} />
-          <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
-            The day of this cost (default: the day the repair was received). The payment date is set when paying.
-          </p>
+          {tagFehlt ? (
+            <p style={{ fontSize: 11, color: '#B45309', margin: 0, lineHeight: 1.45 }} {...attr('cost-date-prompt')}>
+              {costDatePrompt || 'Please choose the cost date — a day up to today.'}
+            </p>
+          ) : (
+            <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
+              The day of this cost (default: the day the repair was received). The payment date is set when paying.
+            </p>
+          )}
         </div>
       )}
       <p style={{ fontSize: 11, color: '#4B5563', margin: 0, lineHeight: 1.45 }}>
@@ -194,7 +207,7 @@ export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppli
       )}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" disabled={!!busy || 'problem' in result} {...{ [`data-${saveAttr}`]: true }}
+        <Button variant="primary" disabled={!!busy || 'problem' in result || tagFehlt} {...{ [`data-${saveAttr}`]: true }}
           onClick={() => { if ('values' in result) onSubmit(result.values); }}>Add Line</Button>
       </div>
     </div>

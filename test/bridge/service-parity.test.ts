@@ -189,7 +189,9 @@ const REPAIR_COMPARE = [
   const rules = codeOf('src/core/repairs/repair-rules.ts');
   const service = codeOf('src/core/bridge/service-commands.ts');
   // REPAIR-REDESIGN — die Maske teilt vorher nur die Werkstatt auf (geplant ohne Gebühr), dann dieselbe Vorbereitung.
-  ok(/const anlage = repairCreateWorkshopSplit\(\{ \.\.\.form, \.\.\.repairCreateWorkFields\(arbeit\) \}\);/.test(list) && /createRepairOnPrimary\(anlage\)/.test(list)
+  // Owner 12.11.2026 — dazu, nur wenn die Maske danach fragt, das gewählte Kostendatum der Zeilen der Anlage.
+  ok(/const anlage = repairCreateWorkshopSplit\(\{\s*\.\.\.form, \.\.\.repairCreateWorkFields\(arbeit\), \.\.\.\(anlageKostenHinweis && anlageKostenTag \? \{ costDate: anlageKostenTag \} : \{\}\),\s*\}\);/.test(list)
+    && /createRepairOnPrimary\(anlage\)/.test(list)
     && /internalCost: internalCostOnCreate\(input\),/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
   ok(/updateRepairOnPrimary\(id, form, fassung\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
@@ -221,7 +223,9 @@ const REPAIR_COMPARE = [
     'CALLPATH …aber Nummer, Gutscheincode und Anfangsstatus kommen von IHM');
   // Die EINE Ableitung, die es doch macht, betrifft die erste Arbeitszeile — und die teilen beide
   // Wege automatisch, weil sie im Store liegt.
-  ok(/const cost = data\.repairType === 'hybrid'/.test(createSeg),
+  // Owner 12.11.2026 — der Betrag steht VOR dem Schreiben fest (`werkstattBetrag`), weil sein Kostendatum vorher geprüft wird.
+  ok(/const werkstattBetrag = data\.workshopSupplierId && \(data\.repairType === 'external' \|\| data\.repairType === 'hybrid'\)\s*\? \(data\.repairType === 'hybrid'/.test(createSeg)
+    && /const cost = werkstattBetrag;/.test(createSeg),
     'CALLPATH die Kosten der ersten Arbeitszeile leitet der Store selbst ab — geteilt, ohne Zutun');
 }
 

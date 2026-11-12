@@ -12,7 +12,7 @@ import {
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
   repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop, changeRepairLineCostDateInHouse, type RepairCostDateChanged,
 } from '@/core/repairs/repair-cost-booking';
-import { assertRepairCostDay, newLineCostDay } from '@/core/repairs/repair-cost-date';
+import { assertRepairCostDay, lineCostDayFor, newLineCostDay, REPAIR_COST_DATE_REQUIRED } from '@/core/repairs/repair-cost-date';
 import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
 // Liste, Detailseite und Fernbefehl.
@@ -795,6 +795,17 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // OWN-scope: explizit NULL — kein Charge-Feld in der UI rendern lassen.
     const effectiveCharge = scope === 'OWN' ? null : (data.chargeToCustomer || null);
 
+    // Owner 12.11.2026 — das Kostendatum der Zeilen, die die Anlage gleich mit anlegt (Werkstattgebühr, eigene Arbeit):
+    // gewählt oder der Annahmetag — nie still „heute". Mit Betrag und ohne zulässigen Tag ein Nein VOR jedem Schreiben.
+    const werkstattBetrag = data.workshopSupplierId && (data.repairType === 'external' || data.repairType === 'hybrid')
+      ? (data.repairType === 'hybrid' ? (data.estimatedCost || 0) : (data.estimatedCost || data.internalCost || 0))
+      : 0;
+    const anlageKostenTag = werkstattBetrag > 0 || data.inHouseWork
+      ? lineCostDayFor(
+          businessTimestamp(isBusinessDate(data.receivedAt) ? data.receivedAt : undefined, now).slice(0, 10), branchId,
+          data.costDate, Date.parse(now), Math.max(werkstattBetrag, Number(data.inHouseWork?.costAmount) || 0))
+      : null;
+
     db.run(
       `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id, lot_id,
         item_category_id, item_attributes, tax_scheme,
@@ -830,17 +841,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // wie die Backfill-Migration, nur fuer NEW-repairs).
     if (data.workshopSupplierId && (data.repairType === 'external' || data.repairType === 'hybrid')) {
       const lineId = uuid();
-      const cost = data.repairType === 'hybrid'
-        ? (data.estimatedCost || 0)
-        : (data.estimatedCost || data.internalCost || 0);
+      const cost = werkstattBetrag;
       if (cost > 0) {
         db.run(
-          `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, status, created_at, updated_at)
-           VALUES (?, ?, ?, 1, ?, ?, ?, 'OPEN', ?, ?)`,
-          [lineId, branchId, id, data.workshopSupplierId, data.workshopWorkType || 'service', cost, now, now]
+          `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, status, cost_date, created_at, updated_at)
+           VALUES (?, ?, ?, 1, ?, ?, ?, 'OPEN', ?, ?, ?)`,
+          [lineId, branchId, id, data.workshopSupplierId, data.workshopWorkType || 'service', cost, anlageKostenTag, now, now]
         );
         trackInsert('repair_lines', lineId, {
           repairId: id, supplierId: data.workshopSupplierId, costAmount: cost, workType: data.workshopWorkType || 'service', fromCreateRepair: true,
+          costDate: anlageKostenTag ?? undefined,
         });
       }
     }
@@ -854,7 +864,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     // REPAIR-PREVIEW-PARITY — „In-house" angekreuzt: die eigene Arbeit steht gleich als Zeile da, über denselben Weg wie
     // „Add Work" (0.000 ist richtig und bucht nichts). So geht die gewählte Arbeitsart nicht verloren.
-    if (data.inHouseWork) get().addRepairLine(id, { workType: data.inHouseWork.workType, costAmount: data.inHouseWork.costAmount });
+    if (data.inHouseWork) {
+      get().addRepairLine(id, { workType: data.inHouseWork.workType, costAmount: data.inHouseWork.costAmount, costDate: anlageKostenTag ?? undefined });
+    }
 
     return get().getRepair(id)!;
   },
@@ -1470,8 +1482,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // material_details JSON. work_type wird 'material' wenn Material gesetzt ist.
     const zeilenDetails = headerFeeMaterialDetails(data.materialDetails, feeKopf, data.supplierId, data.materialKind);
     const matJson = zeilenDetails ? JSON.stringify(zeilenDetails) : null;
-    // Owner 12.11.2026 — das Kostendatum: gewählt (geprüft) oder der Annahmetag (offen), sonst heute — VOR dem Schreiben.
-    const kostenTag = newLineCostDay(repairId, branchId, data.costDate, Date.parse(now));
+    // Owner 12.11.2026 — das Kostendatum: gewählt (geprüft) oder der Annahmetag (offen) — nie still „heute": mit Betrag
+    // und ohne zulässige Vorgabe ein verständliches Nein, ohne Betrag kein Datum. VOR dem Schreiben.
+    const kostenTag = newLineCostDay(repairId, branchId, data.costDate, Date.parse(now), Number(data.costAmount) || 0);
     db.run(
       `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, description,
          cost_amount, expense_id, status, due_date, notes, material_kind, material_details, cost_date, created_at, updated_at)
@@ -1485,7 +1498,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     );
     trackInsert('repair_lines', id, {
       repairId, supplierId: data.supplierId, costAmount: data.costAmount, workType: data.workType,
-      materialKind: data.materialKind, costDate: kostenTag,
+      materialKind: data.materialKind, costDate: kostenTag ?? undefined,
     });
     // REPAIR-REDESIGN — die eingeplante Werkstatt ist mit ihrer ersten Arbeitszeile erfüllt: der Plan endet hier
     // (sonst bliebe sie nach dem Stornieren der Zeile als „geplant" stehen). Material ist keine Werkstattarbeit.
@@ -1568,6 +1581,23 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       }
     }
 
+    // Owner 12.11.2026 — bekommt eine Zeile OHNE Kostendatum (angelegt mit 0.000) einen Betrag, braucht sie ihren Tag: der
+    // Annahmetag, wenn er offen ist — sonst ein verständliches Nein (zuerst „Edit date"), nie still „heute". VOR jedem Schreiben.
+    let kostenTagNeu: string | null = null;
+    if (data.costAmount !== undefined && (Number(data.costAmount) || 0) > 0 && !((Number(line.costAmount) || 0) > 0) && !line.expenseId
+      && !query('SELECT cost_date FROM repair_lines WHERE id = ?', [lineId])[0]?.cost_date) {
+      let zweig: string;
+      try { zweig = currentBranchId(); } catch { zweig = 'branch-main'; }
+      try {
+        kostenTagNeu = newLineCostDay(line.repairId, zweig, undefined, Date.parse(now), Number(data.costAmount) || 0);
+      } catch (e) {
+        if (e instanceof RepairActionRejected && e.code === REPAIR_COST_DATE_REQUIRED) {
+          throw new RepairActionRejected(e.code, `${e.message} Set it with “Edit date” on this line first.`);
+        }
+        throw e;
+      }
+    }
+
     // POST-PARITY PP-13 — an EIGENER Ware nach „ready" steht der Betrag schon im Einstand: eine neue
     // Summe verschiebt ihn um die Differenz (nicht verkauft, nie negativ — sonst ein Nein vor jedem Schreiben).
     if (data.costAmount !== undefined && data.costAmount !== line.costAmount && line.status === 'OPEN') {
@@ -1593,10 +1623,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       if (col) { fields.push(`${col} = ?`); params.push(v === undefined ? null : v); }
     }
     if (fields.length === 0) return;
+    if (kostenTagNeu) { fields.push('cost_date = ?'); params.push(kostenTagNeu); }
     fields.push('updated_at = ?'); params.push(now);
     params.push(lineId);
     db.run(`UPDATE repair_lines SET ${fields.join(', ')} WHERE id = ?`, params);
-    trackUpdate('repair_lines', lineId, data);
+    trackUpdate('repair_lines', lineId, kostenTagNeu ? { ...data, costDate: kostenTagNeu } : data);
 
     // Wenn Cost veraendert + Line hat schon Expense aber NOCH KEINE Payment:
     // Expense.amount mit-aktualisieren + reverseSource+postExpense neu fuer
@@ -1640,7 +1671,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // POST-PARITY PP-13/PP-14 — eine gebuchte Zeile im Haus: die aktivierte Eigenleistung folgt dem Betrag.
     if (data.costAmount !== undefined && ownWorkLine) {
       // Owner 12.11.2026 — die Neubuchung steht am Kostendatum der Zeile (Altbestand: wie bisher heute).
-      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, line.costDate);
+      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, kostenTagNeu ?? line.costDate);
     }
 
     saveDatabase();

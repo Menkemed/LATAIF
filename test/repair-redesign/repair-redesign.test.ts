@@ -614,7 +614,9 @@ for (const weg of ['lokal', 'fern'] as const) {
   ok(/matchRepairWork\(rep, offeneZeilen\.get\(rep\.id\) \?\? \[\]/.test(liste) && /data-repair-filter-worktype/.test(liste)
     && /data-repair-filter-source/.test(liste) && /data-repair-filter-workshop/.test(liste) && /data-repair-filter-issue/.test(liste),
     'WIRE Liste: Arbeitsart-, Quellen- und Werkstattfilter über die geteilte Regel, mit Issue-Schalter');
-  ok(/const anlage = repairCreateWorkshopSplit\(\{ \.\.\.form, \.\.\.repairCreateWorkFields\(arbeit\) \}\);/.test(liste) && /data-repair-create-inhouse/.test(liste) && /data-repair-create-external/.test(liste)
+  // Owner 12.11.2026 — dazu, nur wenn die Maske danach fragt, das gewählte Kostendatum der Zeilen der Anlage.
+  ok(/const anlage = repairCreateWorkshopSplit\(\{\s*\.\.\.form, \.\.\.repairCreateWorkFields\(arbeit\), \.\.\.\(anlageKostenHinweis && anlageKostenTag \? \{ costDate: anlageKostenTag \} : \{\}\),\s*\}\);/.test(liste)
+    && /data-repair-create-inhouse/.test(liste) && /data-repair-create-external/.test(liste)
     && !/REPAIR_TYPES\.map/.test(liste), 'WIRE New Repair: „Wer arbeitet?" statt Typ-Knöpfen; Werkstatt ohne Gebühr wird eingeplant');
   ok(/data-quick-work-section/.test(quick) && /data-quick-material-section/.test(quick) && /<RepairWorkLineForm/.test(quick)
     && /actualCost: kosten\.hasLines \? rep\.actualCost/.test(quick) && /repairCostView\(rep, offen\)/.test(quick),

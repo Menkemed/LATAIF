@@ -159,6 +159,8 @@ export interface RepairCreateInput {
   estimatedReady?: string;
   /** BUSINESS-DATE — der Tag der Annahme (JJJJ-MM-TT), in der Maske wählbar; ohne Angabe heute. */
   receivedAt?: string;
+  /** Owner 12.11.2026 — das Kostendatum der mit angelegten Kostenzeilen (nur nötig, wenn der Annahmetag keiner sein kann). */
+  costDate?: string;
   staffId?: string;
   notes?: string;
 }
@@ -168,6 +170,8 @@ export interface RepairCreateWorkInput {
   inHouseWorkType?: RepairWorkType;
   inHouseCost?: number;
   workshopWorkType?: RepairWorkType;
+  /** Owner 12.11.2026 — das Kostendatum der Zeilen der Anlage (Werkstattgebühr, eigene Arbeit). */
+  costDate?: string;
 }
 
 function workTypeOf(v: unknown): RepairWorkType | undefined {
@@ -202,6 +206,9 @@ export function normalizeRepairCreate(form: Partial<Repair> & RepairCreateWorkIn
   const receivedAt = repairText(form.receivedAt);
   const datum = businessDateIssue(receivedAt, 'Received date');
   if (datum) throw new RepairActionRejected('INVALID_DATE', datum);
+  const costDate = repairText(form.costDate);
+  const kostenDatum = businessDateIssue(costDate, 'Cost date');
+  if (kostenDatum) throw new RepairActionRejected('INVALID_DATE', kostenDatum);
   return {
     repairScope: own ? 'OWN' : 'CUSTOMER',
     customerId: own ? undefined : repairText(form.customerId),
@@ -227,6 +234,7 @@ export function normalizeRepairCreate(form: Partial<Repair> & RepairCreateWorkIn
     taxScheme,
     estimatedReady: repairText(form.estimatedReady),
     receivedAt,
+    costDate,
     staffId: repairText(form.staffId),
     notes: repairText(form.notes),
   };
@@ -253,6 +261,8 @@ export type RepairCreatePlan = Partial<Repair> & {
   internalCostMirrored?: number;
   workshopWorkType?: RepairWorkType;
   inHouseWork?: { workType: RepairWorkType; costAmount: number };
+  /** Owner 12.11.2026 — das gewählte Kostendatum der Zeilen der Anlage (`createRepair` prüft es). */
+  costDate?: string;
 };
 
 /**
@@ -345,6 +355,7 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     chargeToCustomer: input.chargeToCustomer,
     estimatedReady: input.estimatedReady,
     receivedAt: input.receivedAt,
+    ...(input.costDate ? { costDate: input.costDate } : {}),
     staffId: input.staffId,
     notes: input.notes,
   };
@@ -361,7 +372,7 @@ export function repairCreateBody(form: Partial<Repair> & RepairCreateWorkInput, 
     'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel', 'itemReference',
     'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost',
     'chargeToCustomer', 'estimatedReady', 'receivedAt', 'staffId', 'notes',
-    'inHouseWorkType', 'inHouseCost', 'workshopWorkType',
+    'inHouseWorkType', 'inHouseCost', 'workshopWorkType', 'costDate',
   ] as const) {
     if (i[k] !== undefined) body[k] = i[k];
   }

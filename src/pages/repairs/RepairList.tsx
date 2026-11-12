@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
+import { bahrainTodayIso } from '@/core/utils/payment-date';
+import { repairCostDatePrompt } from '@/core/repairs/repair-cost-date';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
@@ -165,6 +167,12 @@ export function RepairList() {
   // REPAIR-PREVIEW-PARITY — „Who does the work?": eigener Entwurf, damit Abwählen nichts löscht (erneut ankreuzen holt die
   // Eingaben zurück). Gespeichert wird nur, was beim Anlegen angekreuzt ist (`repairCreateWorkFields`).
   const [arbeit, setArbeit] = useState<RepairCreateWorkDraft>(EMPTY_CREATE_WORK);
+  // Owner 12.11.2026 — das Kostendatum der Zeilen der Anlage: nur gefragt, wenn der Annahmetag keiner sein kann (vor der
+  // Eröffnung) und Kosten angegeben sind — nie still „heute".
+  const [anlageKostenTag, setAnlageKostenTag] = useState('');
+  const anlageMitKosten = (arbeit.inHouse && Number(arbeit.inHouseCost) > 0)
+    || (arbeit.external && !!arbeit.workshopId && Number(arbeit.workshopFee) > 0);
+  const anlageKostenHinweis = anlageMitKosten ? repairCostDatePrompt(form.receivedAt || todayIso()) : null;
   const [searchParams, setSearchParams] = useSearchParams();
   // R5C — dieselbe Liste, zwei Anschluesse hinter jeder Handlung (anlegen, abrechnen, weiterschalten).
   const w = useSharedWrites();
@@ -417,6 +425,7 @@ export function RepairList() {
   function openNew() {
     setForm({ repairScope: 'CUSTOMER', taxScheme: 'ZERO', itemAttributes: {} });
     setArbeit(EMPTY_CREATE_WORK);
+    setAnlageKostenTag('');
     setCreateHinweis('');
     setShowNew(true);
   }
@@ -452,6 +461,7 @@ export function RepairList() {
     }
     const arbeitsFehler = repairCreateWorkIssue(arbeit);
     if (arbeitsFehler) { setCreateHinweis(arbeitsFehler); return; }
+    if (anlageKostenHinweis && !anlageKostenTag) { setCreateHinweis(anlageKostenHinweis); return; }
     setCreateHinweis('');
     // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
     // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
@@ -473,7 +483,9 @@ export function RepairList() {
     }
     // REPAIR-REDESIGN — eine gewählte Werkstatt OHNE Gebühr ist eingeplant (`plannedWorkshopSupplierId`): keine
     // Arbeitszeile, keine Zuordnung als Altgebühr, keine Buchung. Mit Gebühr wie bisher: die Werkstattzeile entsteht.
-    const anlage = repairCreateWorkshopSplit({ ...form, ...repairCreateWorkFields(arbeit) });
+    const anlage = repairCreateWorkshopSplit({
+      ...form, ...repairCreateWorkFields(arbeit), ...(anlageKostenHinweis && anlageKostenTag ? { costDate: anlageKostenTag } : {}),
+    });
     const r = await w.save('repairs.create', {
       local: () => createRepairOnPrimary(anlage),
       remote: () => repairCreateBody(anlage, fotos),
@@ -547,7 +559,7 @@ export function RepairList() {
                 }}>{sf.label}</button>
             ))}
           </div>
-          <Button variant="primary" onClick={openNew}>New Repair</Button>
+          <Button variant="primary" onClick={openNew} data-repair-new>New Repair</Button>
         </div>
       }
     >
@@ -1471,6 +1483,15 @@ export function RepairList() {
               onChange={e => setForm({ ...form, receivedAt: e.target.value || undefined })} />
             <span style={{ fontSize: 11, color: '#6B7280', alignSelf: 'end', paddingBottom: 10 }}>Today by default — change it when the repair was taken in earlier.</span>
           </div>
+          {anlageKostenHinweis && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }} data-repair-create-cost-date-row>
+              <Input label="COST DATE *" type="date" value={anlageKostenTag} max={bahrainTodayIso()}
+                onChange={e => setAnlageKostenTag(e.target.value)} data-repair-create-cost-date />
+              <span style={{ fontSize: 11, color: '#B45309', alignSelf: 'end', paddingBottom: 6, lineHeight: 1.45 }} data-repair-create-cost-date-prompt>
+                {anlageKostenHinweis}
+              </span>
+            </div>
+          )}
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value })} />

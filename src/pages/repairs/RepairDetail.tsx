@@ -52,7 +52,7 @@ import {
   addRepairLineOnPrimary, cancelRepairLineOnPrimary, changeRepairCustomerOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary,
   updateRepairStatusOnPrimary, changeRepairLineCostDateOnPrimary,
 } from '@/core/repairs/repair-house';
-import { defaultRepairCostDay, repairReceivedDay } from '@/core/repairs/repair-cost-date';
+import { defaultRepairCostDay, repairCostDatePrompt, repairReceivedDay } from '@/core/repairs/repair-cost-date';
 import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import {
@@ -408,8 +408,10 @@ export function RepairDetail() {
     // die Kostenregel (eigene Arbeit ab 0.000, Werkstatt über 0) kommen aus der gemeinsamen Maske (`RepairWorkLineForm`).
     const fassung = fassungOderNichts('adding a repair line');
     if (fassung === null) return;
-    // Owner 12.11.2026 — das Kostendatum reist immer mit (gewählt oder die angezeigte Vorgabe, der Annahmetag).
-    const mitTag = { ...v, costDate: v.costDate || kostenTagVorgabe };
+    // Owner 12.11.2026 — das Kostendatum reist mit (gewählt oder die angezeigte Vorgabe, der Annahmetag). Ohne Vorgabe hat
+    // die Maske schon um einen Tag gebeten; ohne Tag lehnt der Primary verständlich ab — nie still „heute".
+    const tag = v.costDate || kostenTagVorgabe;
+    const mitTag = { ...v, ...(tag ? { costDate: tag } : {}) };
     if (!await w.ok('repairs.add_line', {
       local: async () => {
         await addRepairLineOnPrimary(id, mitTag);
@@ -464,7 +466,8 @@ export function RepairDetail() {
     const fassung = fassungOderNichts('adding repair material');
     if (fassung === null) return false;
     const req: RepairMaterialRequest = {
-      repairId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data), costDate: materialCostDate || kostenTagVorgabe,
+      repairId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data),
+      ...((materialCostDate || kostenTagVorgabe) ? { costDate: materialCostDate || kostenTagVorgabe } : {}),
     };
     if (!await w.ok('repairs.add_material', {
       local: () => addRepairMaterialOnPrimary(req),
@@ -500,8 +503,10 @@ export function RepairDetail() {
   }
 
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
-  // Owner 12.11.2026 — die Vorgabe des Kostendatums: der Annahmetag (vor der Eröffnung oder ungültig: heute in Bahrain).
+  // Owner 12.11.2026 — die Vorgabe des Kostendatums: der Annahmetag. Vor der Eröffnung (oder ungültig) KEINE Vorgabe — die
+  // Masken bitten dann um einen zulässigen Tag (`kostenTagHinweis`), nie still „heute".
   const kostenTagVorgabe = defaultRepairCostDay(repairReceivedDay(repair));
+  const kostenTagHinweis = repairCostDatePrompt(repairReceivedDay(repair));
   const darfKostenDatum = perm.canManageRepairs && !repair.invoiceId;
   // REPAIR-REDESIGN — wer arbeitet (aus den Arbeitszeilen, dem Plan, der Art beim Anlegen) und die Kosten getrennt nach
   // Arbeit und Material — dieselbe Summe wie Marge und Rechnung (`repairCostView` = `computeRepairTotalCost`).
@@ -1943,7 +1948,7 @@ export function RepairDetail() {
           {/* R4C.4 — die Arbeitsart aus derselben Liste, die auch der Fernbefehl prüft. */}
           <RepairWorkLineForm draft={newLineForm} onChange={setNewLineForm} onCancel={() => setShowAddLineModal(false)}
             onSubmit={(v) => void handleAddLine(v)} suppliers={suppliers} busy={w.busy} showDueDate
-            prefix="repair-line" saveAttr="add-repair-line" defaultCostDate={kostenTagVorgabe} maxCostDate={bahrainTodayIso()} />
+            prefix="repair-line" saveAttr="add-repair-line" defaultCostDate={kostenTagVorgabe} costDatePrompt={kostenTagHinweis} maxCostDate={bahrainTodayIso()} />
         </div>
       </Modal>
 
@@ -2094,6 +2099,7 @@ export function RepairDetail() {
         costDate={materialCostDate || kostenTagVorgabe}
         onCostDateChange={setMaterialCostDate}
         maxCostDate={bahrainTodayIso()}
+        costDatePrompt={kostenTagHinweis}
       />
 
       {/* Owner 12.11.2026 — „Edit cost date": auch nach Zahlung; Betrag, Lager, Partneranteile und Zahlungstag bleiben. */}

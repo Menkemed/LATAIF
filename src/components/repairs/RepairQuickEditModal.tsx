@@ -39,7 +39,7 @@ import {
 } from '@/core/repairs/repair-work-source';
 import { addRepairMaterialOnPrimary, materialRowsFromModal, repairMaterialBody, type RepairMaterialRequest } from '@/core/gold/gold-house';
 import { repairItemDisplayName } from '@/core/products/display-name';
-import { defaultRepairCostDay, repairReceivedDay } from '@/core/repairs/repair-cost-date';
+import { defaultRepairCostDay, repairCostDatePrompt, repairReceivedDay } from '@/core/repairs/repair-cost-date';
 import { bahrainTodayIso } from '@/core/utils/payment-date';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import type { Repair, RepairLine, RepairStatus, RepairWorkType } from '@/core/models/types';
@@ -72,6 +72,7 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
   const [zeileEdit, setZeileEdit] = useState<LineEdit | null>(null);
   const [arbeit, setArbeit] = useState<WorkLineDraft | null>(null);
   const [material, setMaterial] = useState(false);
+  const [materialTag, setMaterialTag] = useState('');
   const [schritt, setSchritt] = useState<RepairStatus | 'REOPEN' | null>(null);
   const [hinweis, setHinweis] = useState('');
   const [erweitert, setErweitert] = useState(false);
@@ -174,8 +175,10 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
   async function arbeitHinzufuegen(v: WorkLineValues) {
     const f = fassung('adding a repair line');
     if (f === null) return;
-    // Owner 12.11.2026 — das Kostendatum reist immer mit (gewählt oder die Vorgabe, der Annahmetag).
-    const mitTag = { ...v, costDate: v.costDate || defaultRepairCostDay(repairReceivedDay(rep)) };
+    // Owner 12.11.2026 — das Kostendatum reist mit (gewählt oder die Vorgabe, der Annahmetag) — ohne Vorgabe hat die
+    // Maske um einen Tag gebeten; nie still „heute".
+    const tag = v.costDate || defaultRepairCostDay(repairReceivedDay(rep));
+    const mitTag = { ...v, ...(tag ? { costDate: tag } : {}) };
     if (!await w.ok('repairs.add_line', {
       local: async () => { await addRepairLineOnPrimary(rep.id, mitTag); return {}; },
       remote: () => ({ repairId: rep.id, expectedRevision: f, ...mitTag }),
@@ -188,11 +191,16 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
   async function materialHinzufuegen(rows: MaterialLineInput[]): Promise<boolean> {
     const f = fassung('adding repair material');
     if (f === null) return false;
-    const req: RepairMaterialRequest = { repairId: rep.id, expectedRevision: f || undefined, rows: materialRowsFromModal(rows) };
+    // Owner 12.11.2026 — dasselbe Kostendatum wie an der Detailseite (gewählt oder der Annahmetag).
+    const tag = materialTag || defaultRepairCostDay(repairReceivedDay(rep));
+    const req: RepairMaterialRequest = {
+      repairId: rep.id, expectedRevision: f || undefined, rows: materialRowsFromModal(rows), ...(tag ? { costDate: tag } : {}),
+    };
     if (!await w.ok('repairs.add_material', {
       local: () => addRepairMaterialOnPrimary(req),
       remote: () => repairMaterialBody(req),
     })) return false;
+    setMaterialTag('');
     setHinweis('Material added.');
     neuLaden();
     return true;
@@ -367,7 +375,8 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
                 <RepairWorkLineForm draft={arbeit} onChange={setArbeit} onCancel={() => setArbeit(null)}
                   onSubmit={(v) => void arbeitHinzufuegen(v)} suppliers={suppliers} busy={w.busy}
                   prefix="quick-work" saveAttr="quick-work-save"
-                  defaultCostDate={defaultRepairCostDay(repairReceivedDay(rep))} maxCostDate={bahrainTodayIso()} />
+                  defaultCostDate={defaultRepairCostDay(repairReceivedDay(rep))} costDatePrompt={repairCostDatePrompt(repairReceivedDay(rep))}
+                  maxCostDate={bahrainTodayIso()} />
               )}
             </div>
           </div>
@@ -465,7 +474,9 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
       </Modal>
 
       <AddMaterialModal open={material} onClose={() => setMaterial(false)} showCustomerPrice={false} ownStockNote={IN_HOUSE_LINE_NOTE}
-        busy={w.busy} submitError={w.fehler} onSubmitAll={async (rows) => { const ok = await materialHinzufuegen(rows); if (ok) setMaterial(false); return ok; }} />
+        busy={w.busy} submitError={w.fehler} onSubmitAll={async (rows) => { const ok = await materialHinzufuegen(rows); if (ok) setMaterial(false); return ok; }}
+        costDate={materialTag || defaultRepairCostDay(repairReceivedDay(rep))} onCostDateChange={setMaterialTag}
+        maxCostDate={bahrainTodayIso()} costDatePrompt={repairCostDatePrompt(repairReceivedDay(rep))} />
 
       {schritt && (
         <RepairStatusDialog
