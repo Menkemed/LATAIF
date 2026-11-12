@@ -260,11 +260,16 @@ function parseRows(v: unknown): MaterialRowInput[] {
 }
 
 export function parseRepairMaterial(raw: unknown): RepairMaterialRequest {
-  const r = strict(raw, ['repairId', 'expectedRevision', 'rows'], COMMAND_FORBIDDEN);
+  // Owner 12.11.2026 — `costDate`: das Kostendatum der Positionen (JJJJ-MM-TT; ob zulässig, entscheidet das Haus).
+  const r = strict(raw, ['repairId', 'expectedRevision', 'rows', 'costDate'], COMMAND_FORBIDDEN);
+  if (r.costDate !== undefined && (typeof r.costDate !== 'string' || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(r.costDate))) {
+    throw new GoldPayloadError('costDate must be a date (YYYY-MM-DD)');
+  }
   return {
     repairId: feld(() => reqString(r.repairId, 'repairId')),
     expectedRevision: feld(() => expectedRevisionOf(r.expectedRevision)),
     rows: parseRows(r.rows),
+    ...(typeof r.costDate === 'string' ? { costDate: r.costDate } : {}),
   };
 }
 

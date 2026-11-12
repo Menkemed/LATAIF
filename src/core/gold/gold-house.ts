@@ -188,7 +188,8 @@ function materialDetailsOf(r: MaterialRow) {
 
 // ── Reparatur: „Add Material" ─────────────────────────────────────────────
 
-export interface RepairMaterialRequest { repairId: string; expectedRevision?: number; rows: MaterialRowInput[] }
+/** Owner 12.11.2026 — `costDate`: das Kostendatum aller Positionen (ohne Angabe: Annahmetag der Reparatur). */
+export interface RepairMaterialRequest { repairId: string; expectedRevision?: number; rows: MaterialRowInput[]; costDate?: string }
 export interface RepairMaterialResult { repairId: string; lineIds: string[]; goldPayableIds: string[]; revision: number }
 
 export function addRepairMaterialInHouse(actor: GoldActor, req: RepairMaterialRequest): RepairMaterialResult {
@@ -210,6 +211,7 @@ export function addRepairMaterialInHouse(actor: GoldActor, req: RepairMaterialRe
       costAmount: r.totalCost,
       materialKind: r.kind as RepairLine['materialKind'],
       materialDetails: materialDetailsOf(r),
+      ...(req.costDate ? { costDate: req.costDate } : {}),
     });
     if (!line) throw new Error('repairs.add_material: the repair line was not written');
     lineIds.push(line.id);
@@ -633,7 +635,7 @@ export function repairGoldUsageBody(req: RepairGoldUsageRequest): Record<string,
 }
 
 export function repairMaterialBody(req: RepairMaterialRequest): Record<string, unknown> {
-  return compact({ repairId: req.repairId, expectedRevision: req.expectedRevision, rows: req.rows.map((r) => compact({ ...r })) });
+  return compact({ repairId: req.repairId, expectedRevision: req.expectedRevision, rows: req.rows.map((r) => compact({ ...r })), costDate: req.costDate });
 }
 
 export function orderCostBody(req: OrderCostRequest): Record<string, unknown> {

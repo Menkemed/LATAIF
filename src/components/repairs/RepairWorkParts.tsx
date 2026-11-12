@@ -77,6 +77,8 @@ export interface WorkLineDraft {
   description: string;
   cost: string;
   dueDate: string;
+  /** Owner 12.11.2026 — das Kostendatum; leer = die Vorgabe der Maske (Annahmetag). */
+  costDate?: string;
 }
 
 export const EMPTY_WORK_LINE: WorkLineDraft = { source: 'inhouse', supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' };
@@ -87,6 +89,7 @@ export interface WorkLineValues {
   description?: string;
   costAmount: number;
   dueDate?: string;
+  costDate?: string;
 }
 
 /** Was die Zeile speichern würde — oder warum noch nicht. Eigene Arbeit ohne Betrag = 0.000. */
@@ -104,6 +107,7 @@ export function workLineValues(d: WorkLineDraft): { values: WorkLineValues } | {
       ...(d.description.trim() ? { description: d.description.trim() } : {}),
       costAmount: cost,
       ...(d.dueDate ? { dueDate: d.dueDate } : {}),
+      ...(d.costDate ? { costDate: d.costDate } : {}),
     },
   };
 }
@@ -120,9 +124,13 @@ interface WorkLineFormProps {
   prefix: string;
   /** Die Kennung des Speichern-Knopfs (bestehende Prüfungen greifen darauf zu). */
   saveAttr: string;
+  /** Owner 12.11.2026 — mit Vorgabe (Annahmetag) zeigt die Form das Feld „COST DATE"; ohne nicht. */
+  defaultCostDate?: string;
+  /** Der späteste wählbare Tag (heute in Bahrain). */
+  maxCostDate?: string;
 }
 
-export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppliers, busy, showDueDate, prefix, saveAttr }: WorkLineFormProps) {
+export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppliers, busy, showDueDate, prefix, saveAttr, defaultCostDate, maxCostDate }: WorkLineFormProps) {
   const options = useMemo(() => workshopOptions(suppliers, [draft.supplierId]), [suppliers, draft.supplierId]);
   const result = workLineValues(draft);
   const ext = draft.source === 'external';
@@ -167,6 +175,15 @@ export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppli
           <Input label="DUE DATE (OPTIONAL)" type="date" value={draft.dueDate} onChange={(e) => onChange({ ...draft, dueDate: e.target.value })} />
         )}
       </div>
+      {defaultCostDate !== undefined && (
+        <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: 10, alignItems: 'end' }}>
+          <Input label="COST DATE" type="date" value={draft.costDate || defaultCostDate} max={maxCostDate}
+            onChange={(e) => onChange({ ...draft, costDate: e.target.value })} {...attr('cost-date')} />
+          <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
+            The day of this cost (default: the day the repair was received). The payment date is set when paying.
+          </p>
+        </div>
+      )}
       <p style={{ fontSize: 11, color: '#4B5563', margin: 0, lineHeight: 1.45 }}>
         {ext
           ? 'From the workshop’s bill — it becomes the payable to that workshop (booked once the work starts).'

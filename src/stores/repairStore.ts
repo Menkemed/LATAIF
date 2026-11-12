@@ -10,8 +10,9 @@ import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair
 import {
   assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
-  repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop,
+  repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop, changeRepairLineCostDateInHouse, type RepairCostDateChanged,
 } from '@/core/repairs/repair-cost-booking';
+import { assertRepairCostDay, newLineCostDay } from '@/core/repairs/repair-cost-date';
 import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
 // Liste, Detailseite und Fernbefehl.
@@ -514,7 +515,7 @@ function commitRepairLineExpenses(repairId: string): void {
 
   // OPEN-Lines mit Supplier ohne Expense
   const lineRows = query(
-    `SELECT id, position, supplier_id, work_type, description, cost_amount
+    `SELECT id, position, supplier_id, work_type, description, cost_amount, cost_date
        FROM repair_lines
        WHERE repair_id = ? AND status = 'OPEN' AND expense_id IS NULL
          AND cost_amount > 0
@@ -522,6 +523,11 @@ function commitRepairLineExpenses(repairId: string): void {
     [repairId]
   );
   if (lineRows.length === 0) return;
+  // Owner 12.11.2026 — jede Zeile bucht an IHREM Kostendatum (Altbestand ohne Datum: heute, wie bisher). VOR dem ersten
+  // Schreiben geprüft: liegt ein Kostendatum inzwischen in einer geschlossenen Periode, wird nichts gebucht.
+  for (const lr of lineRows) {
+    if (lr.cost_date) assertRepairCostDay(lr.cost_date, (repair.branch_id as string) || '', Date.parse(now), `The cost date of line ${formatRepairLineNumber(repairNumber, (lr.position as number) || 0)}`);
+  }
 
   for (const lr of lineRows) {
     const lineId = lr.id as string;
@@ -533,8 +539,9 @@ function commitRepairLineExpenses(repairId: string): void {
     const workType = (lr.work_type as string) || 'service';
     const description = (lr.description as string) || '';
     const cost = (lr.cost_amount as number) || 0;
+    const kostenTag = (lr.cost_date as string | null) || now.split('T')[0];
     if (cost <= 0) continue;
-    if (!supplierId) { syncOwnWork(lineId, repairId, scope, cost, now); continue; }
+    if (!supplierId) { syncOwnWork(lineId, repairId, scope, cost, now, kostenTag); continue; }
 
     const expenseId = uuid();
     const expenseNumber = getNextDocumentNumber('EXP');
@@ -557,7 +564,7 @@ function commitRepairLineExpenses(repairId: string): void {
          expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
       [expenseId, branchId, expenseNumber, category, cost, paidAmount, method,
-       now.split('T')[0], desc, repairId, supplierId, expStatus, now, userId]
+       kostenTag, desc, repairId, supplierId, expStatus, now, userId]
     );
     trackInsert('expenses', expenseId, {
       category, amount: cost, repairId, repairLineId: lineId,
@@ -575,7 +582,7 @@ function commitRepairLineExpenses(repairId: string): void {
     const expenseRecord: Expense = {
       id: expenseId, expenseNumber, branchId, category,
       amount: cost, paidAmount, paymentMethod: method,
-      expenseDate: now.split('T')[0], description: desc,
+      expenseDate: kostenTag, description: desc,
       relatedModule: 'repair', relatedEntityId: repairId,
       supplierId: supplierId ?? undefined, status: expStatus, createdAt: now,
     };
@@ -609,6 +616,8 @@ interface RepairStore {
   addRepairLine: (repairId: string, data: Partial<RepairLine>) => RepairLine;
   updateRepairLine: (lineId: string, data: Partial<RepairLine>) => void;
   cancelRepairLine: (lineId: string, notes?: string) => void;
+  /** Owner 12.11.2026 — „Edit Cost Date": das Kostendatum einer Zeile ändern (Pflichtgrund), auch nach Zahlung. */
+  changeRepairLineCostDate: (lineId: string, costDate: string, reason: string) => RepairCostDateChanged;
   /** `assignedWorkshopSupplierId`: die Werkstatt im Kopf vor der ERSTEN Zeile (Gebühr/Altbestand) — nur `addRepairLine`. */
   recomputeRepairAggregates: (repairId: string, opts?: { assignedWorkshopSupplierId?: string | null; headerFeeWorkshopSupplierId?: string | null }) => void;
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
@@ -639,6 +648,7 @@ function rowToRepairLine(row: Record<string, unknown>): RepairLine {
     notes: (row.notes as string) || undefined,
     materialKind: (row.material_kind as RepairLine['materialKind']) || undefined,
     materialDetails: matDetails,
+    costDate: (row.cost_date as string) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -649,7 +659,7 @@ function enrichLineWithExpense(line: RepairLine): RepairLine {
   if (!line.expenseId) return line;
   try {
     const rows = query(
-      `SELECT amount, paid_amount, status FROM expenses WHERE id = ?`,
+      `SELECT amount, paid_amount, status, expense_date FROM expenses WHERE id = ?`,
       [line.expenseId]
     );
     if (rows.length === 0) return line;
@@ -659,7 +669,9 @@ function enrichLineWithExpense(line: RepairLine): RepairLine {
     let paymentStatus: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' = 'UNPAID';
     if (status === 'PAID' || paidAmount >= amount - 0.0001) paymentStatus = 'PAID';
     else if (paidAmount > 0) paymentStatus = 'PARTIALLY_PAID';
-    return { ...line, paidAmount, paymentStatus };
+    // Owner 12.11.2026 — Altbestand ohne eigenes Kostendatum: der Tag der gebuchten Ausgabe.
+    const costDate = line.costDate ?? (((rows[0].expense_date as string) || '').slice(0, 10) || undefined);
+    return { ...line, paidAmount, paymentStatus, costDate };
   } catch { return line; }
 }
 
@@ -1458,20 +1470,22 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // material_details JSON. work_type wird 'material' wenn Material gesetzt ist.
     const zeilenDetails = headerFeeMaterialDetails(data.materialDetails, feeKopf, data.supplierId, data.materialKind);
     const matJson = zeilenDetails ? JSON.stringify(zeilenDetails) : null;
+    // Owner 12.11.2026 — das Kostendatum: gewählt (geprüft) oder der Annahmetag (offen), sonst heute — VOR dem Schreiben.
+    const kostenTag = newLineCostDay(repairId, branchId, data.costDate, Date.parse(now));
     db.run(
       `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, description,
-         cost_amount, expense_id, status, due_date, notes, material_kind, material_details, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'OPEN', ?, ?, ?, ?, ?, ?)`,
+         cost_amount, expense_id, status, due_date, notes, material_kind, material_details, cost_date, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'OPEN', ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, branchId, repairId, nextPos,
         data.supplierId || null, data.workType || null, data.description || null,
         data.costAmount || 0, data.dueDate || null, data.notes || null,
-        data.materialKind || null, matJson, now, now,
+        data.materialKind || null, matJson, kostenTag, now, now,
       ]
     );
     trackInsert('repair_lines', id, {
       repairId, supplierId: data.supplierId, costAmount: data.costAmount, workType: data.workType,
-      materialKind: data.materialKind,
+      materialKind: data.materialKind, costDate: kostenTag,
     });
     // REPAIR-REDESIGN — die eingeplante Werkstatt ist mit ihrer ersten Arbeitszeile erfüllt: der Plan endet hier
     // (sonst bliebe sie nach dem Stornieren der Zeile als „geplant" stehen). Material ist keine Werkstattarbeit.
@@ -1625,12 +1639,22 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     // POST-PARITY PP-13/PP-14 — eine gebuchte Zeile im Haus: die aktivierte Eigenleistung folgt dem Betrag.
     if (data.costAmount !== undefined && ownWorkLine) {
-      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now);
+      // Owner 12.11.2026 — die Neubuchung steht am Kostendatum der Zeile (Altbestand: wie bisher heute).
+      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, line.costDate);
     }
 
     saveDatabase();
     get().loadRepairLines();
     get().recomputeRepairAggregates(line.repairId, { assignedWorkshopSupplierId: feeKopf, headerFeeWorkshopSupplierId: feeKopf });
+  },
+
+  changeRepairLineCostDate: (lineId, costDate, reason) => {
+    let branchId = '', userId = '';
+    try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* der Rahmen kommt aus der Reparatur */ }
+    const out = changeRepairLineCostDateInHouse(lineId, costDate, reason, { branchId, userId, now: new Date().toISOString() });
+    saveDatabase();
+    get().loadRepairLines();
+    return out;
   },
 
   cancelRepairLine: (lineId, _notes) => {

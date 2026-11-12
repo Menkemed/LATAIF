@@ -27,7 +27,9 @@ import { trackUpdate } from '@/core/sync/track';
 import { trackLotRow } from '@/core/lots/lot-queries';
 import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement } from '@/core/finance/expenseSettlement';
 import { hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from '@/core/ledger/posting';
-import { createExpenseInHouse } from '@/core/payables/payables-house';
+import { createExpenseInHouse, updateExpenseInHouse } from '@/core/payables/payables-house';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { assertRepairCostDay, repairCostDayIssue } from './repair-cost-date';
 import { canonicalRepairStatus, type Expense, type ExpenseCategory, type Repair } from '@/core/models/types';
 import { repairCostParts, repairHeaderFeeKept } from './repair-cost';
 import { REPAIR_LOT_REQUIRED, RepairActionRejected } from './repair-rules';
@@ -142,14 +144,25 @@ function ownWorkPosted(sourceId: string): number {
 export function hasOwnWork(sourceId: string): boolean {
   return ownWorkPosted(sourceId) > EPS;
 }
-/** Bringt die eigene Arbeit einer Quelle auf ihren Betrag — genau einmal, Änderung = Storno + Neubuchung. */
-export function syncOwnWork(sourceId: string, repairId: string, scope: string | null | undefined, target: number, now: string): void {
+/**
+ * Bringt die eigene Arbeit einer Quelle auf ihren Betrag — genau einmal, Änderung = Storno + Neubuchung.
+ * Owner 12.11.2026 — `occurredAt`: das Kostendatum der Zeile (ohne Angabe wie bisher der Tag der Buchung).
+ */
+export function syncOwnWork(sourceId: string, repairId: string, scope: string | null | undefined, target: number, now: string, occurredAt?: string): void {
   const posted = ownWorkPosted(sourceId);
   if (F(posted) === F(target)) return;
   if (posted > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
   if (F(target) > 0) {
-    postRepairOwnWork({ sourceId, repairId, account: scope === 'OWN' ? 'INVENTORY' : 'COGS', amount: target, occurredAt: now });
+    postRepairOwnWork({ sourceId, repairId, account: scope === 'OWN' ? 'INVENTORY' : 'COGS', amount: target, occurredAt: occurredAt || now });
   }
+}
+
+/** Der Tag, an dem die lebende eigene Arbeit dieser Quelle gebucht ist (JJJJ-MM-TT) — oder ''. */
+function ownWorkDay(sourceId: string): string {
+  return String(query(`SELECT e1.occurred_at AS d FROM ledger_entries e1
+     WHERE e1.source_module = 'REPAIR_OWN_WORK' AND e1.source_id = ? AND e1.direction = 'DEBIT' AND e1.reverses_entry_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)
+     ORDER BY e1.occurred_at DESC LIMIT 1`, [sourceId])[0]?.d ?? '').slice(0, 10);
 }
 export function reverseOwnWork(sourceId: string, now: string): void {
   if (ownWorkPosted(sourceId) > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
@@ -274,4 +287,94 @@ export function syncRepairHeaderCosts(repairId: string, now: string, opts: { cap
   if (opts.capitalize && scope === 'OWN') {
     shiftOwnRepairCost({ id: repairId, productId: str(r.product_id), lotId: str(r.lot_id) }, dOwn + dFee, now, 'header-cost');
   }
+}
+
+// ── REPAIR COST DATE (Owner 12.11.2026) — „Edit Cost Date": das Kostendatum einer Zeile ändern, auch nach Zahlung ─────
+
+export interface RepairCostDateChanged { lineId: string; repairId: string; from: string; to: string; rebooked: 'expense' | 'own_work' | 'none' }
+
+/** Ist das eigene Stück dieser Reparatur schon verkauft? (Dieselbe Erkennung wie `shiftOwnRepairCost`.) */
+function ownRepairItemSold(productId: string | undefined, lotId: string | undefined): boolean {
+  if (!productId) return false;
+  const p = query('SELECT stock_status FROM products WHERE id = ?', [productId])[0];
+  if (!p) return false;
+  if (String(p.stock_status) === 'sold') return true;
+  const hasLots = Number(query('SELECT COUNT(*) AS c FROM stock_lots WHERE product_id = ?', [productId])[0]?.c) > 0;
+  return hasLots && !costLot(productId, lotId);
+}
+
+/**
+ * Das Kostendatum einer Zeile ändern — mit kurzem Pflichtgrund, auch nach Zahlung. Der Betrag, das Lager (Los-Einstand),
+ * die Partneranteile und der Zahlungstag bleiben unverändert; nur der TAG der Kostenbuchung wandert:
+ *   • Werkstatt/Material (Ausgabe): derselbe Weg wie „Ausgabe bearbeiten" — `updateExpenseInHouse` mit
+ *     `mirrorOriginalDates`: die alte Buchung wird an IHREM Tag gegengebucht, die neue steht am neuen Tag;
+ *   • In-house (aktivierte Eigenleistung): Gegenbuchung am alten Tag, Neubuchung am neuen Tag;
+ *   • noch nicht gebucht (vor „In Progress", Goldschuld in Gramm): nur das Datum der Zeile.
+ * Verständlich abgelehnt, VOR jedem Schreiben: abgerechnete Reparatur, stornierte Zeile, kein Grund, ungültiger/künftiger
+ * Tag, alter oder neuer Tag in einer geschlossenen Periode (Eröffnung, eingereichtes VAT-Quartal), ein neuer Tag NACH
+ * einer Zahlung dieser Kosten, oder das eigene Stück ist schon verkauft (sein Einstand steckt im Wareneinsatz).
+ */
+export function changeRepairLineCostDateInHouse(
+  lineId: string, newDay: unknown, reason: unknown, ctx: { branchId?: string; userId?: string; now: string },
+): RepairCostDateChanged {
+  const l = query('SELECT id, repair_id, status, supplier_id, expense_id, cost_date, position FROM repair_lines WHERE id = ?', [lineId])[0];
+  if (!l) throw new RepairActionRejected('LINE_NOT_FOUND', 'no such cost line');
+  if (String(l.status) !== 'OPEN') throw new RepairActionRejected('LINE_NOT_OPEN', `this cost line is "${String(l.status)}" — its date is not changed`);
+  const repairId = String(l.repair_id);
+  const r = query('SELECT id, branch_id, repair_number, repair_scope, invoice_id, product_id, lot_id, received_at, created_at FROM repairs WHERE id = ?', [repairId])[0];
+  if (!r) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
+  if (str(r.invoice_id)) {
+    throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen, also their date');
+  }
+  const grund = typeof reason === 'string' ? reason.trim() : '';
+  if (grund.length < 3) throw new RepairActionRejected('REPAIR_COST_DATE_REASON_REQUIRED', 'give a short reason for changing the cost date');
+  if (grund.length > 200) throw new RepairActionRejected('REPAIR_COST_DATE_REASON_TOO_LONG', 'keep the reason short (at most 200 characters)');
+  const branchId = ctx.branchId || str(r.branch_id) || '';
+  const nowMs = Date.parse(ctx.now) || Date.now();
+  const to = assertRepairCostDay(newDay, branchId, nowMs, 'The new cost date');
+
+  const expenseId = str(l.expense_id);
+  const exp = expenseId ? query("SELECT id, expense_date, status FROM expenses WHERE id = ? AND status != 'CANCELLED'", [expenseId])[0] : undefined;
+  const eigenTag = ownWorkPosted(lineId) > EPS ? ownWorkDay(lineId) : '';
+  const gebucht: RepairCostDateChanged['rebooked'] = exp ? 'expense' : eigenTag ? 'own_work' : 'none';
+  const from = gebucht === 'expense' ? String(exp?.expense_date ?? '').slice(0, 10)
+    : gebucht === 'own_work' ? eigenTag
+    : (str(l.cost_date) ?? String(r.received_at || r.created_at || '').slice(0, 10));
+  if (from === to) throw new RepairActionRejected('REPAIR_COST_DATE_UNCHANGED', `the cost date is already ${to}`);
+
+  if (gebucht !== 'none') {
+    // Die alte Buchung wird an IHREM Tag gegengebucht — auch dieser Tag muss offen sein.
+    const alt = repairCostDayIssue(from, branchId, nowMs, 'The current cost date');
+    if (alt && alt.code !== 'REPAIR_COST_DATE_INVALID') {
+      throw new RepairActionRejected(alt.code, `${alt.message} — the booked cost is not moved out of it`);
+    }
+    if (str(r.repair_scope) === 'OWN' && ownRepairItemSold(str(r.product_id), str(r.lot_id))) {
+      throw new RepairActionRejected('REPAIR_COST_ALREADY_SOLD',
+        'the repaired item is already sold — its cost is part of the cost of sales; the cost date is not changed any more');
+    }
+  }
+  if (exp) {
+    const ersteZahlung = String(query('SELECT MIN(substr(paid_at, 1, 10)) AS d FROM expense_payments WHERE expense_id = ?', [String(exp.id)])[0]?.d ?? '');
+    if (ersteZahlung && to > ersteZahlung) {
+      throw new RepairActionRejected('REPAIR_COST_DATE_AFTER_PAYMENT',
+        `the cost was already paid on ${ersteZahlung} — the cost date cannot be after a payment (the payment date stays as it is)`);
+    }
+  }
+
+  const db = getDatabase();
+  if (exp) {
+    updateExpenseInHouse(String(exp.id), { expenseDate: to }, { branchId, userId: ctx.userId || '', now: ctx.now }, undefined, { mirrorOriginalDates: true });
+  } else if (gebucht === 'own_work') {
+    const betrag = ownWorkPosted(lineId);
+    reverseSource('REPAIR_OWN_WORK', lineId, ctx.now, { mirrorOriginalDates: true });
+    postRepairOwnWork({ sourceId: lineId, repairId, account: str(r.repair_scope) === 'OWN' ? 'INVENTORY' : 'COGS', amount: betrag, occurredAt: to });
+  }
+  db.run('UPDATE repair_lines SET cost_date = ?, updated_at = ? WHERE id = ?', [to, ctx.now, lineId]);
+  trackUpdate('repair_lines', lineId, { costDate: to, costDateFrom: from, reason: grund });
+  logAuditOrThrow({
+    module: 'repairs', entityType: 'repair_line', entityId: lineId, action: 'UPDATE', field: 'cost_date',
+    oldValue: from, newValue: `${to} · ${grund}`,
+    ...(ctx.userId || ctx.branchId ? { actor: { userId: ctx.userId, branchId } } : {}),
+  });
+  return { lineId, repairId, from, to, rebooked: gebucht };
 }

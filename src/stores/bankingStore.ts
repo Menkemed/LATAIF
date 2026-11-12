@@ -45,7 +45,9 @@ export type BankTransactionType =
   | 'PARTNER_INVESTMENT_IN'
   | 'PARTNER_WITHDRAWAL_OUT'
   | 'TRANSFER'
-  | 'REFUND';
+  | 'REFUND'
+  // Owner 12.11.2026 — Vorauszahlung an einen Lieferanten (Standalone-Guthaben, z. B. Überschuss aus „Pay Supplier").
+  | 'SUPPLIER_PREPAYMENT_OUT';
 
 export interface BankTransaction {
   id: string;
@@ -438,6 +440,38 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
       relatedModule: 'expense',
       relatedEntityId: e.id as string,
       description,
+    });
+  }
+
+  // Owner 12.11.2026 — SUPPLIER_PREPAYMENT: eine Vorauszahlung an einen Lieferanten (Standalone-Guthaben — z. B. der
+  // Überschuss aus „Pay Supplier" ohne Einkauf, der ihn trägt) ist ein echter Geldabgang am Buchungstag; ihr „Refund
+  // Credit" (die Gegenbuchung) ist ein echter Geldeingang. Vorher fehlten beide in der Liste, die Salden (Hauptbuch) nicht.
+  // Aus dem HAUPTBUCH gelesen (je Cash/Bank/Benefit-Bein eine Zeile): die Guthaben-Zeile wird beim Refund gelöscht, das
+  // Hauptbuch bleibt. Kein anderer Banking-Weg liest SUPPLIER_PREPAYMENT — keine doppelte Geldbewegung.
+  const prepay = safeQuery('supplier_prepayments',
+    `SELECT le.id, le.account, le.direction, le.amount, le.occurred_at, le.created_at, le.reverses_entry_id,
+            le.counterparty_id AS supplier_id, s.name AS supplier_name
+       FROM ledger_entries le
+       LEFT JOIN suppliers s ON s.id = le.counterparty_id
+      WHERE le.branch_id = ? AND le.source_module = 'SUPPLIER_PREPAYMENT' AND le.account IN ('CASH', 'BANK', 'BENEFIT')`,
+    [branchId]
+  );
+  for (const r of prepay) {
+    const zurueck = String(r.direction) === 'DEBIT';
+    const date = (r.occurred_at as string) || '';
+    const lieferant = (r.supplier_name as string) || '';
+    txs.push({
+      id: `sprepay-${r.id}`,
+      date,
+      createdAt: (r.created_at as string) || date,
+      type: zurueck ? 'REFUND' : 'SUPPLIER_PREPAYMENT_OUT',
+      account: accountFor(String(r.account)),
+      amount: (r.amount as number) || 0,
+      flow: zurueck ? 'in' : 'out',
+      relatedModule: 'supplier',
+      relatedEntityId: (r.supplier_id as string) || undefined,
+      description: zurueck ? `Supplier prepayment refunded · ${lieferant}` : `Supplier prepayment (credit) · ${lieferant}`,
+      link: r.supplier_id ? `/suppliers/${r.supplier_id}` : undefined,
     });
   }
 

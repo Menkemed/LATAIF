@@ -2802,6 +2802,9 @@ function runMigrations(database: Database): void {
     // Rückgabe rückgängig) und der Beleg der echten Rückzahlung (Überweisungsreferenz, Quittung).
     `ALTER TABLE purchase_returns ADD COLUMN cancel_kind TEXT`,
     `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_reference TEXT`,
+    // Owner 12.11.2026 — das Kostendatum einer Reparatur-Kostenzeile (JJJJ-MM-TT): Ausgabe und Kostenbuchung stehen an
+    // diesem Tag (Vorgabe: Annahmedatum), unabhängig vom Zahlungstag. NULL = Altbestand (gebucht am Tag der Buchung).
+    `ALTER TABLE repair_lines ADD COLUMN cost_date TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

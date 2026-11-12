@@ -1481,6 +1481,7 @@
       "allowed_fields": [
         "branch_id",
         "cost_amount",
+        "cost_date",
         "created_at",
         "description",
         "due_date",

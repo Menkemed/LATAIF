@@ -1044,8 +1044,8 @@ for (const weg of ['fern', 'lokal'] as const) {
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));
   // POST-PARITY PP-13: zu Anlegen/Ändern/Abrechnen kamen Status, Zeile hinzufügen, Zeile stornieren
   // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer; v0.8.94 dazu „Zeile ändern" (Quick Edit): sieben;
-  // HOTFIX F2 dazu „Change customer": acht.
-  ok((house2.match(/return amPrimary\(/g) || []).length === 8, 'TRIPWIRE alle acht Handlungen laufen durch EINE Klammer');
+  // HOTFIX F2 dazu „Change customer": acht. Owner 12.11.2026 dazu „Edit Cost Date" (Kostendatum einer Zeile): neun.
+  ok((house2.match(/return amPrimary\(/g) || []).length === 9, 'TRIPWIRE alle neun Handlungen laufen durch EINE Klammer');
 }
 
 // ── §9 Veralteter Entwurf am PRIMARY (Live-Test 19.09.2026, Schritt 34) ──────────────────────

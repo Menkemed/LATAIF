@@ -847,6 +847,8 @@ export interface RepairLine {
   // v0.2.1 — Material Parity (Diamond/Stone/Gold-Piece consumed during repair)
   materialKind?: 'labor' | 'diamond' | 'stone' | 'gold' | 'custom' | null;
   materialDetails?: MaterialDetails;
+  /** Owner 12.11.2026 — das Kostendatum (JJJJ-MM-TT); Altbestand ohne eigenes Datum: der Tag der gebuchten Ausgabe. */
+  costDate?: string;
   createdAt: string;
   updatedAt: string;
   // Populated (nicht gespeichert) — live aus expenses-Tabelle gelesen.

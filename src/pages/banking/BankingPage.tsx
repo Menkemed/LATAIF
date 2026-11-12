@@ -28,6 +28,7 @@ const TYPE_LABELS: Record<BankTransactionType, string> = {
   PARTNER_WITHDRAWAL_OUT: 'Partner Out',
   TRANSFER: 'Transfer',
   REFUND: 'Refund',
+  SUPPLIER_PREPAYMENT_OUT: 'Prepayment',
 };
 
 const TYPE_COLORS: Record<BankTransactionType, string> = {
@@ -40,6 +41,7 @@ const TYPE_COLORS: Record<BankTransactionType, string> = {
   PARTNER_WITHDRAWAL_OUT: '#7B4AAA',
   TRANSFER: '#6B7280',
   REFUND: '#D17060',
+  SUPPLIER_PREPAYMENT_OUT: '#B77B3A',
 };
 
 export function BankingPage() {

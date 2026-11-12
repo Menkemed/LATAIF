@@ -50,8 +50,10 @@ import {
 } from '@/core/repairs/repair-rules';
 import {
   addRepairLineOnPrimary, cancelRepairLineOnPrimary, changeRepairCustomerOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary,
-  updateRepairStatusOnPrimary,
+  updateRepairStatusOnPrimary, changeRepairLineCostDateOnPrimary,
 } from '@/core/repairs/repair-house';
+import { defaultRepairCostDay, repairReceivedDay } from '@/core/repairs/repair-cost-date';
+import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import {
   nextRepairStatus, repairStatusActionLabel, repairStatusFlow, repairStatusTargets, repairTransitionFacts,
@@ -358,6 +360,11 @@ export function RepairDetail() {
   // Repair-Kontext, recordExpensePayment triggert Cross-Store-Reload, sodass
   // Chip nach Submit live auf "✓ Paid" flippt.
   const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
+  // Owner 12.11.2026 — Kostendatum: Material (für alle Positionen) und „Edit cost date" (mit Pflichtgrund).
+  const [materialCostDate, setMaterialCostDate] = useState('');
+  const [kostenDatumEdit, setKostenDatumEdit] = useState<{ lineId: string; label: string; current: string } | null>(null);
+  const [kostenDatumNeu, setKostenDatumNeu] = useState('');
+  const [kostenDatumGrund, setKostenDatumGrund] = useState('');
 
   const [settleModal, setSettleModal] = useState<{
     open: boolean; mode: SettleGoldMode; payable?: GoldPayable; credit?: CustomerGoldCredit;
@@ -401,12 +408,14 @@ export function RepairDetail() {
     // die Kostenregel (eigene Arbeit ab 0.000, Werkstatt über 0) kommen aus der gemeinsamen Maske (`RepairWorkLineForm`).
     const fassung = fassungOderNichts('adding a repair line');
     if (fassung === null) return;
+    // Owner 12.11.2026 — das Kostendatum reist immer mit (gewählt oder die angezeigte Vorgabe, der Annahmetag).
+    const mitTag = { ...v, costDate: v.costDate || kostenTagVorgabe };
     if (!await w.ok('repairs.add_line', {
       local: async () => {
-        await addRepairLineOnPrimary(id, v);
+        await addRepairLineOnPrimary(id, mitTag);
         return {};
       },
-      remote: () => ({ repairId: id, expectedRevision: fassung, ...v }),
+      remote: () => ({ repairId: id, expectedRevision: fassung, ...mitTag }),
     })) return;
     loadRepairs(); loadRepairLines();
     setShowAddLineModal(false);
@@ -454,16 +463,46 @@ export function RepairDetail() {
     if (!id || !repair) return false;
     const fassung = fassungOderNichts('adding repair material');
     if (fassung === null) return false;
-    const req: RepairMaterialRequest = { repairId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data) };
+    const req: RepairMaterialRequest = {
+      repairId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data), costDate: materialCostDate || kostenTagVorgabe,
+    };
     if (!await w.ok('repairs.add_material', {
       local: () => addRepairMaterialOnPrimary(req),
       remote: () => repairMaterialBody(req),
     })) return false;
     loadRepairs(); loadRepairLines(); goldLoadAll();
+    setMaterialCostDate('');
     return true;
   }
 
+  // Owner 12.11.2026 — „Edit cost date": neuer Tag + kurzer Grund; der Primary bucht um (oder lehnt verständlich ab).
+  const kostenDatumFehler = ((): string | null => {
+    if (!kostenDatumEdit) return null;
+    if (!kostenDatumNeu) return 'Choose the new cost date';
+    const issue = paymentDateIssue(kostenDatumNeu, 'The cost date');
+    if (issue) return issue;
+    if (kostenDatumNeu === kostenDatumEdit.current) return 'This is already the cost date';
+    if (kostenDatumGrund.trim().length < 3) return 'Give a short reason';
+    return null;
+  })();
+  async function handleKostenDatum() {
+    if (!id || !repair || !kostenDatumEdit || kostenDatumFehler) return;
+    const fassung = fassungOderNichts('changing a cost date');
+    if (fassung === null) return;
+    const { lineId } = kostenDatumEdit;
+    const grund = kostenDatumGrund.trim();
+    if (!await w.ok('repairs.update_line', {
+      local: async () => { await changeRepairLineCostDateOnPrimary(id, lineId, kostenDatumNeu, grund, fassung); return {}; },
+      remote: () => ({ repairId: id, lineId, expectedRevision: fassung, costDate: kostenDatumNeu, reason: grund }),
+    })) return;
+    loadRepairs(); loadRepairLines();
+    setKostenDatumEdit(null);
+  }
+
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
+  // Owner 12.11.2026 — die Vorgabe des Kostendatums: der Annahmetag (vor der Eröffnung oder ungültig: heute in Bahrain).
+  const kostenTagVorgabe = defaultRepairCostDay(repairReceivedDay(repair));
+  const darfKostenDatum = perm.canManageRepairs && !repair.invoiceId;
   // REPAIR-REDESIGN — wer arbeitet (aus den Arbeitszeilen, dem Plan, der Art beim Anlegen) und die Kosten getrennt nach
   // Arbeit und Material — dieselbe Summe wie Marge und Rechnung (`repairCostView` = `computeRepairTotalCost`).
   const offeneZeilen = thisRepairLines.filter(l => l.status === 'OPEN');
@@ -1523,6 +1562,22 @@ export function RepairDetail() {
                           {eigeneArbeit ? ownWorkDescription(l)
                             : l.materialKind ? materialDescription(l)
                             : (l.description || '—')}
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 3, fontSize: 11, color: '#6B7280' }} data-repair-line-cost-date-show={l.id}>
+                            Cost date {l.costDate ? new Date(l.costDate + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}
+                            {darfKostenDatum && l.status === 'OPEN' && (
+                              <button type="button" className="cursor-pointer" data-repair-line-cost-date-edit={l.id}
+                                style={{ fontSize: 11, padding: '1px 6px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#4B5563' }}
+                                onClick={() => {
+                                  setKostenDatumEdit({
+                                    lineId: l.id,
+                                    label: eigeneArbeit ? ownWorkDescription(l) : (l.materialKind ? materialDescription(l) : (l.description || 'cost line')),
+                                    current: l.costDate || '',
+                                  });
+                                  setKostenDatumNeu(l.costDate || kostenTagVorgabe);
+                                  setKostenDatumGrund('');
+                                }}>Edit date</button>
+                            )}
+                          </span>
                         </span>
                         <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
                           {perCt > 0 ? <Bhd v={perCt}/> : '—'}
@@ -1888,7 +1943,7 @@ export function RepairDetail() {
           {/* R4C.4 — die Arbeitsart aus derselben Liste, die auch der Fernbefehl prüft. */}
           <RepairWorkLineForm draft={newLineForm} onChange={setNewLineForm} onCancel={() => setShowAddLineModal(false)}
             onSubmit={(v) => void handleAddLine(v)} suppliers={suppliers} busy={w.busy} showDueDate
-            prefix="repair-line" saveAttr="add-repair-line" />
+            prefix="repair-line" saveAttr="add-repair-line" defaultCostDate={kostenTagVorgabe} maxCostDate={bahrainTodayIso()} />
         </div>
       </Modal>
 
@@ -2036,7 +2091,38 @@ export function RepairDetail() {
         busy={w.busy}
         submitError={w.fehler}
         onSubmitAll={handleAddMaterial}
+        costDate={materialCostDate || kostenTagVorgabe}
+        onCostDateChange={setMaterialCostDate}
+        maxCostDate={bahrainTodayIso()}
       />
+
+      {/* Owner 12.11.2026 — „Edit cost date": auch nach Zahlung; Betrag, Lager, Partneranteile und Zahlungstag bleiben. */}
+      <Modal open={!!kostenDatumEdit} onClose={() => setKostenDatumEdit(null)} title="Edit cost date" width={460}>
+        {kostenDatumEdit && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }} data-repair-cost-date-dialog>
+            <div style={{ fontSize: 12, color: '#4B5563' }}>
+              {kostenDatumEdit.label} · current cost date <strong>{kostenDatumEdit.current || '—'}</strong>
+            </div>
+            <Input required label="NEW COST DATE" type="date" value={kostenDatumNeu} max={bahrainTodayIso()} disabled={w.busy}
+              onChange={(e) => setKostenDatumNeu(e.target.value)} data-repair-cost-date-input />
+            <Input required label="REASON" placeholder="e.g. workshop invoice is dated 04.11." value={kostenDatumGrund} disabled={w.busy}
+              onChange={(e) => setKostenDatumGrund(e.target.value)} data-repair-cost-date-reason />
+            <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
+              Only the day of this cost moves — the amount, the item cost, partner shares and any payment date stay as they are.
+            </p>
+            {kostenDatumFehler && (kostenDatumGrund !== '' || kostenDatumNeu !== kostenDatumEdit.current) && (
+              <div style={{ fontSize: 12, color: '#B45309' }} data-repair-cost-date-hint>{kostenDatumFehler}</div>
+            )}
+            <WriteError text={w.fehler} />
+            <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
+              <Button variant="ghost" onClick={() => setKostenDatumEdit(null)} disabled={w.busy}>Cancel</Button>
+              <Button variant="primary" onClick={() => void handleKostenDatum()} disabled={!!kostenDatumFehler || w.busy} data-repair-cost-date-save>
+                {w.busy ? 'Saving…' : 'Save cost date'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

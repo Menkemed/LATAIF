@@ -39,6 +39,8 @@ import {
 } from '@/core/repairs/repair-work-source';
 import { addRepairMaterialOnPrimary, materialRowsFromModal, repairMaterialBody, type RepairMaterialRequest } from '@/core/gold/gold-house';
 import { repairItemDisplayName } from '@/core/products/display-name';
+import { defaultRepairCostDay, repairReceivedDay } from '@/core/repairs/repair-cost-date';
+import { bahrainTodayIso } from '@/core/utils/payment-date';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import type { Repair, RepairLine, RepairStatus, RepairWorkType } from '@/core/models/types';
 
@@ -172,9 +174,11 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
   async function arbeitHinzufuegen(v: WorkLineValues) {
     const f = fassung('adding a repair line');
     if (f === null) return;
+    // Owner 12.11.2026 — das Kostendatum reist immer mit (gewählt oder die Vorgabe, der Annahmetag).
+    const mitTag = { ...v, costDate: v.costDate || defaultRepairCostDay(repairReceivedDay(rep)) };
     if (!await w.ok('repairs.add_line', {
-      local: async () => { await addRepairLineOnPrimary(rep.id, v); return {}; },
-      remote: () => ({ repairId: rep.id, expectedRevision: f, ...v }),
+      local: async () => { await addRepairLineOnPrimary(rep.id, mitTag); return {}; },
+      remote: () => ({ repairId: rep.id, expectedRevision: f, ...mitTag }),
     })) return;
     setArbeit(null);
     setHinweis('Work line added.');
@@ -362,7 +366,8 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
               {arbeit && (
                 <RepairWorkLineForm draft={arbeit} onChange={setArbeit} onCancel={() => setArbeit(null)}
                   onSubmit={(v) => void arbeitHinzufuegen(v)} suppliers={suppliers} busy={w.busy}
-                  prefix="quick-work" saveAttr="quick-work-save" />
+                  prefix="quick-work" saveAttr="quick-work-save"
+                  defaultCostDate={defaultRepairCostDay(repairReceivedDay(rep))} maxCostDate={bahrainTodayIso()} />
               )}
             </div>
           </div>

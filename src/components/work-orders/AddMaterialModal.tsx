@@ -63,6 +63,13 @@ interface AddMaterialModalProps {
    * setzt das (Lohn, Gold); Reparaturen und andere Arten (Steine, Diamanten) behalten alle aktiven Lieferanten.
    */
   workshopOnlyKinds?: ReadonlyArray<'labor' | 'diamond' | 'stone' | 'gold'>;
+  /**
+   * Owner 12.11.2026 — nur die Reparatur: das Kostendatum aller Positionen (Vorgabe: Annahmetag). Ohne diese Angabe
+   * (Auftrag) zeigt die Maske kein Datumsfeld.
+   */
+  costDate?: string;
+  onCostDateChange?: (day: string) => void;
+  maxCostDate?: string;
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
@@ -82,6 +89,7 @@ function round3(n: number): string {
 
 export function AddMaterialModal({
   open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false, ownStockNote, workshopOnlyKinds,
+  costDate, onCostDateChange, maxCostDate,
 }: AddMaterialModalProps) {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [kind, setKind] = useState<Kind>('diamond');
@@ -561,6 +569,16 @@ export function AddMaterialModal({
                 </button>
               </div>
             ))}
+          </div>
+        )}
+
+        {costDate !== undefined && onCostDateChange && (
+          <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: 10, alignItems: 'end' }}>
+            <Input label="COST DATE" type="date" value={costDate} max={maxCostDate} disabled={busy}
+              onChange={(e) => onCostDateChange(e.target.value)} data-material-cost-date />
+            <p style={{ fontSize: 11, color: '#6B7280', margin: 0, lineHeight: 1.45 }}>
+              The day of these costs (default: the day the repair was received). The payment date is set when paying.
+            </p>
           </div>
         )}
 

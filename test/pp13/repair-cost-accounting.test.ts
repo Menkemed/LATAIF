@@ -895,7 +895,8 @@ M.gegenkonto = fails.length === 0;
   ok((lc.match(/watchLedgerPosts\(OP_REPAIRS_(UPDATE_STATUS|ADD_LINE|UPDATE_LINE|CANCEL_LINE)\)/g) ?? []).length === 4
     && /watchLedgerPosts\(OP_REPAIRS_UPDATE\)/.test(sc), '§10 die fünf Fernbefehle wachen über ihre Buchungen');
   ok(/AND NOT EXISTS \(SELECT 1 FROM expenses e/.test(an), '§10 Analytics zählt gebuchte eigene Arbeit nicht zusätzlich als Reparatur-Abfluss');
-  ok(/if \(!supplierId\) \{ syncOwnWork\(lineId, repairId, scope, cost, now\); continue; \}/.test(store)
+  // Owner 12.11.2026 — die Eigenleistung steht am Kostendatum der Zeile (`kostenTag`; Altbestand: heute).
+  ok(/if \(!supplierId\) \{ syncOwnWork\(lineId, repairId, scope, cost, now, kostenTag\); continue; \}/.test(store)
     && /account: 'EXPENSES_OPERATING', direction: 'CREDIT', amount, metadata: \{ repairId: input\.repairId, kind: 'repair_own_work' \}/.test(post)
     && !/Paid with the repair \(in-house cost\)/.test(store),
     '§10 Zeile im Haus / eigene Kosten ohne Zahlweg: aktivierte Eigenleistung (Haben EXPENSES_OPERATING) — keine künstliche Verbindlichkeit, kein künstlicher Geldfluss');

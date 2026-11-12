@@ -50,6 +50,7 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useRepairStore } from '@/stores/repairStore';
+import { changeRepairLineCostDateInHouse } from '@/core/repairs/repair-cost-booking';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import { watchLedgerPosts } from '@/core/ledger/posting';
@@ -929,11 +930,20 @@ export interface AddRepairLineRequest {
   description?: string;
   dueDate?: string;
   notes?: string;
+  costDate?: string;
+}
+
+/** Owner 12.11.2026 — ein Kostendatum ist ein Tag (JJJJ-MM-TT); ob er zulässig ist, entscheidet das Haus. */
+function costDateOf(v: unknown): string | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new FinancialPayloadError('costDate must be a date (YYYY-MM-DD)');
+  return v;
 }
 
 export function parseAddRepairLine(raw: unknown): AddRepairLineRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['repairId', 'costAmount', 'expectedRevision', 'supplierId', 'workType', 'description', 'dueDate', 'notes']);
+  // Owner 12.11.2026 — `costDate`: das Kostendatum der neuen Zeile (ohne Angabe: Annahmetag, wie die Maske vorbelegt).
+  onlyKnownFields(raw, ['repairId', 'costAmount', 'expectedRevision', 'supplierId', 'workType', 'description', 'dueDate', 'notes', 'costDate']);
   const out: AddRepairLineRequest = {
     repairId: reqString(raw.repairId, 'repairId'),
     costAmount: lineCost(raw.costAmount),
@@ -948,6 +958,7 @@ export function parseAddRepairLine(raw: unknown): AddRepairLineRequest {
   out.description = optString(raw.description, 'description');
   out.dueDate = optString(raw.dueDate, 'dueDate');
   out.notes = optString(raw.notes, 'notes');
+  out.costDate = costDateOf(raw.costDate);
   // `materialDetails` fehlt mit Absicht: Gold- und Steinzeilen hängen an eigenen
   // Gegenkonten (`gold_payables`), die der Bildschirm des Primary mit füllt. Eine halbe
   // Materialzeile aus der Ferne wäre eine Verbindlichkeit ohne Gegenstück.
@@ -986,6 +997,7 @@ export function runAddRepairLine(deps: EngineDeps, identity: CommandIdentity, ra
         costAmount: req.costAmount,
         dueDate: req.dueDate,
         notes: req.notes,
+        ...(req.costDate ? { costDate: req.costDate } : {}),
       });
     } catch (err) {
       if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
@@ -1006,11 +1018,14 @@ export interface UpdateRepairLineRequest {
   description?: string;
   dueDate?: string;
   notes?: string;
+  /** Owner 12.11.2026 — „Edit Cost Date": nur zusammen mit `reason`, ohne andere Felder. */
+  costDate?: string;
+  reason?: string;
 }
 
 export function parseUpdateRepairLine(raw: unknown): UpdateRepairLineRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['repairId', 'lineId', 'expectedRevision', 'costAmount', 'supplierId', 'workType', 'description', 'dueDate', 'notes']);
+  onlyKnownFields(raw, ['repairId', 'lineId', 'expectedRevision', 'costAmount', 'supplierId', 'workType', 'description', 'dueDate', 'notes', 'costDate', 'reason']);
   const out: UpdateRepairLineRequest = {
     repairId: reqString(raw.repairId, 'repairId'),
     lineId: reqString(raw.lineId, 'lineId'),
@@ -1030,6 +1045,14 @@ export function parseUpdateRepairLine(raw: unknown): UpdateRepairLineRequest {
   // `repairs.cancel_line` — dort hängen Ausgabe und Buchung mit dran.
   const touched = ['costAmount', 'supplierId', 'workType', 'description', 'dueDate', 'notes']
     .filter((k) => (out as unknown as Record<string, unknown>)[k] !== undefined);
+  if (raw.costDate !== undefined || raw.reason !== undefined) {
+    if (touched.length > 0) throw new FinancialPayloadError('change the cost date on its own (with its reason), not together with other fields');
+    out.costDate = costDateOf(raw.costDate);
+    if (!out.costDate) throw new FinancialPayloadError('a reason needs the new cost date');
+    if (typeof raw.reason !== 'string') throw new FinancialPayloadError('give a short reason for changing the cost date');
+    out.reason = raw.reason;
+    return out;
+  }
   if (touched.length === 0) throw new FinancialPayloadError('an edit must change something');
   return out;
 }
@@ -1063,6 +1086,18 @@ export function runUpdateRepairLine(deps: EngineDeps, identity: CommandIdentity,
       const lineSupplier = s(query('SELECT supplier_id FROM repair_lines WHERE id = ?', [req.lineId])[0]?.supplier_id);
       assertLineCost(req.supplierId !== undefined ? req.supplierId : lineSupplier, req.costAmount);
     }
+    const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE_LINE);   // POST-PARITY PP-13 — s. update_status
+    if (req.costDate !== undefined) {
+      // Owner 12.11.2026 — „Edit Cost Date": der Hausweg mit dem Menschen dieses Auftrags (Protokoll).
+      try {
+        changeRepairLineCostDateInHouse(req.lineId, req.costDate, req.reason, { branchId: identity.branchId, userId: identity.userId, now: deps.now() });
+      } catch (err) {
+        if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
+        throw err;
+      }
+      buchung();
+      return { ...repairState(req.repairId), lineId: req.lineId };
+    }
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     // Ohne diese Zeile findet `updateRepairLine` die Zeile in SEINER Liste nicht und wirft —
@@ -1072,7 +1107,6 @@ export function runUpdateRepairLine(deps: EngineDeps, identity: CommandIdentity,
     for (const k of ['costAmount', 'supplierId', 'workType', 'description', 'dueDate', 'notes'] as const) {
       if (req[k] !== undefined) patch[k] = req[k];
     }
-    const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE_LINE);   // POST-PARITY PP-13 — s. update_status
     try {
       rs.updateRepairLine(req.lineId, patch as never);
     } catch (err) {

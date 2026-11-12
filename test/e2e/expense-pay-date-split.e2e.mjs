@@ -9,6 +9,9 @@
 //   C  PC2: Ausgabenliste → geteilt 100 Benefit am 04.11. + 300 Cash heute ⇒ EIN Fernauftrag mit payments; Banking am PC2.
 //   D  PC2: „Pay Supplier" 320 (Ausgabe 120 + Einkauf 200) ⇒ 03.11. gesperrt (vor dem Einkauf), 05.11. gebucht: Zahlungen,
 //      Hauptbuch, Lieferantensaldo, Lieferantenseite und Banking am 05.11.; EIN Fernauftrag mit paidDate.
+//   E  PC2: Reparatur-Kostendatum — „Edit date" an der bezahlten Werkstattzeile: nach der Zahlung abgewiesen, davor
+//      gebucht (Storno am alten, Neubuchung am neuen Tag, Zahlung unverändert); In-house-Zeile mit Kostendatum; Primary gleich.
+//   F  PC2: „Pay Supplier" 150 auf 120 offen → 30 Vorauszahlung: Banking zeigt den vollen Geldabgang, je Zeile genau einmal.
 //
 // PROZESS-ISOLATION (Gerüst aus b23-purchase-offset.e2e.mjs): gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf
 // gestartet hat oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -248,12 +251,14 @@ async function foto(c, name, sel) {
 //     B  Ausgabe Utilities 400 (Tag 02.11., offen)    — PC2: geteilt 100 Benefit am 04.11. + 300 Cash heute
 //     R  Reparatur (hybrid) mit Werkstattzeile 150 (Ausgabe Tag 05.11., offen) — PC2 über den A/P-Chip, Tag 06.11.
 //   Lieferant „Eps Metals" — PC2 „Pay Supplier" 320 am 05.11.
+//   Lieferant „Eps Prepaid" — PC2 „Pay Supplier" 150 auf 120 offen → 30 Vorauszahlung (Banking: voller Abgang)
 //     S  Ausgabe 120 (Tag 02.11.) + Einkauf PUR-2026-000975 über 200 (Tag 04.11.), beide offen
 // „Heute" ist der Kalendertag in Bahrain (UTC+3) — wie in den Masken.
 // ══════════════════════════════════════════════════════════════════════════════
-const SUP = 'eps-sup', SUP2 = 'eps-sup2';
+const SUP = 'eps-sup', SUP2 = 'eps-sup2', SUP3 = 'eps-sup3';
 const EXP_A = 'eps-exp-a', EXP_B = 'eps-exp-b', EXP_R = 'eps-exp-r', REP = 'eps-rep', EXP_S = 'eps-exp-s', PUR_S = 'eps-pur-s';
 const NUM_A = 'EXP-2026-000971', NUM_B = 'EXP-2026-000972', NUM_R = 'EXP-2026-000973', NUM_S = 'EXP-2026-000975', PNUM_S = 'PUR-2026-000975';
+const EXP_T = 'eps-exp-t', NUM_T = 'EXP-2026-000976';
 function seed() {
   const db = new DatabaseSync(BIZ_DB);
   try {
@@ -261,6 +266,7 @@ function seed() {
     const now = new Date().toISOString();
     insert(db, 'suppliers', { id: SUP, branch_id, name: 'Eps Workshop', active: 1, created_at: now, updated_at: now });
     insert(db, 'suppliers', { id: SUP2, branch_id, name: 'Eps Metals', active: 1, created_at: now, updated_at: now });
+    insert(db, 'suppliers', { id: SUP3, branch_id, name: 'Eps Prepaid', active: 1, created_at: now, updated_at: now });
     let nr = 970000;
     const le = (id, acc, dir, amount, sup, mod, sid, date) => insert(db, 'ledger_entries', { id, branch_id, entry_no: ++nr, transaction_id: 'eps-tx-' + sid,
       occurred_at: `${date}T09:00:00.000Z`, recorded_at: now, account: acc, direction: dir, amount, currency: 'BHD', counterparty_type: 'SUPPLIER',
@@ -296,6 +302,11 @@ function seed() {
       cost_amount: 150, expense_id: EXP_R, status: 'OPEN', created_at: now, updated_at: now });
     // Lieferant „Eps Metals": offene Ausgabe 120 (02.11.) und offener Einkauf 200 (04.11.).
     ausgabe(EXP_S, NUM_S, 'Miscellaneous', 120, '2026-11-02', {}, SUP2);
+    // Lieferant „Eps Prepaid": nur eine offene Ausgabe 120 (kein Einkauf) — ein Überschuss wird Vorauszahlungs-Guthaben.
+    insert(db, 'repairs', { id: 'eps-rep-t', branch_id, repair_number: 'REP-2026-000976', customer_id: 'eps-kunde', product_id: 'eps-prod', status: 'received',
+      repair_scope: 'CUSTOMER', repair_type: 'external', workshop_supplier_id: SUP3, issue_description: 'Strap', received_at: '2026-11-03T09:00:00.000Z',
+      created_at: now, updated_at: now });
+    ausgabe(EXP_T, NUM_T, 'Miscellaneous', 120, '2026-11-03', { related_module: 'repair', related_entity_id: 'eps-rep-t', description: 'Workshop prepaid' }, SUP3);
     artikel('-s', PUR_S, PNUM_S, SUP2, 'UNPAID', 200, 0, '2026-11-04');
     le('eps-le-pur-s-d', 'INVENTORY', 'DEBIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
     le('eps-le-pur-s-c', 'ACCOUNTS_PAYABLE', 'CREDIT', 200, SUP2, 'PURCHASE', PUR_S, '2026-11-04');
@@ -602,6 +613,102 @@ try {
       `D Banking am PC2: beide Zahlungen am 05.11. (${S(bzE)} ${S(bzP)})`);
     await foto(client, 'eps-d-pc2-banking');
     ok(S(await treffer(client)) === '[]', 'D PC2 griff nie nach einer lokalen Datenbank');
+  }
+
+  // ── E PC2: Reparatur-Kostendatum — „Edit date" an der bezahlten Werkstattzeile (nach der Zahlung abgewiesen, davor
+  //    gebucht), dann eine In-house-Zeile mit Kostendatum per Tastatur; der Primary zeigt dasselbe ────────────────────
+  {
+    await syncRuhe();
+    const rlAnzeige = '[data-repair-line-cost-date-show="eps-rl"]';
+    client = await lade(client, `/repairs/${REP}`);
+    await waitFor(client, '[data-repair-line-cost-date-edit="eps-rl"]', 45000);
+    const anzeige0 = await text(client, rlAnzeige);
+    ok(/05 Nov 2026/.test(anzeige0), `E PC2: die Zeile zeigt ihr Kostendatum (Altbestand = Tag der Ausgabe) (${anzeige0})`);
+    ok(await mausKlick(client, '[data-repair-line-cost-date-edit="eps-rl"]') === 'OK', 'E Maus auf „Edit date"');
+    await waitFor(client, '[data-repair-cost-date-input]', 15000);
+    const t6 = await datumTippen(client, '[data-repair-cost-date-input]', '2026-11-07');
+    ok(t6 === 'OK', `E Maus + Tastatur ins Datumsfeld: 07.11. (${t6})`);
+    ok(await tippe(client, '[data-repair-cost-date-reason]', 'workshop bill dated later') === 'OK', 'E Tastatur: Grund');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'repairs.update_line').length;
+    ok(await mausKlick(client, '[data-repair-cost-date-save]') === 'OK', 'E Maus auf „Save cost date"');
+    await warteBis(client, '/already paid on 2026-11-06/.test(document.body.innerText)', 20000);
+    ok(/already paid on 2026-11-06/.test(String(await client.ev('return document.body.innerText;')))
+      && String(dbQ(BIZ_DB, 'SELECT expense_date AS d FROM expenses WHERE id = ?', [EXP_R])[0]?.d) === '2026-11-05' && await exists(client, '[data-repair-cost-date-save]'),
+      'E nach der Zahlung (06.11.): der Primary lehnt verständlich ab, nichts geändert, Dialog bleibt offen');
+    const t7 = await datumTippen(client, '[data-repair-cost-date-input]', '2026-11-04');
+    ok(t7 === 'OK', `E Maus + Tastatur ins Datumsfeld: 04.11. (${t7})`);
+    ok(await tippe(client, '[data-repair-cost-date-reason]', 'workshop invoice is dated 04.11.') === 'OK', 'E Tastatur: Grund');
+    await foto(client, 'eps-e-pc2-cost-date-dialog');
+    ok(await mausKlick(client, '[data-repair-cost-date-save]') === 'OK', 'E Maus auf „Save cost date"');
+    await dateiBis(() => String(dbQ(BIZ_DB, 'SELECT cost_date AS d FROM repair_lines WHERE id = ?', ['eps-rl'])[0]?.d) === '2026-11-04');
+    const lebendR = dbQ(BIZ_DB, `SELECT e1.account, substr(e1.occurred_at, 1, 10) AS tag FROM ledger_entries e1 WHERE e1.source_module = 'EXPENSE' AND e1.source_id = ?
+      AND e1.reverses_entry_id IS NULL AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id) ORDER BY e1.account`, [EXP_R]).map((r) => `${r.account} ${r.tag}`);
+    const storno = dbQ(BIZ_DB, "SELECT substr(occurred_at, 1, 10) AS tag FROM ledger_entries WHERE source_module = 'EXPENSE' AND source_id = ? AND reverses_entry_id IS NOT NULL", [EXP_R]).map((r) => r.tag);
+    ok(String(dbQ(BIZ_DB, 'SELECT expense_date AS d FROM expenses WHERE id = ?', [EXP_R])[0]?.d) === '2026-11-04'
+      && S(lebendR) === S(['ACCOUNTS_PAYABLE 2026-11-04', 'INVENTORY 2026-11-04']) && storno.length === 2 && storno.every((x) => x === '2026-11-05'),
+      `E Ausgabe + Kostenbuchung am 04.11., Gegenbuchung am alten Tag 05.11. (${S(lebendR)} / ${S(storno)})`);
+    ok(S(zahlungen(EXP_R)) === S(['150 cash 2026-11-06']) && S(geld(EXP_R)) === S(['CASH 150 2026-11-06']), 'E Zahlung und Zahlungstag unverändert (06.11.)');
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'repairs.update_line');
+    const p = cmds.at(-1)?.payload || {};
+    ok(cmds.length === vor + 2 && p.costDate === '2026-11-04' && /04\.11\./.test(String(p.reason)) && p.costAmount === undefined,
+      `E PC2 schickt repairs.update_line mit costDate + reason (${S(p)})`);
+    await warteBis(client, "!document.querySelector('[data-repair-cost-date-save]')", 10000);
+    // In-house-Zeile mit Kostendatum (Vorgabe Annahmetag 05.11.), per Tastatur 06.11.
+    ok(await mausKlick(client, '[data-repair-add-work]') === 'OK', 'E Maus auf „+ Add Work"');
+    await waitFor(client, '[data-repair-line-cost-date]', 15000);
+    ok(await wert(client, '[data-repair-line-cost-date]') === '2026-11-05', `E Vorgabe: Kostendatum = Annahmetag 05.11. (${await wert(client, '[data-repair-line-cost-date]')})`);
+    ok(await tippe(client, '[data-repair-line-cost]', '25') === 'OK', 'E Tastatur: Kosten 25 (In-house)');
+    const t8 = await datumTippen(client, '[data-repair-line-cost-date]', '2026-11-06');
+    ok(t8 === 'OK', `E Maus + Tastatur ins Kostendatum: 06.11. (${t8})`);
+    await foto(client, 'eps-e-pc2-add-work-cost-date');
+    const vorA = (await kommandos(client)).filter((x) => x.op === 'repairs.add_line').length;
+    ok(await mausKlick(client, '[data-add-repair-line]') === 'OK', 'E Maus auf „Add Line"');
+    await dateiBis(() => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ? AND cost_amount = 25', [REP])[0]?.n) === 1);
+    const neu = dbQ(BIZ_DB, 'SELECT id, cost_date FROM repair_lines WHERE repair_id = ? AND cost_amount = 25', [REP])[0] || {};
+    const eigen = dbQ(BIZ_DB, "SELECT account, substr(occurred_at, 1, 10) AS tag FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK' AND source_id = ? ORDER BY account", [String(neu.id)])
+      .map((r) => `${r.account} ${r.tag}`);
+    ok(neu.cost_date === '2026-11-06' && S(eigen) === S(['EXPENSES_OPERATING 2026-11-06', 'INVENTORY 2026-11-06']),
+      `E In-house 25: Zeile und Eigenleistung am 06.11. (${S(neu)} ${S(eigen)})`);
+    const pa = (await kommandos(client)).filter((x) => x.op === 'repairs.add_line');
+    ok(pa.length === vorA + 1 && pa.at(-1)?.payload?.costDate === '2026-11-06', `E PC2 schickt repairs.add_line mit costDate (${S(pa.at(-1)?.payload)})`);
+    // Der Primary zeigt dieselben Kostendaten.
+    await syncRuhe();
+    await gehFrisch(primary, `/repairs/${REP}`);
+    await warteBis(primary, `document.querySelector(${S(rlAnzeige)})`, 30000);
+    const primAnzeige = await text(primary, rlAnzeige);
+    const primNeu = await text(primary, `[data-repair-line-cost-date-show="${String(neu.id)}"]`);
+    ok(/04 Nov 2026/.test(primAnzeige) && /06 Nov 2026/.test(primNeu), `E Primary zeigt dieselben Kostendaten (${primAnzeige} | ${primNeu})`);
+    await foto(primary, 'eps-e-primary-repair-cost-dates', '[data-repair-add-work]');
+    ok(S(await treffer(client)) === '[]', 'E PC2 griff nie nach einer lokalen Datenbank');
+  }
+
+  // ── F PC2: Banking nach „Pay Supplier" mit Überzahlung — 150 bezahlt, 120 offen → 30 Vorauszahlung als eigene Zeile ───
+  {
+    await syncRuhe();
+    client = await lade(client, `/suppliers/${SUP3}`);
+    await waitFor(client, '[data-supplier-pay-open]', 45000);
+    ok(await mausKlick(client, '[data-supplier-pay-open]') === 'OK', 'F PC2: Maus auf „Pay Supplier"');
+    await waitFor(client, '[data-supplier-pay-amount]', 15000);
+    ok(await tippe(client, '[data-supplier-pay-amount]', '150') === 'OK', 'F Tastatur: 150 (offen sind 120)');
+    ok(await mausKlick(client, '[data-supplier-pay-method="cash"]') === 'OK', 'F Maus: Cash');
+    const vor = (await kommandos(client)).filter((x) => x.op === 'suppliers.pay').length;
+    ok(await mausKlick(client, '[data-supplier-pay-save]') === 'OK', 'F Maus auf „Pay 150.000 BHD"');
+    await waitFor(client, '[data-app-confirm]', 15000);
+    const frage = await text(client, '[data-app-confirm]');
+    ok(/30\.000 excess/.test(frage) && /supplier credit/.test(frage), `F App-Rückfrage nennt den Überschuss 30 als Lieferantenguthaben (${frage.slice(0, 120)})`);
+    ok(await mausKlick(client, '[data-app-confirm-ok]') === 'OK', 'F Maus auf „OK" der Rückfrage');
+    await dateiBis(() => zahlungen(EXP_T).length === 1);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'suppliers.pay');
+    ok(cmds.length === vor + 1 && cmds.at(-1)?.payload?.confirmExcessAsCredit === true, `F EIN Auftrag mit bestätigtem Überschuss (${S(cmds.at(-1)?.payload)})`);
+    const hb = Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(amount), 0) AS s FROM ledger_entries WHERE account = 'CASH' AND direction = 'CREDIT' AND counterparty_id = ?", [SUP3])[0]?.s || 0);
+    ok(hb === 150, `F Hauptbuch: 150 Cash-Abgang beim Lieferanten (${hb})`);
+    await warteBis(client, "!document.querySelector('[data-supplier-pay-save]')", 10000);
+    client = await lade(client, '/banking');
+    await warteBis(client, `document.body.innerText.includes(${S(NUM_T)})`, 30000);
+    const bzE = await bankZeilen(client, NUM_T), bzV = await bankZeilen(client, 'Eps Prepaid');
+    ok(S(bzE) === S([[HEUTE(), 'Cash', '120.000']]) && S(bzV) === S([[HEUTE(), 'Cash', '30.000']]),
+      `F Banking am PC2: 120 Ausgabe + 30 Vorauszahlung = der volle Geldabgang 150, je genau einmal (${S(bzE)} ${S(bzV)})`);
+    await foto(client, 'eps-f-pc2-banking-prepayment');
   }
 
 } catch (e) {

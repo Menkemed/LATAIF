@@ -580,6 +580,33 @@ const nichts2 = () => nichts() + S([n(DB, 'SELECT COUNT(*) FROM purchase_payment
   ok(sales.kind === 'business_error' && sales.code === 'PERMISSION_DENIED' && nichts2() === v, `E20 SALES: PERMISSION_DENIED, nichts gebucht (${S(sales)})`);
 }
 
+// ── E21 Banking bei Überzahlung: 500 bezahlt, 400 offen → 100 Vorauszahlung; jeder echte Geldabgang genau einmal ─────
+{
+  lieferant('sup-8');
+  const ex1 = ausgabe(250, '2026-09-05', 'Rent', 'sup-8');
+  const ex2 = ausgabe(150, '2026-09-06', 'Rent', 'sup-8');
+  const r = pay('sup-8', 500, 'cash', { paidAt: '2026-09-12', confirmExcessAsCredit: true });
+  const hbGeld = (dir: string): number => r3(n(DB, "SELECT COALESCE(SUM(amount), 0) FROM ledger_entries WHERE account IN ('CASH','BANK','BENEFIT') AND counterparty_id = 'sup-8' AND direction = ?", [dir]));
+  type Bt = { id: string; date: string; account: string; amount: number; type: string; flow: string; relatedEntityId?: string };
+  const zum = (): Bt[] => (BT() as unknown as Bt[]).filter((t) => t.relatedEntityId === ex1 || t.relatedEntityId === ex2 || t.relatedEntityId === 'sup-8');
+  const summe = (flow: string): number => r3(zum().filter((t) => t.flow === flow).reduce((a, t) => a + Number(t.amount), 0));
+  ok(r.excessTo === 'standalone_credit' && r.excessAmount === 100 && hbGeld('CREDIT') === 500, `E21 Hauptbuch: 500 Cash-Abgang (400 Schuld + 100 Vorauszahlung) (${hbGeld('CREDIT')})`);
+  ok(summe('out') === 500, `E21 Banking zeigt den VOLLEN Geldabgang 500 (${summe('out')}: ${S(zum().map((t) => `${t.type} ${t.account} ${t.amount} ${String(t.date).slice(0, 10)}`))})`);
+  const pre = zum().filter((t) => t.relatedEntityId === 'sup-8');
+  ok(pre.length === 1 && pre[0].amount === 100 && pre[0].account === 'cash' && String(pre[0].date).slice(0, 10) === '2026-09-12' && pre[0].flow === 'out',
+    `E21 die Vorauszahlung 100 als eigene Zeile am Zahlungstag, Konto Cash (${S(pre)})`);
+  imHaus(() => payables.refundStandaloneCreditInHouse(String(r.excessRef), CTX));
+  ok(hbGeld('DEBIT') === 100 && summe('in') === 100 && summe('out') === 500,
+    `E21 „Refund Credit": 100 kommen zurück — Banking zeigt den Eingang, der Abgang bleibt (in ${summe('in')}, out ${summe('out')})`);
+  ok(summe('out') - summe('in') === hbGeld('CREDIT') - hbGeld('DEBIT'), 'E21 Banking-Liste = Hauptbuch (netto 400), keine doppelte Geldbewegung');
+  // Überschuss auf einem Einkauf (E17, sup-4): die Überzahlung ist eine Einkaufszahlung — genau einmal, nicht zusätzlich als Vorauszahlung.
+  const k4 = s(DB, "SELECT id FROM purchases WHERE supplier_id = 'sup-4'");
+  const out4 = (BT() as unknown as Bt[]).filter((t) => t.flow === 'out' && (t.relatedEntityId === k4 || t.relatedEntityId === 'sup-4'));
+  ok(r3(out4.reduce((a, t) => a + Number(t.amount), 0)) === 250 && out4.every((t) => t.type === 'PURCHASE_OUT'),
+    `E21 Überzahlung auf dem Einkauf: 250 genau einmal als Einkaufszahlungen (${S(out4.map((t) => `${t.type} ${t.amount}`))})`);
+  abgleich('E21');
+}
+
 console.log(`\nexpense-payment-date-split: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('EXPENSE_PAYMENT_DATE_SPLIT_PROVED');

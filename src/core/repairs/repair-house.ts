@@ -288,6 +288,22 @@ export function updateRepairLineOnPrimary(
   });
 }
 
+/**
+ * Owner 12.11.2026 — „Edit Cost Date" am Primary: derselbe Hausweg wie `repairs.update_line` mit `costDate` + `reason`
+ * (gesehene Fassung, offene Zeile; Prüfungen und Umbuchung in `changeRepairLineCostDateInHouse`).
+ */
+export function changeRepairLineCostDateOnPrimary(repairId: string, lineId: string, costDate: string, reason: string, expectedRevision: number): Promise<void> {
+  return amPrimary(() => {
+    assertRepairRevision(repairId, expectedRevision);
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    rs.loadRepairLines();
+    const line = rs.getRepairLines(repairId).find((l) => l.id === lineId);
+    if (!line) throw new RepairActionRejected('LINE_NOT_FOUND', 'no such cost line on this repair');
+    mitBuchungswache('repairs.update_line', () => { rs.changeRepairLineCostDate(lineId, costDate, reason); });
+  });
+}
+
 /** „+ Add Line" am Primary — derselbe Hausweg wie `repairs.add_line`. */
 export function addRepairLineOnPrimary(repairId: string, data: Partial<RepairLine>): Promise<void> {
   // REPAIR-REDESIGN — dieselbe Regel wie der Fernbefehl (vorher nahm der Primary auch eine Werkstattzeile über 0.000).
