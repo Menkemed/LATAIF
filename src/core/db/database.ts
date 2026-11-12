@@ -2643,41 +2643,6 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_customer_credit_refunds_credit ON customer_credit_refunds(customer_credit_id)`,
-    // v0.8.101 S5 (Owner E3) — Store Credit verrechnet mit einer GEBUCHTEN Partnerforderung derselben Person: je Verrechnung ein
-    // Beleg; der verfügbare Saldo (amount − used_amount) sinkt um genau diesen Betrag — derselbe Saldo wie jede Einlösung.
-    // Eigene Tabelle (Spiegel von customer_credit_refunds): `credit_applications` bleibt streng an Rechnungszahlungen gebunden.
-    // Nur am Primary; Rückgängig setzt reversed_at (kein Löschen). Additiv — eine ältere App kennt sie nicht und braucht sie nicht.
-    `CREATE TABLE IF NOT EXISTS customer_credit_offsets (
-      id TEXT PRIMARY KEY,
-      branch_id TEXT NOT NULL,
-      customer_credit_id TEXT NOT NULL,
-      customer_id TEXT NOT NULL,
-      amount REAL NOT NULL CHECK (amount > 0),
-      purchase_line_id TEXT NOT NULL,
-      movement_id TEXT NOT NULL,
-      offset_number TEXT NOT NULL,
-      offset_date TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      created_by TEXT,
-      reversed_at TEXT,
-      reversed_by TEXT
-    )`,
-    `CREATE INDEX IF NOT EXISTS idx_customer_credit_offsets_credit ON customer_credit_offsets(customer_credit_id)`,
-    // v0.8.101 — Lieferantenrückgabe mit Zusatzkosten: was der Lieferant ÜBER den Rücknahmepreis hinaus für aktivierte
-    // Zusatzkosten (Reparatur, Polieren, Werkstattgold) erstattet — getrennt vom Rücknahmepreis (der den Einkauf mindert).
-    `ALTER TABLE purchase_returns ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
-    `ALTER TABLE purchase_return_lines ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
-    // v0.8.101 (Owner 11.11.2026) — „Cancel return": der Einstand je zurückgegebenem Stück (der Storno bringt es genau so zurück),
-    // der Storno-Vermerk und die ECHTE Rückzahlung an den Lieferanten (Kasse/Bank/Benefit), getrennt von den Gegenbuchungen.
-    `ALTER TABLE purchase_return_lines ADD COLUMN unit_cost_at_return REAL`,
-    `ALTER TABLE purchase_returns ADD COLUMN cancelled_at TEXT`,
-    `ALTER TABLE purchase_returns ADD COLUMN cancelled_by TEXT`,
-    `ALTER TABLE purchase_returns ADD COLUMN cancel_reason TEXT`,
-    `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_amount REAL NOT NULL DEFAULT 0`,
-    // v0.8.101 (Owner 11.11.2026) — die Art des Stornos (ENTRY_ERROR: versehentlich erfasst, nichts erstattet; REVERSED: echte
-    // Rückgabe rückgängig) und der Beleg der echten Rückzahlung (Überweisungsreferenz, Quittung).
-    `ALTER TABLE purchase_returns ADD COLUMN cancel_kind TEXT`,
-    `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_reference TEXT`,
     // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order: die Goldkosten der Order-Zeile, gebucht Soll
     // INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist (Tag der Buchung daneben). NULL = noch nicht bewertet
     // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.
@@ -2801,6 +2766,42 @@ function runMigrations(database: Database): void {
     // hat keine: NULL. Rein additiv, Altzeilen bleiben unverändert.
     `ALTER TABLE party_offsets ADD COLUMN settlement_number TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_party_offsets_settlement ON party_offsets(branch_id, settlement_number)`,
+    // ── v0.8.101 — angehängt (jede Anweisung additiv und unabhängig; bei jedem Start ausgeführt, „schon vorhanden" übergangen) ──
+    // v0.8.101 S5 (Owner E3) — Store Credit verrechnet mit einer GEBUCHTEN Partnerforderung derselben Person: je Verrechnung ein
+    // Beleg; der verfügbare Saldo (amount − used_amount) sinkt um genau diesen Betrag — derselbe Saldo wie jede Einlösung.
+    // Eigene Tabelle (Spiegel von customer_credit_refunds): `credit_applications` bleibt streng an Rechnungszahlungen gebunden.
+    // Nur am Primary; Rückgängig setzt reversed_at (kein Löschen). Additiv — eine ältere App kennt sie nicht und braucht sie nicht.
+    `CREATE TABLE IF NOT EXISTS customer_credit_offsets (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      customer_credit_id TEXT NOT NULL,
+      customer_id TEXT NOT NULL,
+      amount REAL NOT NULL CHECK (amount > 0),
+      purchase_line_id TEXT NOT NULL,
+      movement_id TEXT NOT NULL,
+      offset_number TEXT NOT NULL,
+      offset_date TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      reversed_at TEXT,
+      reversed_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_credit_offsets_credit ON customer_credit_offsets(customer_credit_id)`,
+    // v0.8.101 — Lieferantenrückgabe mit Zusatzkosten: was der Lieferant ÜBER den Rücknahmepreis hinaus für aktivierte
+    // Zusatzkosten (Reparatur, Polieren, Werkstattgold) erstattet — getrennt vom Rücknahmepreis (der den Einkauf mindert).
+    `ALTER TABLE purchase_returns ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
+    `ALTER TABLE purchase_return_lines ADD COLUMN added_cost_refund REAL NOT NULL DEFAULT 0`,
+    // v0.8.101 (Owner 11.11.2026) — „Cancel return": der Einstand je zurückgegebenem Stück (der Storno bringt es genau so zurück),
+    // der Storno-Vermerk und die ECHTE Rückzahlung an den Lieferanten (Kasse/Bank/Benefit), getrennt von den Gegenbuchungen.
+    `ALTER TABLE purchase_return_lines ADD COLUMN unit_cost_at_return REAL`,
+    `ALTER TABLE purchase_returns ADD COLUMN cancelled_at TEXT`,
+    `ALTER TABLE purchase_returns ADD COLUMN cancelled_by TEXT`,
+    `ALTER TABLE purchase_returns ADD COLUMN cancel_reason TEXT`,
+    `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_amount REAL NOT NULL DEFAULT 0`,
+    // v0.8.101 (Owner 11.11.2026) — die Art des Stornos (ENTRY_ERROR: versehentlich erfasst, nichts erstattet; REVERSED: echte
+    // Rückgabe rückgängig) und der Beleg der echten Rückzahlung (Überweisungsreferenz, Quittung).
+    `ALTER TABLE purchase_returns ADD COLUMN cancel_kind TEXT`,
+    `ALTER TABLE purchase_returns ADD COLUMN refund_repaid_reference TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
