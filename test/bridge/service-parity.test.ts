@@ -224,7 +224,8 @@ const REPAIR_COMPARE = [
   // Die EINE Ableitung, die es doch macht, betrifft die erste Arbeitszeile — und die teilen beide
   // Wege automatisch, weil sie im Store liegt.
   // Owner 12.11.2026 — der Betrag steht VOR dem Schreiben fest (`werkstattBetrag`), weil sein Kostendatum vorher geprüft wird.
-  ok(/const werkstattBetrag = data\.workshopSupplierId && \(data\.repairType === 'external' \|\| data\.repairType === 'hybrid'\)\s*\? \(data\.repairType === 'hybrid'/.test(createSeg)
+  // Owner 12.11.2026 — mit der Werkstattgebühr als eigenem Feld (`workshopFee`); ohne sie die bisherige Regel.
+  ok(/const werkstattBetrag = data\.workshopSupplierId && \(data\.repairType === 'external' \|\| data\.repairType === 'hybrid'\)\s*\? \(data\.workshopFee !== undefined\s*\? \(Number\(data\.workshopFee\) \|\| 0\)\s*: \(data\.repairType === 'hybrid'/.test(createSeg)
     && /const cost = werkstattBetrag;/.test(createSeg),
     'CALLPATH die Kosten der ersten Arbeitszeile leitet der Store selbst ab — geteilt, ohne Zutun');
 }
@@ -235,10 +236,11 @@ const REPAIR_COMPARE = [
   // Fernweg vorher auseinanderlief.
   const cases: Array<[string, Record<string, unknown>]> = [
     ['im eigenen Haus', { repairType: 'internal', estimatedCost: 40, chargeToCustomer: 100 }],
-    ['Fremdarbeit ohne eigene Kostenangabe', { repairType: 'external', estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
-    ['Fremdarbeit MIT eigener Angabe', { repairType: 'external', estimatedCost: 40, internalCost: 15, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
+    // Owner 12.11.2026 — Gebühr (`workshopFee`, → Werkstattzeile) und Voranschlag getrennt, wie die Maske sie schickt.
+    ['Fremdarbeit ohne eigene Kostenangabe', { repairType: 'external', workshopFee: 40, estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
+    ['Fremdarbeit MIT eigener Angabe', { repairType: 'external', workshopFee: 40, estimatedCost: 40, internalCost: 15, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
     // Owner 12.11.2026 — ohne eigene Kopfkosten (`internalCost`): die gibt es beim Anlegen nicht mehr (s. u. das Nein).
-    ['Mischarbeit', { repairType: 'hybrid', estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
+    ['Mischarbeit', { repairType: 'hybrid', workshopFee: 40, estimatedCost: 40, workshopSupplierId: 'sup-1', chargeToCustomer: 100 }],
   ];
 
   let idx = 0;

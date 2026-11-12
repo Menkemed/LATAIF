@@ -287,16 +287,20 @@ export function repairEstimateRole(
  */
 export function repairCreateWorkshopSplit<T extends {
   repairType?: string | null; workshopSupplierId?: string; plannedWorkshopSupplierId?: string;
-  estimatedCost?: number | null; internalCost?: number | null;
+  estimatedCost?: number | null; internalCost?: number | null; workshopFee?: number | null;
 }>(form: T): T {
   if (form.repairType !== 'external' && form.repairType !== 'hybrid') {
     return { ...form, workshopSupplierId: undefined, plannedWorkshopSupplierId: undefined };
   }
   const ws = text(form.workshopSupplierId);
   if (!ws) return { ...form, workshopSupplierId: undefined, plannedWorkshopSupplierId: undefined };
-  const gebuehr = form.repairType === 'hybrid'
-    ? (Number(form.estimatedCost) || 0)
-    : ((Number(form.estimatedCost) || 0) || (Number(form.internalCost) || 0));
+  // Owner 12.11.2026 — die Gebühr ist ein eigenes Feld (`workshopFee`), der Voranschlag nur Information. Ohne das Feld
+  // (alter Auftrag) gilt die bisherige Regel: der Betrag, der als `estimatedCost` reiste.
+  const gebuehr = form.workshopFee !== undefined && form.workshopFee !== null
+    ? (Number(form.workshopFee) || 0)
+    : form.repairType === 'hybrid'
+      ? (Number(form.estimatedCost) || 0)
+      : ((Number(form.estimatedCost) || 0) || (Number(form.internalCost) || 0));
   if (gebuehr > 0) return { ...form, workshopSupplierId: ws, plannedWorkshopSupplierId: undefined };
   return { ...form, workshopSupplierId: undefined, plannedWorkshopSupplierId: ws };
 }
@@ -326,13 +330,15 @@ export interface RepairCreateWorkDraft {
   inHouseCost: string;
   workshopId: string;
   workshopWorkType: RepairWorkType;
-  /** Text wie im Feld: leer = die Gebühr folgt später. */
+  /** Text wie im Feld: leer = die Gebühr folgt später. Die tatsächlichen Werkstattkosten — sie werden die Werkstattzeile. */
   workshopFee: string;
+  /** Owner 12.11.2026 — der Voranschlag (Text wie im Feld; leer = keiner): nur Information, nie gebucht. */
+  estimate: string;
 }
 
 export const EMPTY_CREATE_WORK: RepairCreateWorkDraft = {
   inHouse: false, external: false, inHouseWorkType: 'polishing', inHouseCost: '',
-  workshopId: '', workshopWorkType: 'service', workshopFee: '',
+  workshopId: '', workshopWorkType: 'service', workshopFee: '', estimate: '',
 };
 
 /** Die Art aus den beiden Häkchen. Nichts angekreuzt ist erlaubt: „Not set", die Arbeit kommt später dazu. */
@@ -354,20 +360,29 @@ export function repairCreateWorkIssue(d: RepairCreateWorkDraft): string | null {
     if (!text(d.workshopId)) return 'Choose the workshop, or untick “External workshop”.';
     const f = betrag(d.workshopFee);
     if (f !== null && (!Number.isFinite(f) || f < 0)) return 'Workshop fee must be a number of 0 or more.';
+    const e = betrag(d.estimate ?? '');
+    if (e !== null && (!Number.isFinite(e) || e < 0)) return 'Estimate must be a number of 0 or more.';
   }
   return null;
 }
 
-/** Die Felder für die Anlage: nur was angekreuzt ist; was abgewählt in der Maske steht, wird nicht gespeichert. */
+/**
+ * Die Felder für die Anlage: nur was angekreuzt ist; was abgewählt in der Maske steht, wird nicht gespeichert.
+ * Owner 12.11.2026 — die Werkstattgebühr (`workshopFee`, tatsächliche Kosten → Werkstattzeile mit Kostendatum) und der
+ * Voranschlag (`estimatedCost`, nur wenn eingetragen, nur Information) sind getrennt; die Gebühr wird nie Voranschlag.
+ */
 export function repairCreateWorkFields(d: RepairCreateWorkDraft): {
   repairType: 'internal' | 'external' | 'hybrid' | 'unset';
-  workshopSupplierId?: string; estimatedCost?: number;
+  workshopSupplierId?: string; workshopFee?: number; estimatedCost?: number;
   inHouseWorkType?: RepairWorkType; inHouseCost?: number; workshopWorkType?: RepairWorkType;
 } {
   return {
     repairType: repairCreateKind(d),
     ...(d.inHouse ? { inHouseWorkType: d.inHouseWorkType, inHouseCost: betrag(d.inHouseCost) ?? 0 } : {}),
-    ...(d.external ? { workshopSupplierId: text(d.workshopId) ?? undefined, workshopWorkType: d.workshopWorkType, estimatedCost: betrag(d.workshopFee) || undefined } : {}),
+    ...(d.external ? {
+      workshopSupplierId: text(d.workshopId) ?? undefined, workshopWorkType: d.workshopWorkType,
+      workshopFee: betrag(d.workshopFee) || 0, estimatedCost: betrag(d.estimate ?? '') || undefined,
+    } : {}),
   };
 }
 

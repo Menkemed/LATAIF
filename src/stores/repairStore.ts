@@ -797,8 +797,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     // Owner 12.11.2026 — das Kostendatum der Zeilen, die die Anlage gleich mit anlegt (Werkstattgebühr, eigene Arbeit):
     // gewählt oder der Annahmetag — nie still „heute". Mit Betrag und ohne zulässigen Tag ein Nein VOR jedem Schreiben.
+    // Owner 12.11.2026 — der Betrag der Werkstattzeile ist die Werkstattgebühr (`workshopFee`, getrennt vom Voranschlag);
+    // ohne sie (alter direkter Aufruf) wie bisher der Betrag aus `estimatedCost`.
     const werkstattBetrag = data.workshopSupplierId && (data.repairType === 'external' || data.repairType === 'hybrid')
-      ? (data.repairType === 'hybrid' ? (data.estimatedCost || 0) : (data.estimatedCost || data.internalCost || 0))
+      ? (data.workshopFee !== undefined
+        ? (Number(data.workshopFee) || 0)
+        : (data.repairType === 'hybrid' ? (data.estimatedCost || 0) : (data.estimatedCost || data.internalCost || 0)))
       : 0;
     const anlageKostenTag = werkstattBetrag > 0 || data.inHouseWork
       ? lineCostDayFor(

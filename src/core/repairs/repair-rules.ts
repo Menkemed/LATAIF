@@ -161,6 +161,8 @@ export interface RepairCreateInput {
   receivedAt?: string;
   /** Owner 12.11.2026 — das Kostendatum der mit angelegten Kostenzeilen (nur nötig, wenn der Annahmetag keiner sein kann). */
   costDate?: string;
+  /** Owner 12.11.2026 — die tatsächlichen Werkstattkosten der Anlage (→ Werkstattzeile); getrennt vom Voranschlag. */
+  workshopFee?: number;
   staffId?: string;
   notes?: string;
 }
@@ -172,6 +174,8 @@ export interface RepairCreateWorkInput {
   workshopWorkType?: RepairWorkType;
   /** Owner 12.11.2026 — das Kostendatum der Zeilen der Anlage (Werkstattgebühr, eigene Arbeit). */
   costDate?: string;
+  /** Owner 12.11.2026 — die Werkstattgebühr (tatsächliche Kosten → Werkstattzeile), nie der Voranschlag. */
+  workshopFee?: number;
 }
 
 function workTypeOf(v: unknown): RepairWorkType | undefined {
@@ -229,6 +233,7 @@ export function normalizeRepairCreate(form: Partial<Repair> & RepairCreateWorkIn
     inHouseCost: repairType === 'internal' || repairType === 'hybrid' ? (money(form.inHouseCost, 'inHouseCost') || undefined) : undefined,
     workshopWorkType: keineWerkstatt ? undefined : workTypeOf(form.workshopWorkType),
     estimatedCost: money(form.estimatedCost, 'estimatedCost') || undefined,
+    workshopFee: keineWerkstatt ? undefined : (money(form.workshopFee, 'workshopFee') || undefined),
     internalCost: money(form.internalCost, 'internalCost') || undefined,
     chargeToCustomer: own ? undefined : (money(form.chargeToCustomer, 'chargeToCustomer') || undefined),
     taxScheme,
@@ -263,6 +268,8 @@ export type RepairCreatePlan = Partial<Repair> & {
   inHouseWork?: { workType: RepairWorkType; costAmount: number };
   /** Owner 12.11.2026 — das gewählte Kostendatum der Zeilen der Anlage (`createRepair` prüft es). */
   costDate?: string;
+  /** Owner 12.11.2026 — der Betrag der Werkstattzeile der Anlage (tatsächliche Kosten), getrennt vom Voranschlag. */
+  workshopFee?: number;
 };
 
 /**
@@ -337,6 +344,15 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     throw new RepairActionRejected(REPAIR_COST_AS_LINE,
       'Own work and extra costs are entered as “In-house” cost — it becomes a cost line with its cost date (no cost in the repair header).');
   }
+  // Owner 12.11.2026 — Werkstattgebühr (tatsächliche Kosten → Werkstattzeile) und Voranschlag (nur Information, nur wenn
+  // eingetragen) sind getrennt. Ein alter Auftrag (PC2 bis v0.8.101) schickte die Gebühr als `estimatedCost` mit der Werkstatt:
+  // derselbe Betrag wird wie bisher die Werkstattzeile — aber kein Voranschlag mehr (keine Doppelbuchung, nichts verloren).
+  if (input.workshopFee === undefined && input.workshopSupplierId && (input.repairType === 'external' || input.repairType === 'hybrid')) {
+    const gebuehr = input.repairType === 'hybrid'
+      ? (Number(input.estimatedCost) || 0)
+      : ((Number(input.estimatedCost) || 0) || (Number(input.internalCost) || 0));
+    input = { ...input, workshopFee: gebuehr || undefined, estimatedCost: undefined };
+  }
   return {
     repairScope: input.repairScope,
     customerId,
@@ -350,6 +366,7 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     workshopWorkType: input.workshopWorkType,
     inHouseWork: input.inHouseWorkType ? { workType: input.inHouseWorkType, costAmount: input.inHouseCost ?? 0 } : undefined,
     estimatedCost: input.estimatedCost,
+    ...(input.workshopFee !== undefined ? { workshopFee: input.workshopFee } : {}),
     // CENTRAL-C3F FINAL — die eigenen Kosten bei der Aufnahme, aus der geteilten Ableitung.
     // POST-PARITY PP-13 — bei „hybrid" trägt die Werkstattzeile den Voranschlag (`createRepair`); ihn
     // zusätzlich in die eigenen Kosten zu spiegeln, buchte ihn doppelt — an eigener Ware wie an Kundenware
@@ -379,7 +396,7 @@ export function repairCreateBody(form: Partial<Repair> & RepairCreateWorkInput, 
     'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel', 'itemReference',
     'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost',
     'chargeToCustomer', 'estimatedReady', 'receivedAt', 'staffId', 'notes',
-    'inHouseWorkType', 'inHouseCost', 'workshopWorkType', 'costDate',
+    'inHouseWorkType', 'inHouseCost', 'workshopWorkType', 'costDate', 'workshopFee',
   ] as const) {
     if (i[k] !== undefined) body[k] = i[k];
   }

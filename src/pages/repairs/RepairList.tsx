@@ -1324,7 +1324,7 @@ export function RepairList() {
             });
             const auswahl: React.CSSProperties = { width: '100%', padding: '9px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 8, background: '#FFFFFF', color: '#0F0F10', minHeight: 40, marginTop: 6 };
             const inhouseBehalten = !arbeit.inHouse && (arbeit.inHouseCost.trim() !== '' || arbeit.inHouseWorkType !== EMPTY_CREATE_WORK.inHouseWorkType);
-            const externBehalten = !arbeit.external && (!!arbeit.workshopId || arbeit.workshopFee.trim() !== '' || arbeit.workshopWorkType !== EMPTY_CREATE_WORK.workshopWorkType);
+            const externBehalten = !arbeit.external && (!!arbeit.workshopId || arbeit.workshopFee.trim() !== '' || arbeit.estimate.trim() !== '' || arbeit.workshopWorkType !== EMPTY_CREATE_WORK.workshopWorkType);
             const behalten = (attr: Record<string, boolean>) => (
               <p {...attr} style={{ fontSize: 11, color: '#4B5563', margin: '0 0 0 28px', lineHeight: 1.5 }}>
                 Your entries are kept here: tick again to use them. They are not saved while unticked.
@@ -1395,6 +1395,11 @@ export function RepairList() {
                         <Input label="WORKSHOP FEE (BHD)" type="number" step="0.001" min="0" placeholder="enter later"
                           value={arbeit.workshopFee} onChange={(e) => setArbeit({ ...arbeit, workshopFee: e.target.value })} data-repair-create-fee />
                       </div>
+                      {/* Owner 12.11.2026 — der Voranschlag getrennt von der Gebühr: optional, nur Information, nie gebucht. */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
+                        <Input label="ESTIMATE (OPTIONAL)" type="number" step="0.001" min="0" placeholder="quote — info only"
+                          value={arbeit.estimate} onChange={(e) => setArbeit({ ...arbeit, estimate: e.target.value })} data-repair-create-estimate />
+                      </div>
                       {keineWerkstatt && (
                         <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', margin: 0, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
                       )}
@@ -1403,7 +1408,8 @@ export function RepairList() {
                         style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, padding: 0, alignSelf: 'flex-start' }}
                       >+ New Supplier</button>
                       <p style={{ fontSize: 11, color: '#4B5563', margin: 0, lineHeight: 1.5 }}>
-                        Only suppliers marked “Is Workshop”. With a fee, a workshop work line is created; without one, the workshop is assigned and the fee follows later.
+                        Only suppliers marked “Is Workshop”. The fee is the workshop’s actual cost: it becomes a work line (with its cost date);
+                        without one, the workshop is assigned and the fee follows later. The estimate is information only and is never booked.
                       </p>
                     </div>
                   )}

@@ -601,7 +601,8 @@ for (const weg of WEGE) {
   };
 
   // A) Nachgewiesener Spiegel: Anlage mit Gebühr 25 (Werkstattzeile 25, Spiegel 25), dann eigene Politur → 25, nicht 50.
-  const a = await anlegen(db, weg, { repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 25 });
+  // Owner 12.11.2026 — die Maske schickt Gebühr (`workshopFee`) und Voranschlag getrennt; hier beide 25.
+  const a = await anlegen(db, weg, { repairType: 'external', workshopSupplierId: 'sup-1', workshopFee: 25, estimatedCost: 25 });
   ok(kopf(db, a).internalCost === 25 && protokoll(db, a, 'internalCostMirrored').includes('25'), `§9 (${weg}) die Anlage protokolliert den Spiegel 25`);
   await status(db, weg, a, 'in_progress');
   ok(await zeile(db, weg, a, OWN) === 'OK' && art(db, a) === 'hybrid' && kopf(db, a).internalCost === 0 && Math.abs(kostenJetzt(db, a) - 25) < 0.0005 && Math.abs(marge(db, a) - 45) < 0.0005,

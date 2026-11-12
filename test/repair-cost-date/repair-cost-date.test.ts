@@ -131,7 +131,7 @@ function freshDb(): Db {
     db.run(`INSERT INTO partners (id, branch_id, name, share_percentage, active, created_at, updated_at)
       VALUES (?, 'branch-main', ?, 0, ?, ?, ?)`, [id, name, active, NOW, NOW]);
   }
-  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15']) {
+  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15', 'pw16', 'pw17', 'pw18', 'pw19', 'pw20']) {
     db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
         scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
         tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
@@ -627,6 +627,70 @@ let L2 = '';
   ok(ea === 'REPAIR_COST_AS_LINE' && eb.code === 'REPAIR_COST_AS_LINE' && S([n(DB, 'SELECT COUNT(*) FROM repairs'), stand()]) === vr,
     `R12 Anlegen mit internalCost: Primary und PC2 abgewiesen, nichts angelegt (${ea}/${eb.code})`);
   abgleich('R12');
+}
+
+// ── R13 New Repair: Werkstattgebühr (tatsächliche Kosten → Zeile mit Kostendatum) und Voranschlag (nur Information) getrennt ─
+{
+  const wsrc = await import('../../src/core/repairs/repair-work-source.ts');
+  const rr = await import('../../src/core/repairs/repair-rules.ts');
+  const ID = (k: number): string => `${String(k).padStart(8, '0')}-0000-4000-8000-0000000000f1`;
+  const deps = () => ({ db: DB as never, begin: () => { setTestDatabase(DB as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => new Date().toISOString() });
+  const ident = (k: number) => ({ commandId: ID(k), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN', op: 'repairs.create', payloadHash: 'h' + k });
+  // Was die Maske „New Repair" schickt: „Who does the work?" → External workshop, dann dieselbe Aufteilung wie dort.
+  const maske = (pid: string, lot: string, fee: string, estimate: string) => wsrc.repairCreateWorkshopSplit({
+    repairScope: 'OWN', productId: pid, lotId: lot, issueDescription: 'Workshop job', receivedAt: '2026-10-20',
+    ...wsrc.repairCreateWorkFields({ ...wsrc.EMPTY_CREATE_WORK, external: true, workshopId: 'sup-1', workshopFee: fee, estimate }),
+  } as never) as Record<string, unknown>;
+  const bild = (rid: string) => ({
+    kopf: DB.exec('SELECT estimated_cost, internal_cost, workshop_supplier_id, planned_workshop_supplier_id FROM repairs WHERE id = ?', [rid])[0]?.values?.[0],
+    zeilen: (DB.exec('SELECT supplier_id, cost_amount, cost_date FROM repair_lines WHERE repair_id = ?', [rid])[0]?.values ?? []).map((v) => `${v[0]} ${Number(v[1])} ${v[2]}`),
+  });
+  const ausgaben = (rid: string): string[] => (DB.exec(`SELECT amount, expense_date FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`, [rid])[0]?.values ?? [])
+    .map((v) => `${Number(v[0])} ${v[1]}`);
+
+  // a) Gebühr 40 ohne Voranschlag: Zeile 40 am Kostendatum (Annahmetag), KEIN Voranschlag, kein Spiegel.
+  const a = await kauf('pw16', 1000);
+  const Ra = (await repairs.createRepairOnPrimary(maske('pw16', lotOf(DB, a.line), '40', '') as never)).id;
+  ok(S(bild(Ra)) === S({ kopf: [null, 0, 'sup-1', null], zeilen: ['sup-1 40 2026-10-20'] }),
+    `R13 Gebühr 40: Werkstattzeile 40 am Kostendatum, kein Voranschlag (${S(bild(Ra))})`);
+  await status(Ra, 'in_progress');
+  ok(S(ausgaben(Ra)) === S(['40 2026-10-20']), `R13 „In progress": genau EINE Ausgabe 40 an die Werkstatt (${S(ausgaben(Ra))})`);
+
+  // b) Gebühr 40 + Voranschlag 55: Voranschlag gespeichert (Information), gebucht nur die 40 — nie 55 oder 95.
+  const b = await kauf('pw17', 1000);
+  const Rb = (await repairs.createRepairOnPrimary(maske('pw17', lotOf(DB, b.line), '40', '55') as never)).id;
+  await status(Rb, 'in_progress');
+  await status(Rb, 'ready');
+  ok(n(DB, 'SELECT estimated_cost FROM repairs WHERE id = ?', [Rb]) === 55 && S(bild(Rb).zeilen) === S(['sup-1 40 2026-10-20'])
+    && S(ausgaben(Rb)) === S(['40 2026-10-20']),
+    `R13 Gebühr 40 + Voranschlag 55: Voranschlag 55 gespeichert, gebucht nur 40 (${S(ausgaben(Rb))})`);
+
+  // c) PC2: derselbe Rumpf → dieselbe Zeile (lokal == fern).
+  const c = await kauf('pw18', 1000);
+  const oc = await svc.runRepairCreate(deps() as never, ident(1) as never, rr.repairCreateBody(maske('pw18', lotOf(DB, c.line), '40', '55') as never, [])) as { kind: string; value?: { repairId?: string } };
+  const Rc = String(oc.value?.repairId ?? '');
+  ok(oc.kind === 'ok' && S(bild(Rc)) === S({ ...bild(Rb), kopf: bild(Rc).kopf }) && S(bild(Rc).kopf) === S([55, 55, 'sup-1', null]),
+    `R13 PC2: Gebühr 40 als Zeile, Voranschlag 55 getrennt — wie am Primary (${S(bild(Rc))})`);
+
+  // d) Alter PC2-Auftrag (Gebühr reiste als `estimatedCost`): dieselbe Zeile, kein Voranschlag, keine Doppelbuchung.
+  const d = await kauf('pw19', 1000);
+  const od = await svc.runRepairCreate(deps() as never, ident(2) as never, {
+    repairScope: 'OWN', productId: 'pw19', lotId: lotOf(DB, d.line), issueDescription: 'Old PC2', receivedAt: '2026-10-20',
+    repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 30,
+  }) as { kind: string; value?: { repairId?: string } };
+  const Rd = String(od.value?.repairId ?? '');
+  await status(Rd, 'in_progress');
+  ok(od.kind === 'ok' && S(bild(Rd)) === S({ kopf: [null, 0, 'sup-1', null], zeilen: ['sup-1 30 2026-10-20'] }) && S(ausgaben(Rd)) === S(['30 2026-10-20']),
+    `R13 alter PC2-Auftrag: Zeile 30, kein Voranschlag, genau eine Ausgabe (${S(bild(Rd))} ${S(ausgaben(Rd))})`);
+
+  // e) Nur Voranschlag, keine Gebühr: die Werkstatt ist eingeplant, keine Zeile, nichts gebucht.
+  const e = await kauf('pw20', 1000);
+  const Re = (await repairs.createRepairOnPrimary(maske('pw20', lotOf(DB, e.line), '', '50') as never)).id;
+  await status(Re, 'in_progress');
+  ok(S(bild(Re)) === S({ kopf: [50, 50, null, 'sup-1'], zeilen: [] }) && ausgaben(Re).length === 0,
+    `R13 nur Voranschlag 50: Werkstatt eingeplant, keine Zeile, nichts gebucht (${S(bild(Re))})`);
+  abgleich('R13');
 }
 
 console.log(`\nrepair-cost-date: ${PASS} passed, ${fails.length} failed`);

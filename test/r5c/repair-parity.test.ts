@@ -277,7 +277,8 @@ const FORM_KUNDE = {
   itemAttributes: { material: 'Steel', case_diameter_mm: 40, dial: 'Black' },
   itemBrand: ' Rolex ', itemModel: 'Submariner', itemReference: '116610LN', itemSerial: 'Z12345',
   itemDescription: 'Kratzer am Glas', issueDescription: 'Krone klemmt',
-  repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 30, chargeToCustomer: 90,
+  // Owner 12.11.2026 — Gebühr (`workshopFee`, → Werkstattzeile) und Voranschlag getrennt, wie die Maske sie schickt.
+  repairType: 'external', workshopSupplierId: 'sup-1', workshopFee: 30, estimatedCost: 30, chargeToCustomer: 90,
   taxScheme: 'ZERO', estimatedReady: '2026-09-20', staffId: 'emp-1', notes: 'Kunde wartet',
   images: [alsDataUrl(bild(1))],
 } as never;
