@@ -1,6 +1,6 @@
 [package]
 name = "lataif"
-version = "0.8.101"
+version = "0.8.102"
 description = "LATAIF — Luxury Trading Operating System"
 authors = ["LATAIF"]
 edition = "2021"
