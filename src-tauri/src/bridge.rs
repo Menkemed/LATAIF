@@ -312,6 +312,9 @@ pub const OP_CUSTOMERS_SETTLE_BALANCE: &str = "customers.settle_balance";
 pub const OP_CUSTOMERS_SETTLEMENT_REVERSE: &str = "customers.settlement_reverse";
 // v0.8.101 (Owner 11.11.2026) — eine gebuchte Lieferantenrueckgabe zuruecknehmen, der Einkauf bleibt (nur Owner).
 pub const OP_PURCHASES_CANCEL_RETURN: &str = "purchases.cancel_return";
+// Owner 14.11.2026 — „Remove" eines Approval-Transfers vom zweiten Rechner: dieselbe Hausfolge wie am Primary
+// (ohne Buchung loeschen, nach dem Verkauf stornieren). Nur DIESER Vorgang; jedes andere Loeschen bleibt am Primary.
+pub const OP_TRANSFERS_REMOVE: &str = "transfers.remove";
 pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
 pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
@@ -593,6 +596,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_CUSTOMERS_SETTLEMENT_REVERSE,
     // v0.8.101 — „Cancel return" an einer gebuchten Lieferantenrueckgabe.
     OP_PURCHASES_CANCEL_RETURN,
+    // Owner 14.11.2026 — „Remove" eines Approval-Transfers (loeschen oder stornieren, Primary == PC2).
+    OP_TRANSFERS_REMOVE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

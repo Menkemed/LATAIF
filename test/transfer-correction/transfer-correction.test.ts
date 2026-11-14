@@ -512,6 +512,136 @@ const bearbeiten = (weg: 'primary' | 'fern', db: Db, tid: string, patch: Record<
   }
 }
 
+// ── K9 „Remove" vom zweiten Rechner (Owner 14.11.2026: Primary == PC2) — `transfers.remove` ruft DIESELBE Hausfolge wie der
+//    Primary: löschen ohne Buchung, stornieren mit Gegenbuchung, Sperren nach Zahlung/Rechnung, Grund, Fassung, Periode;
+//    eine Wiederholung DESSELBEN Auftrags wirkt einmal. ──
+{
+  const srev = await import('../../src/core/bridge/sales-reversal-commands.ts');
+  const entfernenFern = (db: Db, tid: string, reason: string, x = kid(), rev = trev(db, tid)) =>
+    fern(() => srev.runTransferRemove(deps(db), identity(x, 'transfers.remove'), { transferId: tid, expectedRevision: rev, reason }));
+  const entfernen = (weg: 'primary' | 'fern', db: Db, tid: string, reason: string) => (weg === 'primary'
+    ? primary(() => house.removeTransferOnPrimary(tid, reason, trev(db, tid)))
+    : entfernenFern(db, tid, reason));
+  const bild = (db: Db, pid: string, tid: string): string => S([
+    konto(db, 'ACCOUNTS_RECEIVABLE'), konto(db, 'REVENUE'), konto(db, 'COGS'), konto(db, 'INVENTORY'), ausgeglichen(db),
+    s(db, "SELECT stock_status || '/' || source_type || '/' || quantity FROM products WHERE id = ?", [pid]),
+    n(db, 'SELECT qty_remaining FROM stock_lots WHERE product_id = ?', [pid]),
+    s(db, 'SELECT status FROM agent_transfers WHERE id = ?', [tid]) || 'weg',
+  ]);
+
+  // a) Löschen ohne Buchung am PC2 — und Parität mit dem Primary.
+  const bilderA: string[] = [];
+  for (const weg of ['primary', 'fern'] as const) {
+    const db = freshDb();
+    const tid = await anlegen(db, 'p1');
+    const nr = s(db, 'SELECT transfer_number FROM agent_transfers WHERE id = ?', [tid]);
+    const z = zaehler(db);
+    const r = await entfernen(weg, db, tid, 'wrong item selected');
+    reload();
+    ok(r.ok && r.value?.kind === 'deleted' && n(db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [tid]) === 0
+      && s(db, "SELECT stock_status || '/' || source_type || '/' || quantity FROM products WHERE id = 'p1'") === 'in_stock/OWN/1'
+      && /wrong item selected/.test(all(db, "SELECT old_value FROM audit_log WHERE entity_id = ? AND action_type = 'DELETE'", [tid])),
+      `K9a ${weg}: ohne Buchung gelöscht, Stück im Lager, Protokoll mit Grund (${r.code || r.value?.kind})`);
+    bilderA.push(bild(db, 'p1', tid));
+    const neu = await anlegen(db, 'p1');
+    ok(zaehler(db) === z + 1 && s(db, 'SELECT transfer_number FROM agent_transfers WHERE id = ?', [neu]) !== nr, `K9a ${weg}: die TRF-Nummer wird nicht wieder vergeben`);
+  }
+  ok(bilderA[0] === bilderA[1], `K9a PARITÄT löschen Primary == PC2 (${bilderA[0]})`);
+
+  // b) Stornieren mit Buchung am PC2 — Parität, und die Wiederholung desselben Auftrags wirkt einmal.
+  const bilderB: string[] = [];
+  for (const weg of ['primary', 'fern'] as const) {
+    const db = freshDb();
+    const tid = await anlegen(db, 'p1');
+    await verkaufen(db, tid, 1000);
+    const lot0 = n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'");
+    const x = kid();
+    const r = weg === 'fern' ? await entfernenFern(db, tid, 'sold the wrong piece', x) : await entfernen(weg, db, tid, 'sold the wrong piece');
+    reload();
+    ok(r.ok && r.value?.kind === 'cancelled' && s(db, 'SELECT status FROM agent_transfers WHERE id = ?', [tid]) === 'cancelled'
+      && konto(db, 'ACCOUNTS_RECEIVABLE') === 0 && konto(db, 'REVENUE') === 0 && konto(db, 'COGS') === 0 && ausgeglichen(db)
+      && s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = 'p1'") === 'in_stock/1'
+      && n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'") === lot0 + 1,
+      `K9b ${weg}: storniert mit Gegenbuchung, Stück und Los zurück (${r.code || r.value?.kind}; ${buchungen(db)})`);
+    if (weg === 'fern') {
+      const vor = buchungen(db) + bild(db, 'p1', tid);
+      const nochmal = await entfernenFern(db, tid, 'sold the wrong piece', x, 1);
+      ok(nochmal.ok && nochmal.replayed === true && nochmal.value?.kind === 'cancelled' && buchungen(db) + bild(db, 'p1', tid) === vor,
+        `K9b PC2: dieselbe Kennung noch einmal ⇒ dieselbe Antwort, keine zweite Gegenbuchung (${nochmal.code || 'replayed=' + nochmal.replayed})`);
+      const neuerAuftrag = await entfernenFern(db, tid, 'again');
+      ok(!neuerAuftrag.ok && neuerAuftrag.code === 'TRANSFER_ALREADY_CANCELLED' && buchungen(db) + bild(db, 'p1', tid) === vor,
+        `K9b PC2: ein NEUER Auftrag auf den stornierten Transfer ⇒ Nein (${neuerAuftrag.code})`);
+    }
+    bilderB.push(bild(db, 'p1', tid));
+  }
+  ok(bilderB[0] === bilderB[1], `K9b PARITÄT stornieren Primary == PC2 (${bilderB[0]})`);
+
+  // c) Wiederholung eines PC2-Löschens: die Antwort kommt erneut, nichts wird zweimal gelöscht oder zurückgebucht.
+  {
+    const db = freshDb();
+    const tid = await anlegen(db, 'p1');
+    const x = kid(), rev = trev(db, tid);
+    const a = await entfernenFern(db, tid, 'wrong item selected', x, rev);
+    reload();
+    const vor = bild(db, 'p1', tid) + n(db, "SELECT COUNT(*) FROM audit_log WHERE action_type = 'DELETE'");
+    const b = await entfernenFern(db, tid, 'wrong item selected', x, rev);
+    ok(a.ok && b.ok && b.replayed === true && S(b.value) === S(a.value) && bild(db, 'p1', tid) + n(db, "SELECT COUNT(*) FROM audit_log WHERE action_type = 'DELETE'") === vor,
+      `K9c PC2: Wiederholung des Löschauftrags ⇒ dieselbe Antwort, keine zweite Wirkung (${S(b.value)})`);
+  }
+
+  // d) Sperren und Pflichten am PC2: Grund, Fassung, Zahlung, Rechnung — nichts verändert.
+  {
+    const db = freshDb();
+    const t0 = await anlegen(db, 'p3');
+    const vor0 = bild(db, 'p3', t0);
+    const ohneGrund = await entfernenFern(db, t0, '  ');
+    const alt = await entfernenFern(db, t0, 'wrong item selected', kid(), trev(db, t0) + 5);
+    ok(ohneGrund.code === 'REASON_REQUIRED' && !alt.ok && /RECORD_CHANGED|STALE|REVISION/.test(alt.code) && bild(db, 'p3', t0) === vor0,
+      `K9d PC2: ohne Grund und mit alter Fassung ⇒ Nein, nichts geändert (${ohneGrund.code}/${alt.code})`);
+    const t1 = await anlegen(db, 'p1');
+    await verkaufen(db, t1, 1000);
+    await fern(() => fin.runMarkSettled(deps(db), identity(kid(), 'transfers.mark_settled'), { transferId: t1, amount: 100, method: 'cash', expectedRevision: trev(db, t1) }));
+    reload();
+    const vor1 = buchungen(db) + bild(db, 'p1', t1);
+    const a = await entfernenFern(db, t1, 'test');
+    ok(a.code === 'TRANSFER_SETTLEMENT_RECORDED' && buchungen(db) + bild(db, 'p1', t1) === vor1, `K9d PC2 nach Abrechnungszahlung: Nein, nichts geändert (${a.code})`);
+    const t2 = await anlegen(db, 'p2');
+    await verkaufen(db, t2, 1000);
+    await fern(() => life.runConvertTransfer(deps(db), identity(kid(), 'transfers.convert_to_invoice'),
+      rules.transferConvertBody({ id: t2, revision: trev(db, t2) }, { customerId: 'cust-1' })));
+    reload();
+    const vor2 = buchungen(db) + bild(db, 'p2', t2);
+    const b = await entfernenFern(db, t2, 'test');
+    ok(b.code === 'TRANSFER_INVOICED' && buchungen(db) + bild(db, 'p2', t2) === vor2, `K9d PC2 nach der Rechnung: Nein, nichts geändert (${b.code})`);
+  }
+
+  // e) Periodenschutz am PC2: Verkauf im eingereichten Quartal ⇒ Nein (dieselbe Regel wie am Primary).
+  {
+    const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+    setOpeningCutoffForTest('2026-01-01');
+    try {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      db.run("UPDATE ledger_entries SET occurred_at = '2026-08-10T09:00:00.000Z' WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [tid]);
+      insert(db, 'vat_filings', { id: 'vf-2026-3', branch_id: 'branch-main', year: 2026, quarter: 3, filed_at: NOW, snapshot_json: '{}', created_at: NOW });
+      reload();
+      const vor = buchungen(db) + bild(db, 'p1', tid);
+      const a = await entfernenFern(db, tid, 'wrong piece');
+      const b = await entfernen('primary', db, tid, 'wrong piece');
+      ok(a.code === 'VAT_PERIOD_FILED' && b.code === 'VAT_PERIOD_FILED' && buchungen(db) + bild(db, 'p1', tid) === vor,
+        `K9e Q3/2026 eingereicht: Storno am PC2 und am Primary abgewiesen, nichts geändert (${a.code}/${b.code})`);
+    } finally { setOpeningCutoffForTest(null); }
+  }
+
+  // f) Der Rumpf ist eng: nur id, expectedRevision, reason.
+  {
+    let fehler = '';
+    try { srev.parseTransferRemove({ transferId: 't', expectedRevision: 1, reason: 'x', kind: 'delete' }); } catch (e) { fehler = (e as Error).message; }
+    ok(/the primary decides kind/.test(fehler), `K9f PC2 bestimmt NICHT, ob gelöscht oder storniert wird — das Haus entscheidet (${fehler})`);
+  }
+}
+
 console.log(`\ntransfer-correction: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('TRANSFER_CORRECTION_PROVED');

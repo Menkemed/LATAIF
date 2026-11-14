@@ -545,7 +545,7 @@ const cogs = (db: Db): number => konto(db, 'COGS');
   ok(p['returns.record_refund_payment']?.kind === 'permissionOrAdmin' && p['returns.record_refund_payment']?.permission === 'payments.*'
     && p['invoices.update']?.kind === 'isAdmin',
     '§D Auszahlung: dieselben Rechte wie die Erstattung einer Rückgabe (payments.* oder Admin/Manager); Ändern: Admin/Manager');
-  ok(ALLOWED_MUTATIONS.length === 130 && ALLOWED_MUTATIONS.includes('returns.record_refund_payment'),
+  ok(ALLOWED_MUTATIONS.length === 131 && ALLOWED_MUTATIONS.includes('returns.record_refund_payment'),
     '§D kein neuer Fernauftrag — dieselbe Liste (auch in Rust), die Auszahlung nutzt „returns.record_refund_payment"');
   const m = src('src/pages/invoices/InvoiceCreate.tsx');
   ok(/unitPrice: unitNetFromGross\(c\.gross, l\.quantity, resolvedNext, rateNext\)/.test(m) && /unitNetKeepingGross\(gross, qty, scheme, vatRate\)/.test(m),

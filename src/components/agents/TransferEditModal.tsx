@@ -4,8 +4,8 @@
 //   • Bearbeiten (Primary und PC2, `transfers.update` → `editTransferInHouse`): Our Price, Full/Split, Anteil, Kunde (nur solange
 //     das Stück draußen ist), Übergabe- und Rückgabedatum, Mitarbeiter, Notiz. Nach dem Verkauf rechnet das Haus den
 //     Abrechnungsbetrag mit derselben Formel neu und bucht die Forderung an ihrem Tag um; mit Rechnung oder Zahlung gesperrt.
-//   • Entfernen (am Primary, wie jedes Löschen; `removeTransferOnPrimary`): ohne Buchung gelöscht, nach dem Verkauf storniert
-//     (Transfer bleibt „cancelled"), mit Rechnung/Zahlung ein Nein mit dem Korrekturweg — `transferRemovePlan`.
+//   • Entfernen (Primary und PC2, `transfers.remove` → `removeTransferInHouse`): ohne Buchung gelöscht, nach dem Verkauf
+//     storniert (Transfer bleibt „cancelled"), mit Rechnung/Zahlung ein Nein mit dem Korrekturweg — `transferRemovePlan`.
 // ════════════════════════════════════════════════════════════════════════════
 import { useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
@@ -17,14 +17,13 @@ import { WriteError } from '@/components/shared/WriteError';
 import { useAgentStore } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
-import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { latestBusinessDate } from '@/core/utils/business-date';
 import { computeAgentTransferSale } from '@/core/agent/economics';
 import {
   TransferActionRejected, clampTransferSplitPct, transferEditBlocker, transferEditPatch, transferRemovePlan,
   type TransferEditForm, type TransferEditPatch,
 } from '@/core/agents/transfer-rules';
-import { editTransferOnPrimary, removeTransferOnPrimary } from '@/core/agents/transfer-house';
+import { editTransferOnPrimary, removeTransferOnPrimary, type TransferRemoved } from '@/core/agents/transfer-house';
 import type { AgentTransfer } from '@/core/models/types';
 
 interface Props {
@@ -115,20 +114,24 @@ export function TransferEditModal({ transfer: t, onClose, onDone, startWithRemov
     onDone('saved');
   }
 
+  // Primary == PC2 (Owner 14.11.2026): DIESELBE Hausfolge über die gemeinsame Weiche (`transfers.remove`) — das Haus
+  // entscheidet löschen oder stornieren, prüft Grund, Fassung und Periode; eine Wiederholung wirkt einmal.
   async function entfernenAusfuehren() {
-    if (blockDeleteOnClient()) return;
     if ('code' in plan) return;
     setHinweis('');
-    try {
-      const r = await removeTransferOnPrimary(t.id, grund, t.revision || undefined);
-      onDone(r.kind);
-    } catch (e) {
-      setHinweis(e instanceof Error ? e.message : String(e));
-    }
+    const fassung = t.revision;
+    if (w.remote && !fassung) { setHinweis(fehlertext(nichtAmClient('removing this transfer (no revision loaded)'))); return; }
+    const r = await w.save<TransferRemoved>('transfers.remove', {
+      local: () => removeTransferOnPrimary(t.id, grund, fassung || undefined),
+      remote: () => ({ transferId: t.id, expectedRevision: fassung, reason: grund }),
+    });
+    if (r.kind !== 'ok') return;
+    void useAgentStore.getState().loadTransfers();
+    onDone(r.value.kind === 'cancelled' ? 'cancelled' : 'deleted');
   }
 
   const sperrHinweis = (s: { message: string } | null) => s
-    ? <p style={{ fontSize: 11, color: '#B45309', margin: '-6px 0 0', lineHeight: 1.4 }}>{s.message}</p> : null;
+    ? <p style={{ fontSize: 11, color: '#B45309', margin: '4px 0 0', lineHeight: 1.4 }}>{s.message}</p> : null;
 
   return (
     <Modal open onClose={onClose} title={`Edit Transfer — ${t.transferNumber}`} width={520}>
@@ -188,7 +191,7 @@ export function TransferEditModal({ transfer: t, onClose, onDone, startWithRemov
         {/* Remove — am Primary, wie jedes Löschen; was geschieht, sagt die Regel VOR dem Klick. */}
         <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 12 }} data-transfer-remove>
           {!entfernen ? (
-            <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setEntfernen(true)} data-transfer-remove-open>
+            <Button variant="ghost" onClick={() => setEntfernen(true)} data-transfer-remove-open>
               <span style={{ color: '#DC2626' }}>Remove this transfer…</span>
             </Button>
           ) : (
@@ -207,7 +210,7 @@ export function TransferEditModal({ transfer: t, onClose, onDone, startWithRemov
                   <Input label="REASON *" value={grund} onChange={(e) => setGrund(e.target.value)} placeholder="e.g. wrong item selected" data-transfer-remove-reason />
                   <div className="flex justify-end gap-2">
                     <Button variant="ghost" onClick={() => setEntfernen(false)}>Back</Button>
-                    <Button variant="danger" {...primaryOnlyDeleteProps(grund.trim().length < 3)} onClick={() => void entfernenAusfuehren()} data-transfer-remove-confirm>
+                    <Button variant="danger" disabled={grund.trim().length < 3 || w.busy} onClick={() => void entfernenAusfuehren()} data-transfer-remove-confirm>
                       {plan.kind === 'delete' ? 'Delete transfer' : 'Cancel sale and transfer'}
                     </Button>
                   </div>

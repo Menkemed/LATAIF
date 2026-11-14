@@ -83,7 +83,8 @@ const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.
   'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message'];
 // Zwei vorhandene Buchungen sind erweitert, nicht neu: Zahlung beim Anlegen, Wahl der Sondernummer.
 const ERWEITERT = ['invoices.create', 'invoices.record_payment'];
-const MODULES: Record<string, number> = { 'offer-commands': 4, 'invoice-flag-commands': 1, 'sales-reversal-commands': 2, 'message-commands': 1 };
+// Owner 14.11.2026 — sales-reversal-commands meldet seither DREI an: die zwei R6E-Stornos + „Remove" eines Approval-Transfers.
+const MODULES: Record<string, number> = { 'offer-commands': 4, 'invoice-flag-commands': 1, 'sales-reversal-commands': 3, 'message-commands': 1 };
 // R6F — seither vierzehn weitere Buchungen HINTER den R6E-Namen (eigenes Gate: test/r6f).
 const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
 const R6F_OPS = ['purchases.return', 'purchases.cancel', 'purchases.inbox_dismiss', 'purchases.dismiss_inbox', 'orders.cancel',
@@ -107,7 +108,7 @@ const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_ba
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 80 && jetzt.length === 130 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 80 && jetzt.length === 131 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return', 'transfers.remove']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 80 → 88 (R6E) → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION) → 127 (bis v0.8.94): GENAU die acht R6E- und vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
@@ -119,10 +120,10 @@ const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_ba
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 152 && rJetzt.length === 217 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']),
+  ok(rVor.length === 152 && rJetzt.length === 218 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return', 'transfers.remove']),
     `REGISTRY Rust 152 → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION) → 214 (bis v0.8.94): GENAU diese acht und vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 217 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 214 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 218 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 214 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   const soll: Record<string, string | null> = {
     'offers.create': null, 'offers.update': 'permission:offers.edit', 'offers.set_status': null, 'offers.convert_to_invoice': null,
     'invoices.set_butterfly': 'isAdmin', 'returns.cancel': 'isOwner', 'transfers.undo_convert': null, 'customers.log_message': null,
@@ -262,9 +263,14 @@ const R6F_ROWS = ['Rückgabe an Lieferant', 'Einkauf stornieren', 'Inbox-Foto ve
   const erlaubt = [...R6E_MUT, ...ERWEITERT];
   ok(r6e.every((p) => { const m = /`([a-z_.]+)` \(R6E\)/.exec(p[6] ?? ''); return !!m && erlaubt.includes(m[1]); }), 'SSOT jede geschlossene Zeile nennt ihre R6E-Buchung');
   ok(R6E_MUT.every((op) => r6e.some((p) => (p[6] ?? '').includes('`' + op + '`'))), 'SSOT jede neue R6E-Buchung hat mindestens einen UI-Einstieg');
+  // Owner 14.11.2026 — die zwei Transfer-Löschzeilen sind SEITHER ausdrücklich freigegeben (`transfers.remove`, Primary == PC2);
+  // R6E selbst hat nichts aus E geöffnet — der Vergleich gilt für alle übrigen Zeilen, die zwei tragen genau diese Freigabe.
+  const spaeterFrei = (z: string): boolean => /^\|Transfer löschen \((Tabelle|Detail)\)\|/.test(z);
+  ok(zeilen.filter((p) => p[5] === 'E' && spaeterFrei(p.join('|'))).every((p) => /`transfers\.remove`/.test(p[6] ?? '') && /freigegeben \(Owner 14\.11\.2026\)/.test(p[7] ?? '')),
+    'SSOT die zwei Transfer-Löschzeilen sind die Owner-Freigabe vom 14.11.2026 (transfers.remove)');
   for (const k of ['B', 'C', 'D', 'E']) {
-    const jetzt = zeilen.filter((p) => p[5] === k).map((p) => p.join('|'));
-    const damals = vorDoc.filter((p) => p[5] === k).map((p) => p.join('|'));
+    const jetzt = zeilen.filter((p) => p[5] === k).map((p) => p.join('|')).filter((z) => !spaeterFrei(z));
+    const damals = vorDoc.filter((p) => p[5] === k).map((p) => p.join('|')).filter((z) => !spaeterFrei(z));
     ok(S(jetzt) === S(damals), `SSOT Kategorie ${k} unverändert — nichts aus C/D/E wurde zu A oder fern gemacht (${jetzt.length})`);
   }
   ok(/### Stand der R6A-SSOT nach R6E/.test(doc) && /verbleibend\s+16/.test(doc) && /Registry\s+152 → 160/.test(doc), 'SSOT der Stand nach R6E ist fortgeschrieben');

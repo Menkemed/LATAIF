@@ -261,10 +261,10 @@ const unterschiede = (a: Record<string, unknown>, b: Record<string, unknown>): s
     ok(!!z && z.paritaet === 'exakt' && z.verdrahtet && z.luecke === null, `SCOPE ${op} ist geschlossen`);
     ok(ALLOWED_MUTATIONS.includes(op), `SCOPE ${op} ist eine VORHANDENE Buchung`);
   }
-  ok(ALLOWED_MUTATIONS.length === 130, `SCOPE die Registry steht bei 127 Mutationen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 131, `SCOPE die Registry steht bei 127 Mutationen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 217, `SCOPE die Registry steht bei 214 (bis v0.8.94: zuletzt purchases.correct_payment_date) (${rustOps})`);
+  ok(rustOps === 218, `SCOPE die Registry steht bei 214 (bis v0.8.94: zuletzt purchases.correct_payment_date) (${rustOps})`);
   for (const op of ['repairs.update_status', 'repairs.add_line', 'repairs.cancel_line']) {
     const z = R4C_MATRIX.find((x) => x.op === op);
     ok(!!z && z.verdrahtet, `SCOPE Nachbar ${op} bleibt verdrahtet`);

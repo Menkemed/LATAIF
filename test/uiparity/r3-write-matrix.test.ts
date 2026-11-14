@@ -194,11 +194,13 @@ const MATRIX: Record<string, Zeile> = {
   'customers.settlement_reverse': { ui: 'CustomerAccountPage — Settlements: Undo settlement', gleich: true },
   // v0.8.101 — „Cancel return" an einer gebuchten Lieferantenrückgabe (nur Owner).
   'purchases.cancel_return': { ui: 'PurchaseDetail — Returns: Cancel return', gleich: true },
+  // Owner 14.11.2026 — „Remove" eines Approval-Transfers (löschen ohne Buchung / stornieren nach dem Verkauf), Primary == PC2.
+  'transfers.remove': { ui: 'TransferTable/TransferDetail — Edit Transfer: Remove this transfer', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 130, `A 127 Buchungen (v0.8.94 + purchases.correct_payment_date; vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 131, `A 127 Buchungen (v0.8.94 + purchases.correct_payment_date; vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

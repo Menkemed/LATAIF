@@ -111,7 +111,7 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 130 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 88 && jetzt.length === 131 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return', 'transfers.remove']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ, 'page.opening_accounting.get', 'purchase.edit_check.get', 'page.cost_corrections.get']),
@@ -122,10 +122,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 217 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return']),
+  ok(rVor.length === 160 && rJetzt.length === 218 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchases.correct_payment_date', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get', 'customers.settle_balance', 'customers.settlement_reverse', 'purchases.cancel_return', 'transfers.remove']),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 217 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 218 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;
@@ -228,9 +228,12 @@ const FROZEN = ['Rückgabe an Lieferant', 'Einkauf stornieren', 'Inbox-Foto verw
   const erlaubt = [...R6F_MUT, 'products.update'];
   ok(r6f.every((p) => { const m = /`([a-z_.]+)` \(R6F\)/.exec(p[6] ?? ''); return !!m && erlaubt.includes(m[1]); }), 'SSOT jede geschlossene Zeile nennt ihre Buchung');
   ok(R6F_MUT.every((op) => r6f.some((p) => (p[6] ?? '').includes('`' + op + '`'))), 'SSOT jede neue R6F-Buchung hat mindestens einen UI-Einstieg');
+  // Owner 14.11.2026 — die zwei Transfer-Löschzeilen sind SEITHER ausdrücklich freigegeben (`transfers.remove`); R6F selbst
+  // hat nichts aus E geöffnet — der Vergleich gilt für alle übrigen Zeilen.
+  const spaeterFrei = (z: string): boolean => /^\|Transfer löschen \((Tabelle|Detail)\)\|/.test(z);
   for (const k of ['B', 'C', 'D', 'E']) {
-    const jetzt = zeilen.filter((p) => p[5] === k).map((p) => p.join('|'));
-    const damals = vorDoc.filter((p) => p[5] === k).map((p) => p.join('|'));
+    const jetzt = zeilen.filter((p) => p[5] === k).map((p) => p.join('|')).filter((z) => !spaeterFrei(z));
+    const damals = vorDoc.filter((p) => p[5] === k).map((p) => p.join('|')).filter((z) => !spaeterFrei(z));
     ok(S(jetzt) === S(damals) && !jetzt.some((z) => /geschlossen \(R6F\)/.test(z)), `SSOT Kategorie ${k} unverändert und nicht als geschlossen ausgegeben (${jetzt.length})`);
   }
   ok(/### Stand der R6A-SSOT nach R6F/.test(doc) && /verbleibend\s+0/.test(doc) && /Registry\s+160 → 174/.test(doc), 'SSOT der Stand nach R6F ist fortgeschrieben');

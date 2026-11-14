@@ -825,13 +825,14 @@ async function fehlerProben(name: string, bauen: () => Promise<Lage>): Promise<L
   ok(u.ok && d === '' && prodS(db, 'p-out') === S(['OWN', 'in_stock', 1]) && lc(db) === led0,
     `W unverkaufter Transfer: Löschen wie bisher → OWN/in_stock, keine Buchung (${d || 'ok'}; ${prodS(db, 'p-out')})`);
   const fin = src('src/core/bridge/financial-commands.ts');
-  // Owner 14.11.2026 — Liste und Detailseite entfernen im gemeinsamen Fenster TransferEditModal: „Remove" über die Klammer
-  // am Primary (`removeTransferOnPrimary` — löschen oder stornieren), am zweiten Rechner gesperrt.
+  // Owner 14.11.2026 — Liste und Detailseite entfernen im gemeinsamen Fenster TransferEditModal: „Remove" über die gemeinsame
+  // Weiche `transfers.remove` (am Primary `removeTransferOnPrimary`, am PC2 derselbe Hausweg) — löschen oder stornieren.
+  // Das ROHE Löschen (`transfers.delete`) bleibt Primary-only.
   const ui = src('src/pages/agents/TransferDetail.tsx') + src('src/components/agents/TransferTable.tsx') + src('src/components/agents/TransferEditModal.tsx');
   ok(/C3G_PRIMARY_ONLY = \[[\s\S]*'transfers\.delete'/.test(fin) && !/useAgentStore\(\)[\s\S]{0,200}deleteTransfer\b/.test(ui)
-    && (ui.match(/removeTransferOnPrimary\(/g) ?? []).length === 1 && (ui.match(/blockDeleteOnClient\(\)/g) ?? []).length >= 1
+    && (ui.match(/removeTransferOnPrimary\(/g) ?? []).length === 1 && /w\.save<TransferRemoved>\('transfers\.remove'/.test(ui)
     && !/deleteTransferOnPrimary\(/.test(ui) && (ui.match(/<TransferEditModal/g) ?? []).length === 2,
-    'W Masken: Entfernen nur noch über die Klammer am Primary (ein Fenster für beide Stellen), PC2-Grenze unverändert (transfers.delete bleibt Primary-only)');
+    'W Masken: Entfernen über EIN Fenster und die gemeinsame Weiche (Primary == PC2); das rohe transfers.delete bleibt Primary-only');
 }
 
 // ══ S — Löschen und Abgleich: der Spiegel sieht danach dasselbe ═══════════════════════════════════

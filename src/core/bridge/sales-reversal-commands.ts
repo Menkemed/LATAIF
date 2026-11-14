@@ -29,7 +29,7 @@ import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { assertHouseBranch } from './remote-create-support';
 import { ReturnCancelRejected, RETURN_REASON_REQUIRED, cancelReturnInHouse } from '@/core/returns/return-cancel-house';
-import { undoTransferConversionInHouse } from '@/core/agents/transfer-house';
+import { removeTransferInHouse, undoTransferConversionInHouse } from '@/core/agents/transfer-house';
 import { TransferActionRejected } from '@/core/agents/transfer-rules';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 
@@ -37,6 +37,14 @@ export const OP_RETURNS_CANCEL = 'returns.cancel';
 export const OP_TRANSFERS_UNDO_CONVERT = 'transfers.undo_convert';
 
 export const SALES_REVERSAL_OPS = [OP_RETURNS_CANCEL, OP_TRANSFERS_UNDO_CONVERT] as const;
+
+/**
+ * Owner 14.11.2026 — „Remove" eines Approval-Transfers auch vom zweiten Rechner (Primary == PC2): DIESELBE Hausfolge wie am
+ * Primary (`removeTransferInHouse`: ohne Buchung löschen, nach dem Verkauf mit Gegenbuchung stornieren, mit Rechnung/Zahlung
+ * ein Nein mit Korrekturweg; Grund, Fassung, Periodenschutz). Die R6B-Regel „Löschen nie fern" gilt weiter für alles andere —
+ * auch das rohe `transfers.delete` bleibt Primary-only (`C3G_PRIMARY_ONLY`). Eigener Name neben den R6E-Stornos.
+ */
+export const OP_TRANSFERS_REMOVE = 'transfers.remove';
 
 /** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. Der Client korrigiert und schickt neu. */
 export class SalesReversalPayloadError extends Error {
@@ -178,6 +186,27 @@ export function runTransferUndo(deps: EngineDeps, identity: CommandIdentity, raw
   });
 }
 
+export interface TransferRemoveRequest { transferId: string; expectedRevision: number; reason: string }
+
+/** Welcher Transfer, welche gesehene Fassung, warum — mehr nicht. Ob gelöscht oder storniert wird, entscheidet das Haus. */
+export function parseTransferRemove(raw: unknown): TransferRemoveRequest {
+  const r = strict(raw, ['transferId', 'expectedRevision', 'reason'], [...REVERSAL_COMPUTED.transferUndo, 'kind', 'transferNumber']);
+  if (typeof r.reason !== 'string') throw new SalesReversalPayloadError('reason is required');
+  return { transferId: idOf(r.transferId, 'transferId'), expectedRevision: revisionOf(r.expectedRevision), reason: r.reason };
+}
+
+export function runTransferRemove(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseTransferRemove(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    // DIESELBE Folge wie „Remove" am Primary (`removeTransferOnPrimary`): Grund, Fassung, Plan, Periodenschutz, Gegenbuchung
+    // am Verkaufstag, Stück zurück, Protokoll — in der Transaktion dieses Auftrags. Die Wiederholung DESSELBEN Auftrags
+    // bekommt das eingefrorene Ergebnis; nichts geschieht zweimal.
+    const r = urteil(() => removeTransferInHouse(req.transferId, identity.branchId, req.reason, req.expectedRevision));
+    return { transferId: r.transferId, transferNumber: r.transferNumber, kind: r.kind };
+  });
+}
+
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
 type Run = (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>;
@@ -203,3 +232,4 @@ async function execute(run: Run, op: string, payload: unknown, actor?: CommandAc
 
 registerCommand(OP_RETURNS_CANCEL, { kind: 'mutation', handler: (p, a) => execute(runReturnCancel, OP_RETURNS_CANCEL, p, a) });
 registerCommand(OP_TRANSFERS_UNDO_CONVERT, { kind: 'mutation', handler: (p, a) => execute(runTransferUndo, OP_TRANSFERS_UNDO_CONVERT, p, a) });
+registerCommand(OP_TRANSFERS_REMOVE, { kind: 'mutation', handler: (p, a) => execute(runTransferRemove, OP_TRANSFERS_REMOVE, p, a) });

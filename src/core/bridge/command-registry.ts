@@ -194,6 +194,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // v0.8.101 (Owner 11.11.2026) — „Cancel return": EINE gebuchte Lieferantenrückgabe zurücknehmen, der Einkauf bleibt (nur Owner;
   // Geld an den Lieferanten nur bestätigt, sonst Nein mit offenem Betrag).
   'purchases.cancel_return',
+  // Owner 14.11.2026 — „Remove" eines Approval-Transfers (Primary == PC2): dieselbe Hausfolge `removeTransferInHouse` —
+  // ohne Buchung löschen, nach dem Verkauf mit Gegenbuchung stornieren, mit Rechnung/Zahlung ein Nein; Grund, Fassung,
+  // Periodenschutz. Nur DIESER Vorgang; jedes andere Löschen bleibt Primary-only (R6B).
+  'transfers.remove',
 ];
 
 export interface CommandSpec {

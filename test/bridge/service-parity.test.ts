@@ -499,7 +499,7 @@ const REPAIR_COMPARE = [
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
   // STOCK CORRECTION (+3) blieb hier seit Phase 1 auf 114 stehen; OPENING BALANCES & SETTLEMENT (+3) → 120;
   // bis v0.8.94 zuletzt purchases.correct_payment_date → 127.
-  ok(known.length === 61 && reads.length === 20 && ALLOWED_MUTATIONS.length === 130,
+  ok(known.length === 61 && reads.length === 20 && ALLOWED_MUTATIONS.length === 131,
     `SCOPE 1 Probe + 20 Reads + 40 Mutationen = 61; Registry gesamt 127 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);

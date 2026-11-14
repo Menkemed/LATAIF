@@ -2234,9 +2234,9 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Agent ändern | pages/agents/AgentList:243→548 | updateAgent | **angeschlossen (R6C)** | A | `agents.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Agent löschen | AgentList:243→536 | deleteAgent | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Umwandlung rückgängig (Tabelle) | components/agents/TransferTable:455 | undoTransferInvoiceConvert (löscht Rechnung) | **angeschlossen (R6E)** | A | `transfers.undo_convert` (R6E) | **geschlossen (R6E)** | Transfer/Verkauf · hoch |
-| Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Transfer löschen (Tabelle) | TransferTable → components/agents/TransferEditModal | deleteTransfer → removeTransferInHouse | **angeschlossen (Owner 14.11.2026)** | E | `transfers.remove` (14.11.2026) | **freigegeben (Owner 14.11.2026)** — die eine geführte Fernlöschung: Plan, Grund, Fassung, Periode im Haus | Löschen |
 | Umwandlung rückgängig (Detail) | pages/agents/TransferDetail:285 | undoTransferInvoiceConvert | **angeschlossen (R6E)** | A | `transfers.undo_convert` (R6E) | **geschlossen (R6E)** | Transfer/Verkauf · hoch |
-| Transfer löschen (Detail) | TransferDetail:300→579 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
+| Transfer löschen (Detail) | TransferDetail → components/agents/TransferEditModal | deleteTransfer → removeTransferInHouse | **angeschlossen (Owner 14.11.2026)** | E | `transfers.remove` (14.11.2026) | **freigegeben (Owner 14.11.2026)** — dieselbe Folge wie in der Tabelle | Löschen |
 | Metall anlegen | pages/metals/MetalList:181→514 | createMetal | **angeschlossen (R6D)** | A | `metals.create` (R6D) | **geschlossen (R6D)** | Metall/Bestand · mittel |
 | Metall verkaufen | MetalList:344→547 | updateMetal | **angeschlossen (R6D)** | A | `metals.update_status` (R6D) | **geschlossen (R6D)** | Metall/Geld · mittel |
 | Metall schmelzen | MetalList:349→570 | updateMetal | **angeschlossen (R6D)** | A | `metals.update_status` (R6D) | **geschlossen (R6D)** | Metall · mittel |

@@ -5,10 +5,13 @@
 //
 //   P  PC2: drei Artikel ankreuzen, je eigener Preis, gemeinsam Full, ein Artikel Split 40 % ⇒ EIN `transfers.create`
 //      mit drei `items`, drei Transfers (eigene Nummern, Preise, Modelle), Stücke „with_agent". Dann einen Transfer
-//      bearbeiten (Preis 950, Split 30 %) ⇒ EIN `transfers.update`; die anderen unverändert. „Remove" am PC2 gesperrt.
+//      bearbeiten (Preis 950, Split 30 %) ⇒ EIN `transfers.update`; die anderen unverändert. „Remove" am PC2 bedienbar.
+//   R  PC2 (Owner 14.11.2026: Primary == PC2): den falschen Artikel entfernen (nichts gebucht ⇒ gelöscht, Stück zurück,
+//      Protokoll mit Grund); einen Transfer verkaufen und am PC2 stornieren (Gegenbuchung, Stück und Los zurück,
+//      „cancelled") — je EIN `transfers.remove` mit Kennung/Fassung/Grund.
 //   Q  Primary: dieselbe Maske — drei Artikel, gemeinsam Split 60 %, ein Artikel Full; einen bearbeiten (Preis, Full);
 //      einen falschen Artikel entfernen (Grund) ⇒ Transfer gelöscht, Stück zurück im Lager, Protokoll mit Grund; die
-//      anderen unberührt. Danach den falschen Artikel aus der PC2-Übergabe am Primary entfernen ⇒ PC2 zeigt ihn nicht mehr.
+//      anderen unberührt. PC2 zeigt danach dieselbe Liste.
 //
 // PROZESS-ISOLATION (Gerüst aus expense-pay-date-split.e2e.mjs): gestartet nur über `spawnTracked`, beendet nur, was dieser
 // Lauf gestartet hat oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -318,6 +321,27 @@ async function bearbeitenOeffnen(c, nr) {
   return (await warteBis(c, "document.querySelector('[data-transfer-edit-modal]')", 15000)) ? 'OK' : 'KEIN-FENSTER';
 }
 
+/** „Remove this transfer…" im Fenster: Plan lesen, ohne Grund gesperrt, Grund per Tastatur, bestätigen. */
+async function entfernen(c, nr, grund, planRe, fotoName) {
+  const o = await bearbeitenOeffnen(c, nr);
+  if (o !== 'OK') return o;
+  const a = await maus(c, '[data-transfer-remove-open]');
+  if (a !== 'OK') return 'OEFFNEN:' + a;
+  await waitFor(c, '[data-transfer-remove-plan]', 10000);
+  const plan = String(await c.ev("return document.querySelector('[data-transfer-remove-plan]')?.textContent || '';"));
+  if (!planRe.test(plan)) return 'PLAN:' + plan.slice(0, 80);
+  const vorGrund = await maus(c, '[data-transfer-remove-confirm]');
+  if (!/^GESPERRT/.test(vorGrund)) return 'OHNE-GRUND:' + vorGrund;
+  const g = await tippe(c, '[data-transfer-remove-reason]', grund);
+  if (g !== 'OK') return 'GRUND:' + g;
+  if (fotoName) await foto(c, fotoName, '[data-transfer-remove]');
+  const k = await maus(c, '[data-transfer-remove-confirm]');
+  return k === 'OK' ? 'OK' : 'BESTAETIGEN:' + k;
+}
+const forderung = (tid) => Math.round(1000 * Number(dbQ(BIZ_DB, `SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0) AS s
+  FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ? AND account = 'ACCOUNTS_RECEIVABLE'`, [tid])[0]?.s || 0)) / 1000;
+const los = (pid) => Number(dbQ(BIZ_DB, 'SELECT qty_remaining AS q FROM stock_lots WHERE product_id = ?', [pid])[0]?.q ?? -1);
+
 try {
   assertE2eClientBinary(CLIENT_APP);
   aufraeumen(); await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
@@ -418,9 +442,9 @@ try {
     // Bearbeiten: tme-p1 Preis 950, Split 30 %.
     const b = await bearbeitenOeffnen(client, p1.nr);
     ok(b === 'OK', `P PC2 „Edit" an ${p1.nr} öffnet „Edit Transfer" (${b})`);
-    const sperre = await maus(client, '[data-transfer-remove-open]');
-    ok(/^GESPERRT/.test(sperre) && await client.ev("return document.querySelector('[data-transfer-remove-open]')?.getAttribute('data-primary-only');") === 'delete',
-      `P „Remove" ist am PC2 gesperrt und erklärt (${sperre})`);
+    ok(!(await client.ev("return !!document.querySelector('[data-transfer-remove-open]')?.disabled;"))
+      && !(await client.ev("return document.querySelector('[data-transfer-remove-open]')?.hasAttribute('data-primary-only');")),
+      'P „Remove" ist am PC2 bedienbar wie am Primary (nicht mehr pauschal gesperrt)');
     const e = [await tippe(client, '[data-transfer-edit-price]', '950'), await waehle(client, '[data-transfer-edit-model]', 'split')];
     await sleep(300);
     e.push(await tippe(client, '[data-transfer-edit-pct]', '30'));
@@ -437,6 +461,46 @@ try {
     ok(S(['tme-p1', 'tme-p2', 'tme-p3'].map((id) => kurz(transferVon(id)))) === S(['950 split 30 transferred', '1200 split 40 transferred', '700 full transferred']),
       `P nur der bearbeitete Transfer ändert sich (${S(['tme-p1', 'tme-p2', 'tme-p3'].map((id) => kurz(transferVon(id))))})`);
     ok(await warteBis(client, "!document.querySelector('[data-transfer-edit-modal]')", 15000), 'P das Fenster schließt nach dem Speichern');
+  }
+
+  // ── R PC2: falschen Artikel löschen (nichts gebucht) und einen verkauften Transfer stornieren — dieselbe Hausfolge wie am
+  //    Primary über `transfers.remove` (EIN Auftrag je Handlung, Rumpf nur Kennung/Fassung/Grund). ──
+  if (szene('R') && p1 && p3) {
+    const p2 = transferVon('tme-p2');
+    // R1 löschen: tme-p3 ist der falsche Artikel.
+    const vorR = (await kommandos(client)).filter((x) => x.op === 'transfers.remove').length;
+    const w3 = await entfernen(client, p3.nr, 'wrong item selected', /Nothing is booked yet/, 'tme-r-pc2-remove-delete');
+    ok(w3 === 'OK', `R PC2 „Remove" an ${p3.nr}: Plan „Nothing is booked", ohne Grund gesperrt, mit Grund bestätigt (${w3})`);
+    await dateiBis(() => !transferVon('tme-p3'));
+    const cr = (await kommandos(client)).filter((x) => x.op === 'transfers.remove');
+    const pr = cr.at(-1)?.payload || {};
+    ok(cr.length === vorR + 1 && Object.keys(pr).sort().join(',') === 'expectedRevision,reason,transferId' && pr.transferId === p3.id && pr.reason === 'wrong item selected',
+      `R EIN Fernauftrag transfers.remove, Rumpf nur Kennung/Fassung/Grund (${S(pr)})`);
+    const au = dbQ(BIZ_DB, "SELECT old_value AS o FROM audit_log WHERE entity_id = ? AND action_type = 'DELETE'", [p3.id]);
+    ok(!transferVon('tme-p3') && stueck('tme-p3').s === 'in_stock' && stueck('tme-p3').q === 'OWN' && au.length === 1 && /wrong item selected/.test(String(au[0].o)),
+      `R gelöscht am PC2: Stück zurück im Lager, Protokoll mit Grund (${S(stueck('tme-p3'))})`);
+    ok(kurz(transferVon('tme-p1')) === '950 split 30 transferred' && kurz(transferVon('tme-p2')) === '1200 split 40 transferred',
+      'R die anderen Transfers derselben Übergabe sind unberührt');
+    // R2 verkaufen (tme-p2 für 1500 ⇒ 1200 + 40 % von 300 = 1320 an uns), R3 dann am PC2 stornieren.
+    const l = await zurListe(client, p2.nr);
+    const z = l === 'OK' ? await zeileKnopf(client, p2.nr, 'sold') : l;
+    const s1 = z === 'OK' ? await maus(client, '[data-e2e-zeile]') : z;
+    await warteBis(client, "document.querySelector('[data-transfer-sold-confirm]')", 15000);
+    const s2 = (await markiereFeld(client, 'ACTUAL SALE PRICE (BHD)')) ? await tippe(client, '[data-e2e-feld]', '1500') : 'KEIN-FELD';
+    const s3 = await maus(client, '[data-transfer-sold-confirm]');
+    await dateiBis(() => transferVon('tme-p2')?.status === 'sold' && forderung(p2.id) === 1320);
+    ok(s1 === 'OK' && s2 === 'OK' && s3 === 'OK' && transferVon('tme-p2')?.status === 'sold' && forderung(p2.id) === 1320 && stueck('tme-p2').s === 'sold',
+      `R PC2 „Sold" 1500 ⇒ Forderung 1320 gebucht (${s1}/${s2}/${s3}; ${forderung(p2.id)})`);
+    const lot2 = los('tme-p2');
+    const w2 = await entfernen(client, p2.nr, 'sold the wrong piece', /The sale is booked/, 'tme-r-pc2-remove-cancel');
+    ok(w2 === 'OK', `R PC2 „Remove" am verkauften ${p2.nr}: Plan „The sale is booked", mit Grund bestätigt (${w2})`);
+    await dateiBis(() => transferVon('tme-p2')?.status === 'cancelled');
+    ok(transferVon('tme-p2')?.status === 'cancelled' && forderung(p2.id) === 0 && stueck('tme-p2').s === 'in_stock' && los('tme-p2') === lot2 + 1
+      && dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ? AND reverses_entry_id IS NOT NULL", [p2.id])[0]?.n > 0,
+      `R storniert am PC2: Gegenbuchung (Forderung ${forderung(p2.id)}), Stück und Los zurück, Transfer bleibt „cancelled"`);
+    ok(Number(dbQ(BIZ_DB, "SELECT ROUND(COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0), 3) AS s FROM ledger_entries")[0]?.s) === 0,
+      'R das Hauptbuch ist ausgeglichen');
+    ok((await kommandos(client)).filter((x) => x.op === 'transfers.remove').length === vorR + 2, 'R genau zwei Remove-Aufträge vom PC2 (löschen, stornieren)');
   }
 
   // ── Q Primary: dieselbe Maske — gemeinsam Split 60 %, tme-p6 Full; bearbeiten; falschen Artikel entfernen ──
@@ -463,23 +527,7 @@ try {
       `Q bearbeitet: 1400 Full ohne Anteil; der Nachbar unverändert (${kurz(transferVon('tme-p5'))} / ${kurz(transferVon('tme-p4'))})`);
 
     // Entfernen: tme-p6 ist der falsche Artikel — nichts gebucht ⇒ löschen, Stück zurück, Grund im Protokoll.
-    const entfernen = async (nr, grund) => {
-      const o = await bearbeitenOeffnen(primary, nr);
-      if (o !== 'OK') return o;
-      const a = await maus(primary, '[data-transfer-remove-open]');
-      if (a !== 'OK') return 'OEFFNEN:' + a;
-      await waitFor(primary, '[data-transfer-remove-plan]', 10000);
-      const plan = String(await primary.ev("return document.querySelector('[data-transfer-remove-plan]')?.textContent || '';"));
-      if (!/Nothing is booked yet/.test(plan)) return 'PLAN:' + plan.slice(0, 80);
-      const vorGrund = await maus(primary, '[data-transfer-remove-confirm]');
-      if (!/^GESPERRT/.test(vorGrund)) return 'OHNE-GRUND:' + vorGrund;
-      const g = await tippe(primary, '[data-transfer-remove-reason]', grund);
-      if (g !== 'OK') return 'GRUND:' + g;
-      await foto(primary, 'tme-q-remove-' + nr, '[data-transfer-remove]');
-      const k = await maus(primary, '[data-transfer-remove-confirm]');
-      return k === 'OK' ? 'OK' : 'BESTAETIGEN:' + k;
-    };
-    const w6 = await entfernen(p6.nr, 'wrong item selected');
+    const w6 = await entfernen(primary, p6.nr, 'wrong item selected', /Nothing is booked yet/, 'tme-q-remove-' + p6.nr);
     ok(w6 === 'OK', `Q „Remove this transfer…" → Plan „Nothing is booked", ohne Grund gesperrt, mit Grund bestätigt (${w6})`);
     await dateiBis(() => !transferVon('tme-p6'));
     const au = dbQ(BIZ_DB, "SELECT action_type AS a, old_value AS o FROM audit_log WHERE entity_id = ? AND action_type = 'DELETE'", [p6.id]);
@@ -491,18 +539,14 @@ try {
     ok(await warteBis(primary, "!document.querySelector('[data-transfer-edit-modal]')", 15000)
       && !(await primary.ev(`return document.body.innerText.includes(${S(p6.nr)});`)), `Q die Liste zeigt ${p6.nr} nicht mehr`);
 
-    // Der falsche Artikel aus der PC2-Übergabe: am Primary entfernt (Löschen bleibt am Primary) — PC2 zeigt ihn nicht mehr.
+    // Parität der Listen: PC2 sieht, was beide Rechner entfernt haben (tme-p3 am PC2, tme-p6 am Primary).
     if (p3 && p1) {
-      const w3 = await entfernen(p3.nr, 'wrong item in PC2 hand-over');
-      ok(w3 === 'OK', `Q PC2-Übergabe: ${p3.nr} am Primary entfernt (${w3})`);
-      await dateiBis(() => !transferVon('tme-p3'));
-      ok(!transferVon('tme-p3') && stueck('tme-p3').s === 'in_stock' && kurz(transferVon('tme-p1')) === '950 split 30 transferred' && kurz(transferVon('tme-p2')) === '1200 split 40 transferred',
-        'Q PC2-Übergabe: tme-p3 gelöscht und im Lager, tme-p1/tme-p2 unberührt');
       await syncRuhe();
       client = await lade(client, '/agents');
       const l = await zurListe(client, p1.nr);
       const sicht = String(await client.ev('return document.body.innerText;'));
-      ok(l === 'OK' && !sicht.includes(p3.nr) && sicht.includes(p1.nr), `Q PC2 zeigt dieselbe Liste: ${p1.nr} da, ${p3.nr} weg (${l})`);
+      ok(l === 'OK' && !sicht.includes(p3.nr) && !sicht.includes(p6.nr) && sicht.includes(p1.nr) && sicht.includes(p5.nr),
+        `Q PC2 zeigt dieselbe Liste wie der Primary: ${p1.nr}/${p5.nr} da, ${p3.nr}/${p6.nr} weg (${l})`);
       await foto(client, 'tme-q-pc2-list-after-remove');
     }
     ok(S(await treffer(client)) === '[]', 'PC2 griff nie nach einer lokalen Datenbank');

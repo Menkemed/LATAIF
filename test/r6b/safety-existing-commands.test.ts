@@ -61,6 +61,7 @@ const SQL = await initSqlJs({ locateFile: (f: string) => resolvePath(repo, 'node
 const { setTestDatabase } = await import('../sync/_db-shim.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
+const financial = await import('../../src/core/bridge/financial-commands.ts');
 const invCmd = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 const life = await import('../../src/core/bridge/lifecycle-commands.ts');
 const prodCmd = await import('../../src/core/bridge/product-commands.ts');
@@ -374,10 +375,8 @@ marker('CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED');
     'pages/orders/OrderDetail.tsx': [2, 2, 2], 'pages/repairs/RepairDetail.tsx': [1, 1, 1],
     'pages/production/ProductionPage.tsx': [1, 1, 1], 'pages/production/ProductionDetail.tsx': [1, 1, 1],
     'pages/consignments/ConsignmentDetail.tsx': [1, 1, 1], 'pages/agents/AgentList.tsx': [1, 1, 1],
-    // Owner 14.11.2026 — „Remove" (löschen/stornieren) liegt im gemeinsamen Fenster: Öffner + Bestätigung gesperrt, Riegel
-    // vor der Ausführung; die Detailseite öffnet es mit gesperrtem Knopf.
-    // (Gezählt werden argumentlose Aufrufe; die Knöpfe mit eigener Zusatzsperre prüft die Zeile nach der Schleife.)
-    'components/agents/TransferEditModal.tsx': [1, 1, 1], 'pages/agents/TransferDetail.tsx': [1, 0, 0],
+    // Owner 14.11.2026 — die zwei Transfer-Löschknöpfe (Tabelle, Detail) sind KEINE gesperrten mehr: „Remove" ist als
+    // `transfers.remove` freigegeben (die eine geführte Fernlöschung; Prüfung nach der Schleife).
     'pages/metals/MetalList.tsx': [1, 1, 1], 'pages/scrap-trades/ScrapTradeDetail.tsx': [1, 1, 1],
     'pages/expenses/ExpenseList.tsx': [3, 3, 3], 'pages/partners/PartnersPage.tsx': [2, 2, 2],
     'pages/debts/DebtsPage.tsx': [1, 1, 1], 'pages/employees/EmployeeList.tsx': [1, 1, 1],
@@ -391,28 +390,40 @@ marker('CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED');
     const nr = (c.match(/blockDeleteOnClient\(\)/g) ?? []).length;
     ok(np === props && nr === riegel, `DELETE ${f}: ${props} gesperrte Knöpfe, ${riegel} Riegel (${np}/${nr})`);
   }
-  ok(einstiege === 28, `DELETE genau die 28 Löschknöpfe aus R6A (${einstiege})`);
-  ok(/\{\.\.\.primaryOnlyDeleteProps\(transfer\.status === 'cancelled'\)\}[^\n]*setEditOpen\('remove'\)/.test(codeOf(src('src/pages/agents/TransferDetail.tsx')))
-    && /\{\.\.\.primaryOnlyDeleteProps\(grund\.trim\(\)\.length < 3\)\}[^\n]*entfernenAusfuehren/.test(codeOf(src('src/components/agents/TransferEditModal.tsx'))),
-    'DELETE Transfer „Remove": der Öffner der Detailseite und die Bestätigung im Fenster sind am Client gesperrt');
+  ok(einstiege === 26, `DELETE genau die 26 weiter gesperrten Löschknöpfe aus R6A (28 − die zwei Transfer-Knöpfe) (${einstiege})`);
+  // Owner 14.11.2026 — Primary == PC2 bei Approval-Transfers: „Remove" läuft über die gemeinsame Weiche `transfers.remove`
+  // (DIESELBE Hausfolge am Primary), weder Öffner noch Bestätigung sind am Client gesperrt — und NUR dieser Vorgang.
+  {
+    const fenster = codeOf(src('src/components/agents/TransferEditModal.tsx'));
+    const detail = codeOf(src('src/pages/agents/TransferDetail.tsx'));
+    ok(/w\.save<TransferRemoved>\('transfers\.remove'/.test(fenster) && /local: \(\) => removeTransferOnPrimary\(t\.id, grund, fassung \|\| undefined\)/.test(fenster)
+      && /remote: \(\) => \(\{ transferId: t\.id, expectedRevision: fassung, reason: grund \}\)/.test(fenster)
+      && !/primaryOnlyDeleteProps|blockDeleteOnClient/.test(fenster + detail),
+      'DELETE Transfer „Remove": über die gemeinsame Weiche, am PC2 nicht mehr gesperrt (Tabelle und Detail)');
+    ok(financial.C3G_PRIMARY_ONLY.includes('transfers.delete' as never) && ALLOWED_MUTATIONS.includes('transfers.remove')
+      && ALLOWED_MUTATIONS.filter((o) => /\.(delete|remove)$/.test(o)).join(',') === 'transfers.remove',
+      'DELETE nur der geführte Transfer-Vorgang ist frei; das rohe transfers.delete und jedes andere Löschen bleiben am Primary');
+  }
   const doc = src('docs/central-ui-parity.md');
   const r6a = doc.slice(doc.indexOf('### Write-Gap-SSOT'), doc.indexOf('### Keine toten Knöpfe'));
   const e28 = r6a.split('\n').filter((l) => /^\| /.test(l)).map((l) => l.split('|').map((x) => x.trim())).filter((p) => p[5] === 'E' && /Löschen/.test(p[8] ?? ''));
-  ok(e28.length === 28, `DELETE die R6A-SSOT zählt dieselben 28 (${e28.length})`);
+  const frei = e28.filter((p) => /`transfers\.remove`/.test(p[6] ?? '') && /freigegeben/.test(p[7] ?? ''));
+  ok(e28.length === 28 && frei.length === 2 && frei.every((p) => /^Transfer löschen/.test(p[1])) && e28.length - frei.length === einstiege,
+    `DELETE die R6A-SSOT zählt dieselben 28: 26 gesperrt, die zwei Transfer-Zeilen freigegeben (${e28.length}/${frei.length})`);
 }
 marker('CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED');
 
 // ══ §8 — Registry und Matrix ══════════════════════════════════════════════════
 {
   // R6C — R6B selbst fügte keine Buchung hinzu; seither nur die elf aus R6C (hinter invoices.cancel).
-  ok(ALLOWED_MUTATIONS.length === 130 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-28) === 'production.complete' && ALLOWED_MUTATIONS.at(-27) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-21) === 'partner_items.change_partners'
+  ok(ALLOWED_MUTATIONS.length === 131 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-29) === 'production.complete' && ALLOWED_MUTATIONS.at(-28) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-22) === 'partner_items.change_partners'
     // BULK METAL V1
-    && ALLOWED_MUTATIONS.at(-20) === 'bulk_metals.write_off' && ALLOWED_MUTATIONS.at(-17) === 'bulk_metals.reverse_adjustment' && ALLOWED_MUTATIONS.at(-15) === 'stock_adjustments.cancel' && ALLOWED_MUTATIONS.at(-14) === 'stock_adjustments.add_old_stock',
+    && ALLOWED_MUTATIONS.at(-21) === 'bulk_metals.write_off' && ALLOWED_MUTATIONS.at(-18) === 'bulk_metals.reverse_adjustment' && ALLOWED_MUTATIONS.at(-16) === 'stock_adjustments.cancel' && ALLOWED_MUTATIONS.at(-15) === 'stock_adjustments.add_old_stock',
     `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + zwei STOCK CORRECTION (${ALLOWED_MUTATIONS.length})`);
   const rs = src('src-tauri/src/bridge.rs');
   const block = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   const n = (block.match(/^\s+OP_[A-Z0-9_]+,/gm) ?? []).length;
-  ok(n === 217, `REGISTRY Rust REMOTE_OPS = 214 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${n})`);
+  ok(n === 218, `REGISTRY Rust REMOTE_OPS = 214 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${n})`);
   const exakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && z.verdrahtet).length;
   const keineUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
   const enger = R4C_MATRIX.filter((z) => z.paritaet === 'enger').length;

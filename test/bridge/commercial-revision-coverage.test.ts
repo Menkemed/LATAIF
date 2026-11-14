@@ -547,7 +547,7 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
   // STOCK CORRECTION (+3) blieb hier seit Phase 1 auf 114 stehen; OPENING BALANCES & SETTLEMENT (+3) → 120.
   // PURCHASE-EDIT (+3) → 126; die Einkaufsbearbeitung meldet sich in ihrem eigenen Modul an.
-  ok(known.length === 61 && reads.length === 20 && ALLOWED_MUTATIONS.length === 130,
+  ok(known.length === 61 && reads.length === 20 && ALLOWED_MUTATIONS.length === 131,
     `SCOPE 1 Probe + 20 Reads + 40 Mutationen = 61 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   ok(ALLOWED_MUTATIONS.includes('purchases.update'),
     'SCOPE der Einkauf hat EINE Bearbeitung (purchase-edit-commands, Pflicht-Fassung und -Grund)');

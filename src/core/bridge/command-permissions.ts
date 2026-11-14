@@ -159,6 +159,9 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'transfers.mark_settled': null,
   'transfers.convert_to_invoice': null,
   'transfers.convert_many_to_invoice': null,
+  // Owner 14.11.2026 — „Remove" (Primary == PC2): dasselbe Tor wie am Primary — das Fenster „Edit Transfer" (TransferTable,
+  // TransferDetail) hat kein Rechte-Tor, also auch hier keins; das Haus verlangt Grund und Fassung.
+  'transfers.remove': null,
 
   // ── Rückgabe ────────────────────────────────────────────────────────────
   // BEFUND: „Create Return" in `InvoiceDetail` ist NICHT rechtegeschützt (nur zustandsgeprüft),

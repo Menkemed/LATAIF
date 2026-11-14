@@ -235,7 +235,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
 
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock'
 
-    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,purchases.update,purchases.correct,purchases.void_payment,purchases.correct_payment_date,customers.settle_balance,customers.settlement_reverse,purchases.cancel_return',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,purchases.update,purchases.correct,purchases.void_payment,purchases.correct_payment_date,customers.settle_balance,customers.settlement_reverse,purchases.cancel_return,transfers.remove',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -248,7 +248,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   // CENTRAL-UI-PARITY: dazu 47 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(known.length === 217, `ALLOWLIST produktiv zweihundertsechzehn Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
+  ok(known.length === 218, `ALLOWLIST produktiv zweihundertsechzehn Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
   // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 48 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
   ok(reads.length === 86 && known.includes('bridge.probe') && known.includes('invoices.create'),
     `ALLOWLIST eine Probe, achtundsiebzig Lesevorgaenge, hundertsechzehn Mutationen (BULK METAL V1 + STOCK CORRECTION) (${reads.length})`);
@@ -257,7 +257,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 217, 'ALLOWLIST …und seine Liste ist genau zweihundertsechzehn Namen lang (PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 218, 'ALLOWLIST …und seine Liste ist genau zweihundertsechzehn Namen lang (PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

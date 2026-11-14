@@ -91,6 +91,8 @@ export const C3G_PRIMARY_ONLY = [
   'repairs.delete',
   // R6E — `transfers.undo_convert` ist seither freigegeben: die Umwandlung wird als Rechnungsstorno
   // zurückgenommen (die Rechnung bleibt als Beleg), nicht mehr gelöscht. Löschen bleibt hier.
+  // Owner 14.11.2026 — der GEFÜHRTE Vorgang „Remove" ist als `transfers.remove` freigegeben (Hausfolge
+  // `removeTransferInHouse` mit Plan, Grund, Fassung, Periodenschutz); das rohe Löschen bleibt Primary-only.
   'transfers.delete',
 ] as const;
 

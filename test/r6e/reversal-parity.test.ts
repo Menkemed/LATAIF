@@ -332,8 +332,10 @@ const stornoRumpf = (w: Retourenwelt, reason = GRUND) => ({ returnId: w.retId, e
   ok(perms.roleMayRunOp('ADMIN', 'returns.cancel') && !perms.roleMayRunOp('MANAGER', 'returns.cancel') && !perms.roleMayRunOp('SALES', 'returns.cancel')
     && perms.roleMayRunOp('SALES', 'transfers.undo_convert'), 'SCOPE die zentrale Prüfung: nur kanonisch ADMIN storniert eine Retoure');
   const reg = codeOf(src('src/core/bridge/sales-reversal-commands.ts'));
-  ok((reg.match(/registerCommand\(/g) || []).length === 2 && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
-    'SCOPE zwei ausdrückliche Anmeldungen, keine Schleife');
+  // Owner 14.11.2026 — dazu „Remove" eines Approval-Transfers (`transfers.remove`): eine dritte ausdrückliche Anmeldung.
+  ok((reg.match(/registerCommand\(/g) || []).length === 3 && /registerCommand\(OP_TRANSFERS_REMOVE,/.test(reg)
+    && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
+    'SCOPE drei ausdrückliche Anmeldungen (zwei R6E-Stornos + Transfer-Remove), keine Schleife');
 }
 marker('CENTRAL_UI_R6E_REVERSAL_SCOPE_PROVED');
 
