@@ -243,8 +243,9 @@ export function AgentList() {
             // Plan §Agent Ledger §9: Total Given / Sold / Paid / Outstanding pro Agent.
             const myTransfers = transfers.filter(t => t.agentId === agent.id);
             const activeTransfers = myTransfers.filter(t => t.status === 'transferred');
+            // Owner 14.11.2026 — ein stornierter Transfer ist wie ein zurückgegebener wieder im Lager.
             const totalGiven = myTransfers
-              .filter(t => t.status !== 'returned')
+              .filter(t => t.status !== 'returned' && t.status !== 'cancelled')
               .reduce((s, t) => s + (t.agentPrice || 0), 0);
             // v0.7.22 — "Total Sold" = was uns aus den Verkäufen ZUSTEHT (settlementAmount),
             // nicht der Brutto-Verkaufspreis. Bei 'split' ist das Our Price + unser Anteil

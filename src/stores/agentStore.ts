@@ -643,7 +643,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   cancelTransfer: (id, reason) => {
     const transfer = get().getTransfer(id);
     if (!transfer) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'No such transfer. Nothing was changed.');
-    const live = query('SELECT status, invoice_id FROM agent_transfers WHERE id = ?', [id])[0];
+    const live = query('SELECT status, invoice_id, settlement_amount FROM agent_transfers WHERE id = ?', [id])[0];
     if (String(live?.invoice_id ?? '') !== '') {
       throw new TransferActionRejected('TRANSFER_INVOICED', 'This transfer is on an invoice — undo the conversion first. Nothing was changed.');
     }
@@ -655,11 +655,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (verkauf) reverseSource('AGENT_TRANSFER_SOLD', id, now, { mirrorOriginalDates: true });
     // Das Stück kommt zurück — genau sein Verbrauch, einmal (Los oder Menge), samt Eigentum und Status.
     giveBackAgentStock(id, transfer.productId, now, target);
-    get().updateTransfer(id, { status: 'cancelled' });
+    // Nach dem Storno schuldet der Kunde nichts mehr: Abrechnungsbetrag 0 — sonst zeigten Liste, Druckliste und das PC2-
+    // Lesemodell (settlementOpenAmount) den gegengebuchten Verkauf weiter als offen. Der alte Betrag steht im Protokoll.
+    get().updateTransfer(id, { status: 'cancelled', settlementAmount: 0 });
     logAuditOrThrow({
       module: 'Agent', entityType: 'agent_transfers', entityId: id, action: 'UPDATE', field: 'status',
-      oldValue: { status: String(live?.status ?? transfer.status), settlementAmount: transfer.settlementAmount ?? null },
-      newValue: { status: 'cancelled', saleReversed: verkauf, stockReturned: true, reason },
+      oldValue: { status: String(live?.status ?? transfer.status),
+        settlementAmount: live?.settlement_amount === null || live?.settlement_amount === undefined ? (transfer.settlementAmount ?? null) : Number(live.settlement_amount) },
+      newValue: { status: 'cancelled', settlementAmount: 0, saleReversed: verkauf, stockReturned: true, reason },
     });
     saveDatabase();
     get().loadTransfers();

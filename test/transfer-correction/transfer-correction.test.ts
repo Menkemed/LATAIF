@@ -372,6 +372,13 @@ const bearbeiten = (weg: 'primary' | 'fern', db: Db, tid: string, patch: Record<
     && n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p3'") === lotVor + 1,
     `K5 Stück wieder im Lager, Los +1 (${vorStueck} → ${s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = 'p3'")})`);
   ok(S(row(db, 'SELECT * FROM agent_transfers WHERE id = ?', [t4])) === vor4, 'K5 der andere Transfer derselben Übergabe ist unverändert');
+  // v0.8.103-Prüfung — nach dem Storno ist nichts mehr offen: Abrechnungsbetrag 0 (Liste, Druckliste, PC2-Lesemodell), der alte
+  // Betrag steht im Protokoll; ein neuer Transfer desselben Stücks ist möglich.
+  ok(Number(one(db, 'SELECT settlement_amount FROM agent_transfers WHERE id = ?', [t3])) === 0
+    && /"settlementAmount":700\b/.test(s(db, "SELECT old_value FROM audit_log WHERE entity_id = ? AND field_name = 'status' AND new_value LIKE '%\"reason\"%'", [t3])),
+    `K5 storniert: Abrechnungsbetrag 0, der alte (700) im Protokoll (${one(db, 'SELECT settlement_amount FROM agent_transfers WHERE id = ?', [t3])})`);
+  const wieder = await anlegen(db, 'p3');
+  ok(s(db, 'SELECT status FROM agent_transfers WHERE id = ?', [wieder]) === 'transferred', 'K5 das stornierte Stück lässt sich wieder übergeben');
   const nochmal = await primary(() => house.removeTransferOnPrimary(t3, 'again', trev(db, t3)));
   const vorB = buchungen(db);
   ok(nochmal.code === 'TRANSFER_ALREADY_CANCELLED' && buchungen(db) === vorB, 'K5 zweites Entfernen: Nein, keine zweite Gegenbuchung');
@@ -563,6 +570,8 @@ const bearbeiten = (weg: 'primary' | 'fern', db: Db, tid: string, patch: Record<
       && s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = 'p1'") === 'in_stock/1'
       && n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'") === lot0 + 1,
       `K9b ${weg}: storniert mit Gegenbuchung, Stück und Los zurück (${r.code || r.value?.kind}; ${buchungen(db)})`);
+    ok(Number(one(db, 'SELECT settlement_amount FROM agent_transfers WHERE id = ?', [tid])) === 0,
+      `K9b ${weg}: nach dem Storno nichts mehr offen (Abrechnungsbetrag 0)`);
     if (weg === 'fern') {
       const vor = buchungen(db) + bild(db, 'p1', tid);
       const nochmal = await entfernenFern(db, tid, 'sold the wrong piece', x, 1);

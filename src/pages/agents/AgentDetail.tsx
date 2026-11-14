@@ -48,8 +48,9 @@ export function AgentDetail() {
 
   const stats = useMemo(() => {
     const activeTransfers = myTransfers.filter(t => t.status === 'transferred');
+    // Owner 14.11.2026 — ein stornierter Transfer ist wie ein zurückgegebener wieder im Lager.
     const totalGiven = myTransfers
-      .filter(t => t.status !== 'returned')
+      .filter(t => t.status !== 'returned' && t.status !== 'cancelled')
       .reduce((s, t) => s + (t.agentPrice || 0), 0);
     // v0.7.22 — "Total Sold" = settlementAmount (was uns zusteht), nicht Brutto-
     // Verkaufspreis. Bei 'split' zählt die Kunden-Marge nicht als unsere Forderung.
