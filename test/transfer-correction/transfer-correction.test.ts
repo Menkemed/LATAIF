@@ -411,6 +411,107 @@ const bearbeiten = (weg: 'primary' | 'fern', db: Db, tid: string, patch: Record<
     `K7 alter Rumpf: nur die Notiz ändert sich, keine Buchung (${a.code || 'ok'})`);
 }
 
+// ── K8 Geschlossene Periode (Owner 14.11.2026, Nachprüfung): Umbuchung und Storno eines verkauften Transfers buchen auf die
+//    Tage der Verkaufsbuchung — dieselbe Regel wie jede periodengerechte Korrektur (`correctionDateIssue`: Ortstag wie der
+//    NBR-Export, Eröffnungsstichtag, eingereichtes/bezahltes Quartal). Hauptbuch und Stück bleiben stimmig. ──
+{
+  const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+  const tzAlt = process.env.TZ;
+  process.env.TZ = 'Asia/Bahrain';
+  setOpeningCutoffForTest('2026-01-01');
+  try {
+    const verkaufAm = (db: Db, tid: string, iso: string): void =>
+      db.run("UPDATE ledger_entries SET occurred_at = ? WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [iso, tid]);
+    const zu = (db: Db, jahr: number, q: number): void =>
+      insert(db, 'vat_filings', { id: `vf-${jahr}-${q}`, branch_id: 'branch-main', year: jahr, quarter: q, filed_at: NOW, snapshot_json: '{}', created_at: NOW });
+    const stand = (db: Db, tid: string, pid: string): string => buchungen(db) + '|'
+      + S(row(db, 'SELECT status, agent_price, settlement_amount FROM agent_transfers WHERE id = ?', [tid])) + '|'
+      + s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = ?", [pid]) + '|' + n(db, 'SELECT qty_remaining FROM stock_lots WHERE product_id = ?', [pid]);
+
+    // a) Verkauf im eingereichten Q3/2026: Preis ändern (PC2 und Primary) und Stornieren — Nein, nichts verändert.
+    {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      verkaufAm(db, tid, '2026-09-15T09:00:00.000Z');
+      zu(db, 2026, 3);
+      reload();
+      const vor = stand(db, tid, 'p1');
+      const a = await bearbeiten('fern', db, tid, { agentPrice: 800 });
+      const b = await bearbeiten('primary', db, tid, { agentPrice: 800 });
+      const c = await primary(() => house.removeTransferOnPrimary(tid, 'wrong piece', trev(db, tid)));
+      ok(a.code === 'VAT_PERIOD_FILED' && b.code === 'VAT_PERIOD_FILED' && c.code === 'VAT_PERIOD_FILED' && stand(db, tid, 'p1') === vor,
+        `K8a Q3/2026 eingereicht: Preis (PC2/Primary) und Storno abgewiesen, Hauptbuch/Transfer/Stück unverändert (${a.code}/${b.code}/${c.code})`);
+      const d = await bearbeiten('fern', db, tid, { notes: 'still allowed' });
+      ok(d.ok && stand(db, tid, 'p1') === vor, `K8a eine Notiz bleibt erlaubt, keine Buchung (${d.code || 'ok'})`);
+    }
+    // b) Quartalsgrenze in Ortszeit: 31.12.2026 22:30 UTC ist der 01.01.2027 in Bahrain (Q1/2027 — eingereicht) ⇒ Nein.
+    {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      verkaufAm(db, tid, '2026-12-31T22:30:00.000Z');
+      zu(db, 2027, 1);
+      reload();
+      const vor = stand(db, tid, 'p1');
+      const a = await bearbeiten('fern', db, tid, { agentPrice: 800 });
+      const c = await primary(() => house.removeTransferOnPrimary(tid, 'wrong piece', trev(db, tid)));
+      ok(a.code === 'VAT_PERIOD_FILED' && c.code === 'VAT_PERIOD_FILED' && stand(db, tid, 'p1') === vor,
+        `K8b Verkauf am 01.01.2027 Ortszeit, Q1/2027 eingereicht: Umbuchung und Storno abgewiesen (${a.code}/${c.code})`);
+    }
+    // c) …und umgekehrt: 30.09.2026 22:30 UTC ist der 01.10.2026 (Q4, offen), Q3 eingereicht ⇒ erlaubt, Umbuchung am selben Zeitpunkt.
+    {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      verkaufAm(db, tid, '2026-09-30T22:30:00.000Z');
+      zu(db, 2026, 3);
+      reload();
+      const a = await bearbeiten('fern', db, tid, { agentPrice: 800 });
+      reload();
+      const tage = all(db, "SELECT DISTINCT occurred_at FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [tid]);
+      ok(a.ok && konto(db, 'ACCOUNTS_RECEIVABLE') === 920 && ausgeglichen(db) && tage === S([['2026-09-30T22:30:00.000Z']]),
+        `K8c Verkauf am 01.10.2026 Ortszeit (Q4 offen): umgebucht auf 920, Storno und Neubuchung am selben Zeitpunkt (${a.code || 'ok'}; ${tage})`);
+    }
+    // d) Vor dem Eröffnungsstichtag ⇒ Nein (dieselbe Kennung wie jede Korrektur).
+    {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      verkaufAm(db, tid, '2026-03-10T09:00:00.000Z');
+      setOpeningCutoffForTest('2026-06-01');
+      reload();
+      const vor = stand(db, tid, 'p1');
+      const c = await primary(() => house.removeTransferOnPrimary(tid, 'wrong piece', trev(db, tid)));
+      ok(c.code === 'CORRECTION_BEFORE_OPENING_CUTOFF' && stand(db, tid, 'p1') === vor, `K8d Verkauf vor der Eröffnung: Storno abgewiesen (${c.code})`);
+      setOpeningCutoffForTest('2026-01-01');
+    }
+    // e) Offene Periode: erst umbuchen, dann stornieren ⇒ Hauptbuch netto 0 und ausgeglichen, Stück und Los zurück.
+    {
+      const db = freshDb();
+      const tid = await anlegen(db, 'p1');
+      await verkaufen(db, tid, 1000);
+      const lot0 = n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'");
+      const a = await bearbeiten('fern', db, tid, { agentPrice: 800 });
+      reload();
+      ok(a.ok && s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = 'p1'") === 'sold/0'
+        && n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'") === lot0,
+        `K8e die Umbuchung lässt das verkaufte Stück unverändert (${a.code || 'ok'})`);
+      const c = await primary(() => house.removeTransferOnPrimary(tid, 'wrong piece', trev(db, tid)));
+      reload();
+      ok(c.ok && c.value?.kind === 'cancelled' && konto(db, 'ACCOUNTS_RECEIVABLE') === 0 && konto(db, 'REVENUE') === 0 && konto(db, 'COGS') === 0
+        && konto(db, 'INVENTORY') === n(db, "SELECT ROUND(COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0), 3) FROM ledger_entries WHERE account = 'INVENTORY' AND source_module != 'AGENT_TRANSFER_SOLD'")
+        && ausgeglichen(db) && lebendAR(db, tid) === '[]'
+        && s(db, "SELECT stock_status || '/' || quantity FROM products WHERE id = 'p1'") === 'in_stock/1'
+        && n(db, "SELECT qty_remaining FROM stock_lots WHERE product_id = 'p1'") === lot0 + 1,
+        `K8e umgebucht und dann storniert: Forderung/Erlös/Wareneinsatz 0, ausgeglichen, Stück und Los zurück (${c.code || c.value?.kind}; ${buchungen(db)})`);
+    }
+  } finally {
+    setOpeningCutoffForTest(null);
+    if (tzAlt === undefined) delete process.env.TZ; else process.env.TZ = tzAlt;
+  }
+}
+
 console.log(`\ntransfer-correction: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('TRANSFER_CORRECTION_PROVED');

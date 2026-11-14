@@ -22,8 +22,7 @@ import {
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { computeAgentTransferSale, DEFAULT_AGENT_SPLIT_PCT } from '@/core/agent/economics';
 import { businessTimestamp } from '@/core/utils/business-date';
-import { openingCutoffDay } from '@/core/ledger/correction-dates';
-import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
+import { correctionDateIssue } from '@/core/ledger/correction-dates';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { isClientMode } from '@/core/bridge/client-mode';
@@ -352,17 +351,17 @@ function zahlungenErfasst(transferId: string, paidAmount: unknown): boolean {
     || Number(query('SELECT COUNT(*) AS n FROM agent_settlement_payments WHERE transfer_id = ?', [transferId])[0]?.n) > 0;
 }
 
-/** Liegt ein Tag der Verkaufsbuchung in einer geschlossenen Periode (Eröffnung, eingereichtes/bezahltes VAT-Quartal)? */
-function verkaufsPeriodeGeschlossen(transferId: string, branchId: string): string | null {
-  const cutoff = openingCutoffDay();
-  const zu = closedVatQuarters(branchId);
-  for (const d of activeSourceDates('AGENT_TRANSFER_SOLD', transferId)) {
-    const tag = String(d).slice(0, 10);
-    if (tag < cutoff) return `the sale is booked on ${tag}, before the opening (${cutoff})`;
-    const q = nbrQuarterOfDate(tag);
-    if (q && zu.get(q.key)) return `the sale is booked on ${tag}, in a VAT quarter that is already filed or paid`;
-  }
-  return null;
+/**
+ * Darf die Verkaufsbuchung an ihren Tagen noch korrigiert werden? Umbuchung und Storno buchen auf genau diese Tage
+ * (Spiegel des Originals) — also gilt DIESELBE Regel wie für jede periodengerechte Korrektur (`correctionDateIssue`):
+ * Kalendertag in Ortszeit wie der NBR-Export, nicht vor dem Eröffnungsstichtag, nicht in einem eingereichten oder schon
+ * bezahlten VAT-Quartal. (Vorher eine eigene Kopie mit dem UTC-Tag: an Quartalsgrenzen zwischen 00 und 03 Uhr Ortszeit
+ * prüfte sie das falsche Quartal.)
+ */
+function verkaufsPeriodeSperre(transferId: string, branchId: string): TransferActionRejected | null {
+  const issue = correctionDateIssue(branchId,
+    activeSourceDates('AGENT_TRANSFER_SOLD', transferId).map((iso) => ({ iso, what: 'the sale of this transfer' })));
+  return issue ? new TransferActionRejected(issue.code, issue.message) : null;
 }
 
 /**
@@ -441,8 +440,8 @@ export function editTransferInHouse(
     }
     settlementAmount = econ.ourSettlement;
     if (Math.abs(settlementAmount - (Number(row.settlement_amount) || 0)) > 0.0005 && hasLedgerEntries('AGENT_TRANSFER_SOLD', transferId)) {
-      const zu = verkaufsPeriodeGeschlossen(transferId, branchId);
-      if (zu) throw new TransferActionRejected('TRANSFER_PERIOD_CLOSED', `${zu} — the booked sale is not changed any more`);
+      const zu = verkaufsPeriodeSperre(transferId, branchId);
+      if (zu) throw zu;
       // Die lebende Verkaufsbuchung: Forderung (Kunde, Tag) und Wareneinsatz — sie bleiben, nur der Betrag ändert sich.
       const beine = query(`SELECT e1.account, e1.direction, e1.amount, e1.counterparty_id, e1.occurred_at FROM ledger_entries e1
           WHERE e1.source_module = 'AGENT_TRANSFER_SOLD' AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
@@ -519,8 +518,8 @@ export function removeTransferInHouse(transferId: string, branchId: string, reas
       throw new TransferActionRejected('TRANSFER_STOCK_UNKNOWN',
         'this is an older sale without a stock record — it cannot be cancelled automatically. Correct it with the accountant.');
     }
-    const zu = verkaufsPeriodeGeschlossen(transferId, branchId);
-    if (zu) throw new TransferActionRejected('TRANSFER_PERIOD_CLOSED', `${zu} — the sale is not cancelled any more`);
+    const zu = verkaufsPeriodeSperre(transferId, branchId);
+    if (zu) throw zu;
   }
   frischLesen();
   const buchung = watchLedgerPosts('remove transfer');
