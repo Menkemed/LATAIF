@@ -543,7 +543,9 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   useAgentStore.getState().markTransferReturned(tid);
   const stale = await cmd.runTransferUpdate(d, identity('81', 'transfers.update'),
     { id: tid, expectedRevision: seen, agentPrice: 999 });
-  ok(stale.kind === 'rejected' && code(stale) === 'TRANSFER_NOT_OPEN',
+  // Owner 14.11.2026 — die gesehene Fassung wird zuerst verglichen (wie überall): RECORD_CHANGED; ohne sie sperrt die Regel
+  // den Preis eines zurückgegebenen Transfers (TRANSFER_NOT_OPEN). Beides: nichts geändert.
+  ok(stale.kind === 'rejected' && ['TRANSFER_NOT_OPEN', 'RECORD_CHANGED'].includes(code(stale)),
     `RACE-LIFECYCLE ein zurueckgegebener Transfer wird nicht mehr geaendert (${JSON.stringify(stale)})`);
   ok(n(db, 'SELECT agent_price FROM agent_transfers WHERE id = ?', [tid]) === 500,
     'RACE-LIFECYCLE nichts wurde ueberschrieben');

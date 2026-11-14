@@ -779,8 +779,9 @@ async function bruchWelt(weg: 'primary' | 'fern', sammel: boolean, brich: (db: D
   // Die Klammer am Primary: exklusiv, eine Transaktion, dann durabel.
   ok(/runExclusive\(/.test(h) && /beginLedgerTransaction\(\)/.test(h) && /rollbackLedgerTransaction\(\)/.test(h) && /saveDatabaseDurably\(\)/.test(h),
     'DOMAIN die Maske des Primary schreibt in EINER Klammer');
-  // Owner 14.11.2026 — dazu „Transfer N items" (`createTransfersOnPrimary`): vier Handlungen in derselben Klammer.
-  ok((h.match(/return amPrimary\(/g) || []).length === 4, 'DOMAIN …fuer alle vier Handlungen');
+  // Owner 14.11.2026 — dazu „Transfer N items" (`createTransfersOnPrimary`) und „Edit" (`editTransferOnPrimary`): fünf
+  // Handlungen in derselben Klammer.
+  ok((h.match(/return amPrimary\(/g) || []).length === 5, 'DOMAIN …fuer alle fuenf Handlungen');
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -818,12 +819,17 @@ const economics = await import('../../src/core/agent/economics.ts');
   }
   const voll = { id: 't1', status: 'sold', settlementAmount: 999, agentPrice: 750, returnBy: '', notes: 'n', invoiceId: 'x', staffId: 'e' };
   const patch = rules.transferEditPatch(voll as never);
-  ok(S(patch) === S({ agentPrice: 750, returnBy: null, notes: 'n' }),
-    `PRICE der Schreibsatz der Aenderungsmaske traegt genau Preis, Rueckgabe (leer = keins) und Notiz (${S(patch)})`);
-  for (const f of ['src/components/agents/TransferTable.tsx', 'src/pages/agents/TransferDetail.tsx']) {
-    const t = codeOf(src(f));
-    ok(/local: \(\) => \{ updateTransfer\(\w+(\.id)?, transferEditPatch\(\w+\)/.test(t) && /expectedRevision: fassung, \.\.\.transferEditPatch\(/.test(t),
-      `PRICE ${f.split('/').pop()}: beide Anschluesse schreiben denselben Satz`);
+  // Owner 14.11.2026 — der Satz der Maske „Edit Transfer" trägt jetzt auch den Mitarbeiter (wählbar) — nie Status, Abrechnung,
+  // Rechnung oder Artikel (abgeleitet bzw. unveränderlich).
+  ok(S(patch) === S({ agentPrice: 750, returnBy: null, notes: 'n', staffId: 'e' }),
+    `PRICE der Schreibsatz der Aenderungsmaske traegt Preis, Rueckgabe (leer = keins), Notiz und Mitarbeiter — nichts Abgeleitetes (${S(patch)})`);
+  {
+    // Liste und Detailseite teilen EIN Fenster (TransferEditModal): beide Anschlüsse schreiben denselben Satz.
+    const t = codeOf(src('src/components/agents/TransferEditModal.tsx'));
+    ok(/local: \(\) => editTransferOnPrimary\(t\.id, patch, fassung \|\| undefined\)/.test(t) && /expectedRevision: fassung, \.\.\.patch \}\)/.test(t)
+      && /const patch = transferEditPatch\(f\)/.test(t)
+      && /<TransferEditModal/.test(src('src/components/agents/TransferTable.tsx')) && /<TransferEditModal/.test(src('src/pages/agents/TransferDetail.tsx')),
+      'PRICE TransferEditModal (Liste und Detailseite): beide Anschluesse schreiben denselben Satz');
   }
 }
 
@@ -877,8 +883,10 @@ const economics = await import('../../src/core/agent/economics.ts');
 {
   const d = codeOf(src('src/pages/agents/TransferDetail.tsx'));
   const ohneAnschluss = d.replace(/local: \(\) => \{[^\n]*\n/g, '');
+  // Owner 14.11.2026 — „Edit" (`transfers.update`) liegt im gemeinsamen Fenster TransferEditModal.
+  const fenster = codeOf(src('src/components/agents/TransferEditModal.tsx'));
   for (const [op, fn] of [['transfers.update', 'updateTransfer'], ['transfers.mark_sold', 'markTransferSold'], ['transfers.mark_returned', 'markTransferReturned']]) {
-    ok(new RegExp(`w\\.ok\\('${op.replace('.', '\\.')}'`).test(d), `DETAIL ${op} ueber die gemeinsame Weiche`);
+    ok(new RegExp(`w\\.ok\\('${op.replace('.', '\\.')}'`).test(op === 'transfers.update' ? fenster : d), `DETAIL ${op} ueber die gemeinsame Weiche`);
     ok(!new RegExp(`\\b${fn}\\(`).test(ohneAnschluss), `DETAIL ${fn}() steht nur noch im Primary-Anschluss`);
   }
   ok(/acknowledgeBelowPrice: true/.test(d), 'DETAIL die Bestaetigung unter Our Price reist mit — wie die Maske sie verlangt');

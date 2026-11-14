@@ -50,9 +50,9 @@ import { changeRepairCustomerInHouse, houseRepairPort } from '@/core/repairs/rep
 import { applyRepairGallery, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
 import {
   TRANSFER_BATCH_MAX, TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferBatch, normalizeTransferCreate,
-  type TransferBatchForm, type TransferBatchItem,
+  transferEditPatch, type TransferBatchForm, type TransferBatchItem, type TransferEditPatch,
 } from '@/core/agents/transfer-rules';
-import { createTransferInHouse, createTransfersInHouse } from '@/core/agents/transfer-house';
+import { createTransferInHouse, createTransfersInHouse, editTransferInHouse } from '@/core/agents/transfer-house';
 import {
   assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, isStagingId,
   readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
@@ -689,6 +689,8 @@ export interface TransferUpdateRequest {
   agentPrice?: number;
   returnBy?: string | null;
   notes?: string | null;
+  /** Owner 14.11.2026 — der Rest der Maske „Edit Transfer" (geprüft mit `transferEditPatch`). */
+  patch?: TransferEditPatch;
 }
 
 /**
@@ -711,11 +713,18 @@ export function parseTransferUpdate(raw: unknown): TransferUpdateRequest {
   // GENAU die drei Felder, die beide echten Bildschirme (TransferDetail und TransferTable)
   // schreiben — nicht eines mehr. `minimumPrice` stand hier und ist an KEINEM von beiden
   // editierbar; ein Feld, das nur der Fernweg kann, wäre ein Vertrag, den das Haus nicht hat.
-  onlyKnownFields(raw, ['id', 'expectedRevision', 'agentPrice', 'returnBy', 'notes']);
+  // Owner 14.11.2026 — dazu Modell, Anteil, Mitarbeiter, Übergabetag, Kunde und die Bestätigung „unter Our Price".
+  onlyKnownFields(raw, ['id', 'expectedRevision', 'agentPrice', 'returnBy', 'notes',
+    'settlementModel', 'excessSplitPct', 'staffId', 'transferredAt', 'customerId', 'acknowledgeBelowPrice']);
   const out: TransferUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
+  for (const [k, art] of [['settlementModel', 'string'], ['excessSplitPct', 'number'], ['transferredAt', 'string'], ['customerId', 'string'],
+    ['acknowledgeBelowPrice', 'boolean']] as const) {
+    if (raw[k] !== undefined && raw[k] !== null && typeof raw[k] !== art) throw new ServicePayloadError(`${k} must be a ${art}`);
+  }
+  if (raw.staffId !== undefined && raw.staffId !== null && typeof raw.staffId !== 'string') throw new ServicePayloadError('staffId must be a string');
   if (raw.agentPrice !== undefined) {
     const p = raw.agentPrice;
     if (typeof p !== 'number' || !Number.isFinite(p) || p <= 0) {
@@ -725,7 +734,23 @@ export function parseTransferUpdate(raw: unknown): TransferUpdateRequest {
   }
   if (raw.returnBy !== undefined) out.returnBy = raw.returnBy === null ? null : reqString(raw.returnBy, 'returnBy');
   if (raw.notes !== undefined) out.notes = raw.notes === null ? null : String(raw.notes);
-  if (out.agentPrice === undefined && out.returnBy === undefined && out.notes === undefined) {
+  try {
+    out.patch = transferEditPatch({
+      ...(out.agentPrice !== undefined ? { agentPrice: out.agentPrice } : {}),
+      ...(out.returnBy !== undefined ? { returnBy: out.returnBy } : {}),
+      ...(out.notes !== undefined ? { notes: out.notes } : {}),
+      ...(raw.settlementModel !== undefined ? { settlementModel: String(raw.settlementModel) } : {}),
+      ...(raw.excessSplitPct !== undefined ? { excessSplitPct: raw.excessSplitPct as number | null } : {}),
+      ...(raw.staffId !== undefined ? { staffId: raw.staffId as string | null } : {}),
+      ...(raw.transferredAt !== undefined ? { transferredAt: String(raw.transferredAt) } : {}),
+      ...(raw.customerId !== undefined ? { customerId: String(raw.customerId) } : {}),
+      ...(raw.acknowledgeBelowPrice === true ? { acknowledgeBelowPrice: true } : {}),
+    });
+  } catch (e) {
+    if (e instanceof TransferActionRejected) throw new ServicePayloadError(e.message);
+    throw e;
+  }
+  if (Object.keys(out.patch).filter((k) => k !== 'acknowledgeBelowPrice').length === 0) {
     throw new ServicePayloadError('an edit must change something');
   }
   return out;
@@ -742,19 +767,11 @@ function liveTransfer(id: string, branchId: string): Record<string, unknown> {
 export function runTransferUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseTransferUpdate(raw);
   return runRemoteCommand(deps, identity, () => {
-    const live = liveTransfer(req.id, identity.branchId);
-    if (String(live.status) !== 'transferred') {
-      // Verkauft, zurück oder abgerechnet: dann hängen Zahlen daran, die aus diesen Feldern
-      // gerechnet wurden. Sie nachträglich zu verschieben hieße, eine Buchung zu verändern.
-      throw new CommandRejected('TRANSFER_NOT_OPEN',
-        `this transfer is "${String(live.status)}" — only one that is still out can be changed`);
-    }
+    liveTransfer(req.id, identity.branchId);
     assertRevision('agent_transfers', req.id, req.expectedRevision, 'TRANSFER_NOT_FOUND');
-    const patch: Record<string, unknown> = {};
-    if (req.agentPrice !== undefined) patch.agentPrice = req.agentPrice;
-    if (req.returnBy !== undefined) patch.returnBy = req.returnBy;
-    if (req.notes !== undefined) patch.notes = req.notes;
-    useAgentStore.getState().updateTransfer(req.id, patch as never);
+    // Owner 14.11.2026 — DIESELBE Folge wie „Edit" am Primary (`editTransferOnPrimary`): was sich ändert, prüft und bucht das
+    // Haus (`editTransferInHouse`) — nach dem Verkauf mit Gegenbuchung und Neubuchung, mit Rechnung/Zahlung ein Nein.
+    house(() => editTransferInHouse(req.id, req.patch ?? {}, identity.branchId));
     return transferState(req.id) as unknown as Record<string, unknown>;
   });
 }

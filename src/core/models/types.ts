@@ -768,7 +768,8 @@ export interface Agent {
 
 // ── Agent Transfer ──
 
-export type AgentTransferStatus = 'transferred' | 'sold' | 'returned' | 'settled';
+// Owner 14.11.2026 — 'cancelled': ein verkaufter Transfer, dessen Verkauf per „Remove" storniert wurde (bleibt als Beleg).
+export type AgentTransferStatus = 'transferred' | 'sold' | 'returned' | 'settled' | 'cancelled';
 
 export interface AgentTransfer {
   /** R4C — die gesehene Fassung; jede fassungsbasierte Buchung nennt sie. */

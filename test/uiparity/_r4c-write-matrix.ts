@@ -238,9 +238,9 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
     grund: 'R5D — EINE Folge fuer beide Seiten (core/agents/transfer-house: createTransferInHouse, Regeln in transfer-rules): Kunde der Auswahl, das Stueck im Lager und nicht schon draussen, Our Price > 0, Abrechnungsmodell mit Anteil 0–100 (sonst 50), Rueckgabedatum und — der alte Grund — der Mitarbeiter (`staffId`, nur ein aktiver der Filiale). Agent, Nummer, Bestandswechsel und Zeitpunkte setzt der Primary; am Primary in EINER Klammer.',
   },
   {
-    op: 'transfers.update', handlung: 'Transfer aendern', ort: 'components/agents/TransferTable.tsx',
-    lokal: 'updateTransfer', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'Ein Aufruf mit genau den drei Feldern der Maske: Preis, Rueckgabedatum, Notiz.',
+    op: 'transfers.update', handlung: 'Transfer aendern', ort: 'components/agents/TransferEditModal.tsx',
+    lokal: 'editTransferOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'Owner 14.11.2026 — EIN Fenster fuer Liste und Detailseite, EINE Folge fuer beide Seiten (transfer-house: editTransferInHouse): Preis, Modell/Anteil, Kunde, Uebergabetag, Mitarbeiter, Rueckgabe, Notiz; ein verkaufter Transfer bucht seine Agenten-Forderung um (Storno + Neubuchung am Verkaufstag). Rechnung oder Abrechnungszahlung sperren Geld/Kunde.',
   },
   {
     op: 'transfers.mark_returned', handlung: 'Transfer zurueckgenommen', ort: 'components/agents/TransferTable.tsx',

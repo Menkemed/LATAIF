@@ -15,7 +15,15 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query, currentBranchId } from '@/core/db/helpers';
 import { saveDatabaseDurably } from '@/core/db/database';
-import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
+import {
+  activeSourceDates, beginLedgerTransaction, commitLedgerTransaction, hasLedgerEntries, postAgentTransferSold, reverseSource,
+  rollbackLedgerTransaction, watchLedgerPosts,
+} from '@/core/ledger/posting';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { computeAgentTransferSale, DEFAULT_AGENT_SPLIT_PCT } from '@/core/agent/economics';
+import { businessTimestamp } from '@/core/utils/business-date';
+import { openingCutoffDay } from '@/core/ledger/correction-dates';
+import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { isClientMode } from '@/core/bridge/client-mode';
@@ -28,7 +36,8 @@ import type { AgentTransfer } from '@/core/models/types';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 import {
   TransferActionRejected, agentAutoCustomer, normalizeTransferBatch, normalizeTransferCreate, planTransferCreate, transferConvertBlocker,
-  type TransferBatchForm, type TransferBillTo, type TransferCreateForm, type TransferHousePort,
+  transferCorrectionReason, transferEditBlocker, transferRemovePlan,
+  type TransferBatchForm, type TransferBillTo, type TransferCreateForm, type TransferEditPatch, type TransferHousePort,
 } from './transfer-rules';
 
 /** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
@@ -331,6 +340,206 @@ export function deleteTransferOnPrimary(transferId: string, expectedRevision?: n
   }
   const branchId = currentBranchId();
   return runOnPrimary(() => deleteTransferInHouse(transferId, branchId, expectedRevision), frischLesen);
+}
+
+// ── Owner 14.11.2026 — „Edit" und „Remove" eines Approval-Transfers ─────────────────────────────
+
+export interface TransferEdited { transferId: string; changed: string[]; settlementAmount?: number; saleRebooked: boolean }
+
+/** Sind Abrechnungszahlungen an diesem Transfer erfasst (Betrag oder Zeilen)? */
+function zahlungenErfasst(transferId: string, paidAmount: unknown): boolean {
+  return (Number(paidAmount) || 0) > 0.0005
+    || Number(query('SELECT COUNT(*) AS n FROM agent_settlement_payments WHERE transfer_id = ?', [transferId])[0]?.n) > 0;
+}
+
+/** Liegt ein Tag der Verkaufsbuchung in einer geschlossenen Periode (Eröffnung, eingereichtes/bezahltes VAT-Quartal)? */
+function verkaufsPeriodeGeschlossen(transferId: string, branchId: string): string | null {
+  const cutoff = openingCutoffDay();
+  const zu = closedVatQuarters(branchId);
+  for (const d of activeSourceDates('AGENT_TRANSFER_SOLD', transferId)) {
+    const tag = String(d).slice(0, 10);
+    if (tag < cutoff) return `the sale is booked on ${tag}, before the opening (${cutoff})`;
+    const q = nbrQuarterOfDate(tag);
+    if (q && zu.get(q.key)) return `the sale is booked on ${tag}, in a VAT quarter that is already filed or paid`;
+  }
+  return null;
+}
+
+/**
+ * „Edit" eines Transfers — EINE Folge für Primary und PC2 (`transfers.update`), in der Transaktion des Aufrufers:
+ *   • Preis, Modell und Anteil: vor dem Verkauf nur die Werte; nach dem Verkauf (ohne Rechnung, ohne Zahlung) wird der
+ *     Abrechnungsbetrag mit DERSELBEN Formel neu gerechnet (`computeAgentTransferSale`) und die Verkaufsbuchung an ihrem Tag
+ *     gegengebucht und mit dem neuen Betrag neu gebucht (Einstand und Kunde unverändert) — sichtbar im Hauptbuch und Protokoll;
+ *   • Kunde nur, solange das Stück draußen ist (sein Approval-Konto wird gefunden oder angelegt);
+ *   • Übergabetag (kein künftiger), Rückgabedatum, Mitarbeiter, Notiz.
+ * Gesperrt (vor jedem Schreiben, verständlich): Rechnung, Abrechnungszahlungen, geschlossene Periode — `transferEditBlocker`.
+ */
+export function editTransferInHouse(
+  transferId: string, patchIn: TransferEditPatch, branchId: string, opts: { expectedRevision?: number } = {},
+): TransferEdited {
+  const row = query(`SELECT id, revision, status, invoice_id, agent_id, product_id, agent_price, settlement_model, excess_split_pct,
+      actual_sale_price, settlement_amount, settlement_paid_amount, staff_id, transferred_at, return_by, notes, transfer_number
+    FROM agent_transfers WHERE id = ? AND branch_id = ?`, [transferId, branchId])[0];
+  if (!row) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch');
+  if (opts.expectedRevision !== undefined && Number(row.revision ?? 0) !== opts.expectedRevision) {
+    throw new TransferActionRejected('RECORD_CHANGED',
+      `this transfer changed since you opened it (you saw ${opts.expectedRevision}, it is now ${Number(row.revision ?? 0)}) — reopen it`);
+  }
+  const alt = {
+    agentPrice: Number(row.agent_price) || 0,
+    settlementModel: (String(row.settlement_model || 'full') === 'split' ? 'split' : 'full') as 'full' | 'split',
+    excessSplitPct: row.excess_split_pct === null || row.excess_split_pct === undefined ? null : Number(row.excess_split_pct),
+    staffId: row.staff_id ? String(row.staff_id) : null,
+    transferredAt: String(row.transferred_at ?? '').slice(0, 10),
+    returnBy: row.return_by ? String(row.return_by) : null,
+    notes: row.notes === null || row.notes === undefined ? null : String(row.notes),
+    customerId: String(query('SELECT customer_id FROM agents WHERE id = ?', [String(row.agent_id ?? '')])[0]?.customer_id ?? ''),
+  };
+  // Nur, was sich WIRKLICH ändert — ein unverändertes Feld ist keine Änderung (und keine Sperre).
+  const p: TransferEditPatch = { ...patchIn };
+  const gleich = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+  if (p.agentPrice !== undefined && Math.abs(p.agentPrice - alt.agentPrice) < 0.0005) delete p.agentPrice;
+  if (p.settlementModel !== undefined && p.settlementModel === alt.settlementModel) delete p.settlementModel;
+  if (p.excessSplitPct !== undefined && gleich(p.excessSplitPct, alt.excessSplitPct)) delete p.excessSplitPct;
+  if (p.staffId !== undefined && gleich(p.staffId, alt.staffId)) delete p.staffId;
+  if (p.transferredAt !== undefined && p.transferredAt === alt.transferredAt) delete p.transferredAt;
+  if (p.returnBy !== undefined && gleich(p.returnBy ? p.returnBy.slice(0, 10) : null, alt.returnBy ? alt.returnBy.slice(0, 10) : null)) delete p.returnBy;
+  if (p.notes !== undefined && gleich(p.notes || null, alt.notes || null)) delete p.notes;
+  if (p.customerId !== undefined && p.customerId === alt.customerId) delete p.customerId;
+  const changed = (Object.keys(p) as Array<keyof TransferEditPatch>).filter((k) => k !== 'acknowledgeBelowPrice');
+  if (changed.length === 0) return { transferId, changed: [], saleRebooked: false };
+
+  const status = String(row.status ?? '');
+  const blocker = transferEditBlocker({
+    status, invoiceId: row.invoice_id ? String(row.invoice_id) : null, hasPayments: zahlungenErfasst(transferId, row.settlement_paid_amount),
+  }, p);
+  if (blocker) throw new TransferActionRejected(blocker.code, blocker.message);
+  const port = houseTransferPort(branchId);
+  if (p.customerId !== undefined && !port.customerExists(p.customerId)) throw new TransferActionRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
+  if (p.staffId && !port.employeeExists(p.staffId)) throw new TransferActionRejected('EMPLOYEE_NOT_FOUND', 'no such active employee in this branch');
+
+  // Der wirksame neue Stand von Preis/Modell/Anteil.
+  const neu = {
+    agentPrice: p.agentPrice ?? alt.agentPrice,
+    settlementModel: p.settlementModel ?? alt.settlementModel,
+    excessSplitPct: (p.settlementModel ?? alt.settlementModel) === 'split'
+      ? (p.excessSplitPct ?? alt.excessSplitPct ?? DEFAULT_AGENT_SPLIT_PCT) : null,
+  };
+  const now = new Date().toISOString();
+  frischLesen();
+  const buchung = watchLedgerPosts('edit transfer');
+  const abgleich = watchSyncTracks('edit transfer');
+  let settlementAmount: number | undefined;
+  let saleRebooked = false;
+  const geld = p.agentPrice !== undefined || p.settlementModel !== undefined || p.excessSplitPct !== undefined;
+  if (geld && status === 'sold') {
+    const verkauf = Number(row.actual_sale_price) || 0;
+    const econ = computeAgentTransferSale({ ...neu, excessSplitPct: neu.excessSplitPct ?? undefined }, verkauf);
+    if (econ.belowPrice && !patchIn.acknowledgeBelowPrice) {
+      throw new TransferActionRejected('TRANSFER_BELOW_PRICE',
+        `the sale price ${verkauf} is below the new Our Price ${neu.agentPrice} — confirm it: we then receive only the sale amount, no split`);
+    }
+    settlementAmount = econ.ourSettlement;
+    if (Math.abs(settlementAmount - (Number(row.settlement_amount) || 0)) > 0.0005 && hasLedgerEntries('AGENT_TRANSFER_SOLD', transferId)) {
+      const zu = verkaufsPeriodeGeschlossen(transferId, branchId);
+      if (zu) throw new TransferActionRejected('TRANSFER_PERIOD_CLOSED', `${zu} — the booked sale is not changed any more`);
+      // Die lebende Verkaufsbuchung: Forderung (Kunde, Tag) und Wareneinsatz — sie bleiben, nur der Betrag ändert sich.
+      const beine = query(`SELECT e1.account, e1.direction, e1.amount, e1.counterparty_id, e1.occurred_at FROM ledger_entries e1
+          WHERE e1.source_module = 'AGENT_TRANSFER_SOLD' AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
+            AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)`, [transferId]);
+      const ar = beine.find((b) => b.account === 'ACCOUNTS_RECEIVABLE' && b.direction === 'DEBIT');
+      const cogs = beine.find((b) => b.account === 'COGS' && b.direction === 'DEBIT');
+      if (!ar) throw new TransferActionRejected('TRANSFER_SALE_UNREADABLE', 'the sale posting of this transfer has no receivable — nothing was changed');
+      reverseSource('AGENT_TRANSFER_SOLD', transferId, now, { mirrorOriginalDates: true });
+      postAgentTransferSold({ transferId, amount: settlementAmount, soldAt: String(ar.occurred_at), cost: Number(cogs?.amount ?? 0) },
+        String(ar.counterparty_id ?? ''));
+      saleRebooked = true;
+    }
+  }
+  const data: Partial<AgentTransfer> = {};
+  if (p.agentPrice !== undefined) data.agentPrice = neu.agentPrice;
+  if (p.settlementModel !== undefined || p.excessSplitPct !== undefined) {
+    data.settlementModel = neu.settlementModel;
+    data.excessSplitPct = (neu.excessSplitPct ?? null) as unknown as number;
+  }
+  if (settlementAmount !== undefined) data.settlementAmount = settlementAmount;
+  if (p.staffId !== undefined) data.staffId = (p.staffId ?? null) as unknown as string;
+  if (p.transferredAt !== undefined) data.transferredAt = businessTimestamp(p.transferredAt, now);
+  if (p.returnBy !== undefined) data.returnBy = (p.returnBy ?? null) as unknown as string;
+  if (p.notes !== undefined) data.notes = (p.notes ?? null) as unknown as string;
+  if (p.customerId !== undefined) {
+    useCustomerStore.getState().loadCustomers();
+    useAgentStore.getState().loadAgents();
+    data.agentId = useAgentStore.getState().findOrCreateAgentForCustomer(p.customerId).id;
+  }
+  useAgentStore.getState().updateTransfer(transferId, data);
+  const vorher: Record<string, unknown> = {}, nachher: Record<string, unknown> = {};
+  for (const k of changed) { vorher[k] = (alt as Record<string, unknown>)[k] ?? null; nachher[k] = (p as Record<string, unknown>)[k] ?? null; }
+  if (settlementAmount !== undefined) { vorher.settlementAmount = Number(row.settlement_amount) || 0; nachher.settlementAmount = settlementAmount; }
+  logAuditOrThrow({ module: 'Agent', entityType: 'agent_transfers', entityId: transferId, action: 'UPDATE', oldValue: vorher, newValue: { ...nachher, saleRebooked } });
+  buchung();
+  abgleich();
+  return { transferId, changed: changed as string[], ...(settlementAmount !== undefined ? { settlementAmount } : {}), saleRebooked };
+}
+
+/** „Edit" am Primary — exklusiv, EINE Klammer, erst danach durabel (dieselbe Folge wie `transfers.update`). */
+export function editTransferOnPrimary(transferId: string, patch: TransferEditPatch, expectedRevision?: number): Promise<TransferEdited> {
+  return amPrimary(() => editTransferInHouse(transferId, patch, currentBranchId(), { expectedRevision }));
+}
+
+export interface TransferRemoved { transferId: string; transferNumber: string; kind: 'deleted' | 'cancelled' }
+
+/**
+ * „Remove" eines Transfers (am Primary, wie jedes Löschen): `transferRemovePlan` entscheidet —
+ *   • nichts gebucht → löschen (Stück zurück, Nummer bleibt verbraucht, Protokoll mit Grund);
+ *   • verkauft → Storno (Gegenbuchung am Tag des Verkaufs, Stück zurück, Transfer bleibt „cancelled");
+ *   • Rechnung / Zahlungen → verständliches Nein mit dem Korrekturweg.
+ * Andere Transfers derselben Sammelübergabe bleiben unberührt (jeder Transfer ist eine eigene Zeile).
+ */
+export function removeTransferInHouse(transferId: string, branchId: string, reasonIn: unknown, expectedRevision?: number): TransferRemoved {
+  if (isClientMode()) {
+    throw new TransferActionRejected('TRANSFER_PRIMARY_ONLY', 'a transfer is removed on the main computer — this window has no business database');
+  }
+  const reason = transferCorrectionReason(reasonIn);
+  const row = query(`SELECT id, revision, status, invoice_id, settlement_paid_amount, stock_taken, transfer_number
+    FROM agent_transfers WHERE id = ? AND branch_id = ?`, [transferId, branchId])[0];
+  if (!row) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch — it may already be removed');
+  if (expectedRevision !== undefined && Number(row.revision ?? 0) !== expectedRevision) {
+    throw new TransferActionRejected('RECORD_CHANGED',
+      `this transfer changed since you opened it (you saw ${expectedRevision}, it is now ${Number(row.revision ?? 0)}) — reopen it`);
+  }
+  const plan = transferRemovePlan({
+    status: String(row.status ?? ''), invoiceId: row.invoice_id ? String(row.invoice_id) : null,
+    hasPayments: zahlungenErfasst(transferId, row.settlement_paid_amount), hasSalePosting: hasLedgerEntries('AGENT_TRANSFER_SOLD', transferId),
+  });
+  if ('code' in plan) throw new TransferActionRejected(plan.code, plan.message);
+  if (plan.kind === 'cancel') {
+    // Ein Altverkauf ohne Nachweis des Bestandsverbrauchs: das Stück ließe sich nicht genau zurücknehmen — nicht raten.
+    if (!(Number(row.stock_taken ?? 0) > 0)) {
+      throw new TransferActionRejected('TRANSFER_STOCK_UNKNOWN',
+        'this is an older sale without a stock record — it cannot be cancelled automatically. Correct it with the accountant.');
+    }
+    const zu = verkaufsPeriodeGeschlossen(transferId, branchId);
+    if (zu) throw new TransferActionRejected('TRANSFER_PERIOD_CLOSED', `${zu} — the sale is not cancelled any more`);
+  }
+  frischLesen();
+  const buchung = watchLedgerPosts('remove transfer');
+  const abgleich = watchSyncTracks('remove transfer');
+  if (plan.kind === 'cancel') useAgentStore.getState().cancelTransfer(transferId, reason);
+  else useAgentStore.getState().deleteTransfer(transferId, reason);
+  buchung();
+  abgleich();
+  return { transferId, transferNumber: String(row.transfer_number ?? ''), kind: plan.kind === 'cancel' ? 'cancelled' : 'deleted' };
+}
+
+/** „Remove" am Primary — exklusiv, EINE Klammer, erst danach durabel. */
+export function removeTransferOnPrimary(transferId: string, reason: string, expectedRevision?: number): Promise<TransferRemoved> {
+  if (isClientMode()) {
+    return Promise.reject(new TransferActionRejected('TRANSFER_PRIMARY_ONLY',
+      'a transfer is removed on the main computer — this window has no business database'));
+  }
+  const branchId = currentBranchId();
+  return runOnPrimary(() => removeTransferInHouse(transferId, branchId, reason, expectedRevision), frischLesen);
 }
 
 /** „Undo convert" am Primary — dieselbe Folge, EINE Klammer, erst danach durabel. */

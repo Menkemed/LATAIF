@@ -374,7 +374,10 @@ marker('CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED');
     'pages/orders/OrderDetail.tsx': [2, 2, 2], 'pages/repairs/RepairDetail.tsx': [1, 1, 1],
     'pages/production/ProductionPage.tsx': [1, 1, 1], 'pages/production/ProductionDetail.tsx': [1, 1, 1],
     'pages/consignments/ConsignmentDetail.tsx': [1, 1, 1], 'pages/agents/AgentList.tsx': [1, 1, 1],
-    'components/agents/TransferTable.tsx': [1, 1, 1], 'pages/agents/TransferDetail.tsx': [1, 1, 1],
+    // Owner 14.11.2026 — „Remove" (löschen/stornieren) liegt im gemeinsamen Fenster: Öffner + Bestätigung gesperrt, Riegel
+    // vor der Ausführung; die Detailseite öffnet es mit gesperrtem Knopf.
+    // (Gezählt werden argumentlose Aufrufe; die Knöpfe mit eigener Zusatzsperre prüft die Zeile nach der Schleife.)
+    'components/agents/TransferEditModal.tsx': [1, 1, 1], 'pages/agents/TransferDetail.tsx': [1, 0, 0],
     'pages/metals/MetalList.tsx': [1, 1, 1], 'pages/scrap-trades/ScrapTradeDetail.tsx': [1, 1, 1],
     'pages/expenses/ExpenseList.tsx': [3, 3, 3], 'pages/partners/PartnersPage.tsx': [2, 2, 2],
     'pages/debts/DebtsPage.tsx': [1, 1, 1], 'pages/employees/EmployeeList.tsx': [1, 1, 1],
@@ -389,6 +392,9 @@ marker('CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED');
     ok(np === props && nr === riegel, `DELETE ${f}: ${props} gesperrte Knöpfe, ${riegel} Riegel (${np}/${nr})`);
   }
   ok(einstiege === 28, `DELETE genau die 28 Löschknöpfe aus R6A (${einstiege})`);
+  ok(/\{\.\.\.primaryOnlyDeleteProps\(transfer\.status === 'cancelled'\)\}[^\n]*setEditOpen\('remove'\)/.test(codeOf(src('src/pages/agents/TransferDetail.tsx')))
+    && /\{\.\.\.primaryOnlyDeleteProps\(grund\.trim\(\)\.length < 3\)\}[^\n]*entfernenAusfuehren/.test(codeOf(src('src/components/agents/TransferEditModal.tsx'))),
+    'DELETE Transfer „Remove": der Öffner der Detailseite und die Bestätigung im Fenster sind am Client gesperrt');
   const doc = src('docs/central-ui-parity.md');
   const r6a = doc.slice(doc.indexOf('### Write-Gap-SSOT'), doc.indexOf('### Keine toten Knöpfe'));
   const e28 = r6a.split('\n').filter((l) => /^\| /.test(l)).map((l) => l.split('|').map((x) => x.trim())).filter((p) => p[5] === 'E' && /Löschen/.test(p[8] ?? ''));

@@ -6,7 +6,7 @@ import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FileText } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
-import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
+import { TransferEditModal } from '@/components/agents/TransferEditModal';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
@@ -22,10 +22,10 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import {
-  canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody, transferEditPatch,
+  canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody,
 } from '@/core/agents/transfer-rules';
 import {
-  canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, deleteTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+  canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
 import { productDisplayName } from '@/core/products/display-name';
 import { computeAgentTransferSale } from '@/core/agent/economics';
@@ -41,10 +41,12 @@ import { useListState } from '@/hooks/useListNav';
 // Sold-Transfer ohne Invoice = "unpaid" (Forderung steht aber noch nicht
 // formal in der Buchhaltung, erst Create Invoice macht den Eintrag sauber).
 // Mit Invoice leitet sich der Display-Status komplett aus dem Invoice-Zahlungsstand ab.
-type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
+type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned' | 'cancelled';
 
 function deriveTransferDisplayStatus(t: AgentTransfer, invoice?: Invoice): TransferDisplayStatus {
   if (t.status === 'returned') return 'returned';
+  // Owner 14.11.2026 — ein per „Remove" stornierter Verkauf bleibt als Beleg stehen.
+  if (t.status === 'cancelled') return 'cancelled';
   if (t.status === 'transferred') return 'transferred';
   if (t.invoiceId && invoice) {
     const paid = invoice.paidAmount || 0;
@@ -68,6 +70,7 @@ const STATUS_FILTERS: { value: '' | TransferDisplayStatus; label: string }[] = [
   { value: 'partial', label: 'Partially Paid' },
   { value: 'settled', label: 'Settled' },
   { value: 'returned', label: 'Returned' },
+  { value: 'cancelled', label: 'Cancelled' },
 ];
 
 interface TransferTableProps {
@@ -78,8 +81,7 @@ interface TransferTableProps {
 
 export function TransferTable({ transfers, showAgentColumn = true, emptyMessage }: TransferTableProps) {
   const navigate = useNavigate();
-  const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
-    updateTransfer } = useAgentStore();
+  const { agents, transfers: allTransfers, markTransferSold, markTransferReturned } = useAgentStore();
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Tabelle, zwei Anschluesse hinter jeder Handlung.
   const { loadTransfers } = useAgentStore();
   const w = useSharedWrites();
@@ -128,19 +130,6 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     useInvoiceStore.getState().loadInvoices();
   }
 
-  /** R4C.2 — Stammdaten des Transfers: Preis, Rueckgabedatum, Notiz. R5D.1 — auf beiden Seiten
-   *  derselbe Schreibsatz (`transferEditPatch`): genau diese drei Felder, Preis > 0. */
-  async function transferAendern(transferId: string, form: Partial<AgentTransfer>) {
-    const fassung = fassungVon(transferId, 'editing this transfer');
-    if (fassung === null) return false;
-    if (!await w.ok('transfers.update', {
-      local: () => { updateTransfer(transferId, transferEditPatch(form) as Partial<AgentTransfer>); return {}; },
-      remote: () => ({ id: transferId, expectedRevision: fassung, ...transferEditPatch(form) }),
-    })) return false;
-    loadTransfers();
-    return true;
-  }
-
   const { products } = useProductStore();
   const { customers } = useCustomerStore();
   const { invoices } = useInvoiceStore();
@@ -167,7 +156,6 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
 
   // Edit / History
   const [editTransfer, setEditTransfer] = useState<AgentTransfer | null>(null);
-  const [editTransferForm, setEditTransferForm] = useState<Partial<AgentTransfer>>({});
   const [historyTransferId, setHistoryTransferId] = useState<string | null>(null);
 
   const customerOptions = useMemo(() => customers.map(c => ({
@@ -484,7 +472,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                   </>
                 );
               })()}
-              <button data-transfer-edit onClick={() => { setEditTransfer(t); setEditTransferForm({ ...t }); }}
+              <button data-transfer-edit onClick={() => { w.clear(); setEditTransfer(t); }}
                 className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#0F0F10', borderRadius: 4, background: 'none' }}>
                 Edit
               </button>
@@ -634,40 +622,11 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
         </div>
       </Modal>
 
-      {/* Edit Transfer Modal */}
-      <Modal open={!!editTransfer} onClose={() => setEditTransfer(null)} title={`Edit Transfer — ${editTransfer?.transferNumber || ''}`} width={460}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <Input required label="OUR PRICE (BHD)" type="number" value={editTransferForm.agentPrice ?? ''}
-            onChange={e => setEditTransferForm({ ...editTransferForm, agentPrice: Number(e.target.value) || 0 })} />
-          <Input label="RETURN BY (DATE)" type="date" value={(editTransferForm.returnBy || '').split('T')[0]}
-            onChange={e => setEditTransferForm({ ...editTransferForm, returnBy: e.target.value })} />
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>
-            <textarea value={editTransferForm.notes || ''}
-              onChange={e => setEditTransferForm({ ...editTransferForm, notes: e.target.value })}
-              rows={3}
-              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
-          </div>
-          <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
-              if (blockDeleteOnClient()) return;
-              if (editTransfer && await window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
-                // AGENT-DELETE-ATOMICITY — EINE Klammer am Primary: Stück, Stornos, Zahlungen, Protokoll ganz oder gar nicht.
-                try { await deleteTransferOnPrimary(editTransfer.id, editTransfer.revision || undefined); } catch (e) { alert(e instanceof Error ? e.message : String(e)); return; }
-                setEditTransfer(null);
-              }
-            }}>Delete</Button>
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setEditTransfer(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => {
-                if (!editTransfer) return;
-                void transferAendern(editTransfer.id, editTransferForm)
-                  .then((ok) => { if (ok) setEditTransfer(null); });
-              }} disabled={w.busy} data-transfer-save>Save</Button>
-            </div>
-          </div>
-        </div>
-      </Modal>
+      {/* Owner 14.11.2026 — „Edit Transfer" und „Remove": EIN Fenster für Liste und Detailseite (TransferEditModal). */}
+      {editTransfer && (
+        <TransferEditModal transfer={editTransfer} onClose={() => setEditTransfer(null)}
+          onDone={() => { setEditTransfer(null); loadTransfers(); useInvoiceStore.getState().loadInvoices(); }} />
+      )}
 
       {/* Bulk Combined-Invoice Modal */}
       <Modal open={bulkModal} onClose={() => setBulkModal(false)} title="Create Combined Invoice" width={520}>

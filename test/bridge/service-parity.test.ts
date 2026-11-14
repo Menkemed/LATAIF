@@ -365,10 +365,10 @@ const REPAIR_COMPARE = [
 
 // ── 4) Der Feldsatz des Transfer-Aenderns ────────────────────────────────
 {
-  const detail = codeOf('src/pages/agents/TransferDetail.tsx');
-  const table = codeOf('src/components/agents/TransferTable.tsx');
-  // BEFUND: beide echten Bildschirme bearbeiten GENAU drei Felder.
-  for (const [name, text] of [['TransferDetail', detail], ['TransferTable', table]] as Array<[string, string]>) {
+  // Owner 14.11.2026 — Liste und Detailseite bearbeiten im gemeinsamen Fenster TransferEditModal (Preis, Modell/Anteil,
+  // Kunde, Datum, Mitarbeiter, Rückgabe, Notiz) — nie Artikel, Agent oder Mindestpreis.
+  const modal = codeOf('src/components/agents/TransferEditModal.tsx');
+  for (const [name, text] of [['TransferEditModal', modal]] as Array<[string, string]>) {
     const seg = text.slice(text.indexOf('Edit'), text.length);
     ok(/agentPrice/.test(seg) && /returnBy/.test(seg) && /notes/.test(seg),
       `SCOPE ${name} bearbeitet Preis, Rueckgabedatum und Notiz`);
@@ -379,18 +379,20 @@ const REPAIR_COMPARE = [
     ok(!/minimumPrice/.test(text), `SCOPE ${name} kennt kein Mindestpreisfeld`);
   }
 
-  // Also nimmt der Fernauftrag genau diese drei — und nichts sonst.
-  const allowed = ['agentPrice', 'returnBy', 'notes'];
-  for (const f of allowed) {
+  // Also nimmt der Fernauftrag genau die Felder der Maske — und nichts sonst (Owner 14.11.2026: dazu Modell, Anteil, Kunde,
+  // Übergabetag, Mitarbeiter; geprüft mit `transferEditPatch`).
+  const allowed: Array<[string, unknown]> = [['agentPrice', 600], ['returnBy', 'x'], ['notes', 'x'], ['settlementModel', 'split'],
+    ['excessSplitPct', 40], ['customerId', 'cust-1'], ['transferredAt', '2026-09-01'], ['staffId', 'emp-1']];
+  for (const [f, v] of allowed) {
     const body: Record<string, unknown> = { id: 't1', expectedRevision: 1 };
-    body[f] = f === 'agentPrice' ? 600 : 'x';
-    const parsed = cmd.parseTransferUpdate(body);
-    ok((parsed as Record<string, unknown>)[f] !== undefined, `SCOPE ${f} ist erlaubt`);
+    body[f] = v;
+    const parsed = cmd.parseTransferUpdate(body) as { patch?: Record<string, unknown> } & Record<string, unknown>;
+    ok(parsed[f] !== undefined || parsed.patch?.[f] !== undefined, `SCOPE ${f} ist erlaubt`);
   }
-  for (const f of ['productId', 'agentId', 'customerId', 'minimumPrice', 'status', 'soldAt',
+  for (const f of ['productId', 'agentId', 'minimumPrice', 'status', 'soldAt',
     'returnedAt', 'settledAt', 'actualSalePrice', 'commissionAmount', 'commissionRate',
-    'settlementAmount', 'settlementPaidAmount', 'settlementStatus', 'settlementModel',
-    'excessSplitPct', 'invoiceId', 'buyerInfo', 'transferNumber', 'branchId', 'staffId']) {
+    'settlementAmount', 'settlementPaidAmount', 'settlementStatus',
+    'invoiceId', 'buyerInfo', 'transferNumber', 'branchId']) {
     let threw = false;
     try { cmd.parseTransferUpdate({ id: 't1', expectedRevision: 1, [f]: 'x' }); } catch { threw = true; }
     ok(threw, `SCOPE ${f} wird abgewiesen — es ist lokal nicht editierbar`);

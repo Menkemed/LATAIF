@@ -95,6 +95,7 @@ import {
   postAgentTransferSoldReversed,
   hasLedgerEntries,
   hasReversalFor,
+  reverseSource,
 } from '@/core/ledger/posting';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
@@ -197,7 +198,13 @@ interface AgentStore {
   undoTransferInvoiceConvert: (transferId: string, branchId?: string) => TransferConvertUndone;
   // Plan §8 #5 — Audit-Trail der Settlement-Zahlungen.
   getSettlementPayments: (transferId: string) => Array<{ id: string; amount: number; method: string; paidAt: string; note?: string }>;
-  deleteTransfer: (id: string) => void;
+  /** Owner 14.11.2026 — `reason`: der Grund des „Remove" steht im Protokoll. */
+  deleteTransfer: (id: string, reason?: string) => void;
+  /**
+   * Owner 14.11.2026 — „Remove" eines VERKAUFTEN Transfers (ohne Rechnung, ohne Zahlung): der Verkauf wird an seinem Tag
+   * gegengebucht, das Stück kommt zurück ins Lager, der Transfer bleibt als „cancelled" stehen (Nummer, Protokoll).
+   */
+  cancelTransfer: (id: string, reason: string) => void;
 }
 
 function rowToAgent(row: Record<string, unknown>): Agent {
@@ -397,6 +404,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       settlementStatus: 'settlement_status',
       notes: 'notes', soldAt: 'sold_at', returnedAt: 'returned_at', settledAt: 'settled_at',
       staffId: 'staff_id',
+      // Owner 14.11.2026 — „Edit": Kunde (→ sein Approval-Konto) und Übergabetag korrigieren (`editTransferInHouse`).
+      agentId: 'agent_id', transferredAt: 'transferred_at',
       // CENTRAL-C3H — gemessen: diese Zeile fehlte. `convertTransferToInvoice` ruft
       // `updateTransfer(id, { invoiceId })`, und ohne die Abbildung fiel das Feld still weg
       // (`fields.length === 0` → kein UPDATE). Der Transfer trug danach KEINEN Rechnungsbezug,
@@ -631,7 +640,32 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     } catch { return []; }
   },
 
-  deleteTransfer: (id) => {
+  cancelTransfer: (id, reason) => {
+    const transfer = get().getTransfer(id);
+    if (!transfer) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'No such transfer. Nothing was changed.');
+    const live = query('SELECT status, invoice_id FROM agent_transfers WHERE id = ?', [id])[0];
+    if (String(live?.invoice_id ?? '') !== '') {
+      throw new TransferActionRejected('TRANSFER_INVOICED', 'This transfer is on an invoice — undo the conversion first. Nothing was changed.');
+    }
+    const now = new Date().toISOString();
+    // Wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht).
+    const target = agentReturnTarget(transfer.productId);
+    // Der Verkauf wird an SEINEM Tag gegengebucht (Forderung, Erlös, Wareneinsatz) — streng, ohne `safePost`.
+    const verkauf = hasLedgerEntries('AGENT_TRANSFER_SOLD', id);
+    if (verkauf) reverseSource('AGENT_TRANSFER_SOLD', id, now, { mirrorOriginalDates: true });
+    // Das Stück kommt zurück — genau sein Verbrauch, einmal (Los oder Menge), samt Eigentum und Status.
+    giveBackAgentStock(id, transfer.productId, now, target);
+    get().updateTransfer(id, { status: 'cancelled' });
+    logAuditOrThrow({
+      module: 'Agent', entityType: 'agent_transfers', entityId: id, action: 'UPDATE', field: 'status',
+      oldValue: { status: String(live?.status ?? transfer.status), settlementAmount: transfer.settlementAmount ?? null },
+      newValue: { status: 'cancelled', saleReversed: verkauf, stockReturned: true, reason },
+    });
+    saveDatabase();
+    get().loadTransfers();
+  },
+
+  deleteTransfer: (id, reason) => {
     // AGENT-DELETE-ATOMICITY — EIN Vorgang in der Transaktion des Aufrufers (`deleteTransferOnPrimary`): jeder
     // Schritt streng, jeder Fehler wirft, der Aufrufer nimmt ALLES zurück (Stück, Buchungen, Zahlungen, Protokoll,
     // Sync). Vorher liefen die Stornos in `safePost` ohne Klammer: ein gescheiterter Storno stand nur im Log, das
@@ -690,6 +724,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       oldValue: {
         transferNumber: transfer.transferNumber, status: transfer.status, productId: transfer.productId,
         stockReturned: target !== null, saleReversed, settlementPayments: payIds.length, paymentsReversed,
+        ...(reason ? { reason } : {}),
       },
     });
     saveDatabase();

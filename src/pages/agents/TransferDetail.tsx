@@ -10,7 +10,7 @@ import { ArrowLeft, FileText, History as HistoryIcon, Trash2 } from 'lucide-reac
 import { useGoBack } from '@/hooks/useGoBack';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
-import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
+import { primaryOnlyDeleteProps } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -27,16 +27,19 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
-import { canConvertTransfer, transferBillTo, transferConvertBody, transferEditPatch } from '@/core/agents/transfer-rules';
+import { canConvertTransfer, transferBillTo, transferConvertBody } from '@/core/agents/transfer-rules';
 import { WriteError } from '@/components/shared/WriteError';
+import { TransferEditModal } from '@/components/agents/TransferEditModal';
 import {
-  canUndoTransferConvert, convertTransferOnPrimary, deleteTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+  canUndoTransferConvert, convertTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
 
-type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
+type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned' | 'cancelled';
 
 function deriveTransferDisplayStatus(t: AgentTransfer, invoice?: Invoice): TransferDisplayStatus {
   if (t.status === 'returned') return 'returned';
+  // Owner 14.11.2026 — ein per „Remove" stornierter Verkauf bleibt als Beleg stehen.
+  if (t.status === 'cancelled') return 'cancelled';
   if (t.status === 'transferred') return 'transferred';
   if (t.invoiceId && invoice) {
     const paid = invoice.paidAmount || 0;
@@ -57,7 +60,6 @@ export function TransferDetail() {
   const {
     agents, transfers, loadAgents, loadTransfers,
     markTransferSold, markTransferReturned,
-    updateTransfer,
   } = useAgentStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -90,10 +92,9 @@ export function TransferDetail() {
   const [convertCustomerId, setConvertCustomerId] = useState('');
   const [convertMode, setConvertMode] = useState<'existing' | 'auto'>('existing');
   const [convertError, setConvertError] = useState('');
-  const [editOpen, setEditOpen] = useState(false);
-  const [editForm, setEditForm] = useState<Partial<AgentTransfer>>({});
+  // Owner 14.11.2026 — „Edit" und „Remove" im gemeinsamen Fenster (TransferEditModal); `'remove'` öffnet es dort.
+  const [editOpen, setEditOpen] = useState<false | 'edit' | 'remove'>(false);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!transfer) {
     return (
@@ -202,17 +203,6 @@ export function TransferDetail() {
     })) return;
     loadTransfers(); loadInvoices(); loadProducts();
   }
-  async function speichern() {
-    const t = transfer!;
-    const fassung = fassungVon('editing this transfer');
-    if (fassung === null) return;
-    if (!await w.ok('transfers.update', {
-      local: () => { updateTransfer(t.id, transferEditPatch(editForm) as Partial<AgentTransfer>); return {}; },
-      remote: () => ({ id: t.id, expectedRevision: fassung, ...transferEditPatch(editForm) }),
-    })) return;
-    setEditOpen(false);
-    loadTransfers();
-  }
 
   const formattedTransferred = (transfer.transferredAt || transfer.createdAt || '').split('T')[0];
   const formattedSold = transfer.soldAt ? transfer.soldAt.split('T')[0] : '';
@@ -303,13 +293,14 @@ export function TransferDetail() {
                 )}
               </>
             )}
-            <Button variant="ghost" onClick={() => { w.clear(); setEditForm({ ...transfer }); setEditOpen(true); }}
+            <Button variant="ghost" onClick={() => { w.clear(); setEditOpen('edit'); }}
               data-transfer-detail-edit>
               Edit
             </Button>
             <div style={{ flex: 1 }} />
-            <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>
-              <Trash2 size={14} color="#DC2626" /> <span style={{ color: '#DC2626' }}>Delete</span>
+            <Button variant="ghost" {...primaryOnlyDeleteProps(transfer.status === 'cancelled')} onClick={() => { w.clear(); setEditOpen('remove'); }}
+              data-transfer-detail-remove>
+              <Trash2 size={14} color="#DC2626" /> <span style={{ color: '#DC2626' }}>Remove</span>
             </Button>
           </div>
         </Card>
@@ -558,44 +549,16 @@ export function TransferDetail() {
         </div>
       </Modal>
 
-      {/* Edit Modal */}
-      <Modal open={editOpen} onClose={() => setEditOpen(false)} title={`Edit Transfer — ${transfer.transferNumber}`} width={460}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <WriteError text={w.fehler} />
-          <Input required label="OUR PRICE (BHD)" type="number" value={editForm.agentPrice ?? ''}
-            onChange={e => setEditForm({ ...editForm, agentPrice: Number(e.target.value) || 0 })} />
-          <Input label="RETURN BY (DATE)" type="date" value={(editForm.returnBy || '').split('T')[0]}
-            onChange={e => setEditForm({ ...editForm, returnBy: e.target.value })} />
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES</span>
-            <textarea value={editForm.notes || ''}
-              onChange={e => setEditForm({ ...editForm, notes: e.target.value })}
-              rows={3}
-              style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
-          </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => void speichern()} disabled={w.busy} data-transfer-save>Save</Button>
-          </div>
-        </div>
-      </Modal>
-
-      {/* Delete Confirm */}
-      <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Transfer" width={380}>
-        <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Delete transfer <strong>{transfer.transferNumber}</strong>? This action cannot be undone.
-        </p>
-        <div className="flex justify-end gap-3">
-          <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-          <Button variant="danger" onClick={async () => {
-            if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-            // AGENT-DELETE-ATOMICITY — EINE Klammer am Primary: Stück, Stornos, Zahlungen, Protokoll ganz oder gar nicht.
-            try { await deleteTransferOnPrimary(transfer.id, transfer.revision || undefined); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
-            setConfirmDelete(false);
-            goBack();
-          }}>Delete</Button>
-        </div>
-      </Modal>
+      {/* Owner 14.11.2026 — „Edit Transfer" und „Remove": dasselbe Fenster wie in der Liste. Gelöscht → zurück zur Liste;
+          storniert → der Transfer bleibt hier als „Cancelled" stehen. */}
+      {editOpen && (
+        <TransferEditModal transfer={transfer} startWithRemove={editOpen === 'remove'} onClose={() => setEditOpen(false)}
+          onDone={(kind) => {
+            setEditOpen(false);
+            loadTransfers(); loadProducts(); loadInvoices();
+            if (kind === 'deleted') goBack();
+          }} />
+      )}
 
       {/* History */}
       <HistoryDrawer
