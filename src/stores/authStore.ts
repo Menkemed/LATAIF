@@ -124,6 +124,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       try { window.location.reload(); } catch { /* kein Fenster, z. B. im Test */ }
       return;
     }
+    // COLLECTIONS-S1 — die Kartenbilder der Sitzung aus dem Arbeitsspeicher freigeben.
+    void import('@/core/media/card-image-cache')
+      .then((c) => c.clearSharedCardImageCache())
+      .catch(() => { /* nichts zu leeren */ });
     // MOBILE-04B2A13 — stop the bounded drain poller on logout (no polling/claim without a session).
     void import('@/core/media/mobile-upload-wiring')
       .then((w) => w.stopMobileDrainPoller())

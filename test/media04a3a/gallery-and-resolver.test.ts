@@ -111,7 +111,9 @@ class FakeGateway implements MediaCommandGateway {
   async abortStockImage(i: AbortInput): Promise<AbortResult> {
     return { ingest_request_id: i.ingestRequestId, state: 'aborted' };
   }
+  reads = 0;
   async readVerifiedMedia(i: ReadVerifiedInput): Promise<MediaBytes> {
+    this.reads += 1;
     if (this.readVerifiedShouldThrow) throw new Error(this.readVerifiedShouldThrow);
     const f = this.files.get(`${i.tenantScope}::${i.hash}`);
     if (!f) throw new Error('MEDIA_FILE_MISSING');
@@ -586,6 +588,34 @@ async function main(): Promise<void> {
     db.run(`UPDATE products SET images = '["data:a","data:b"]' WHERE id='p2'`);
     const rl = await resolver.resolvePrimaryProductMedia('p2');
     ok(rl.kind === 'legacy' && rl.items.length === 1 && rl.items[0] === 'data:a', 'legacy primary = images[0]');
+  }
+
+  // ── COLLECTIONS-S1 galleryFingerprint: byte-free, follows every gallery change ──
+  {
+    const { db, gw, coord, resolver } = await fresh(SQL);
+
+    ok(resolver.galleryFingerprint('p1') === 'none', 'fingerprint: no gallery → none');
+    const a0 = await append(coord, gw, 0);
+    const f1 = resolver.galleryFingerprint('p1');
+    ok(f1.startsWith('media:'), `fingerprint: media gallery → media:… (${f1.slice(0, 20)})`);
+    ok(resolver.galleryFingerprint('p1') === f1, 'fingerprint: stable without change');
+    const a1 = await append(coord, gw, 1);
+    const f2 = resolver.galleryFingerprint('p1');
+    ok(f2 !== f1, 'fingerprint: append (no updated_at) changes it');
+    const rp = img(5); gw.preset('t1', 'fp-rep', rp);
+    await coord.replace({ ...input({ ingestRequestId: 'fp-rep', requestHash: rp.reqHash }), previousLinkId: a0.linkId });
+    const f3 = resolver.galleryFingerprint('p1');
+    ok(f3 !== f2, 'fingerprint: replace of the primary changes it');
+    coord.remove({ tenantId: 't1', linkId: a1.linkId });
+    const f4 = resolver.galleryFingerprint('p1');
+    ok(f4 !== f3 && f4.startsWith('media:'), 'fingerprint: remove changes it');
+    { const before = gw.reads; resolver.galleryFingerprint('p1'); ok(gw.reads === before, 'fingerprint reads no bytes'); }
+    const r = await resolver.resolvePrimaryProductMedia('p1');
+    ok(r.kind === 'media' && resolver.galleryFingerprint('p1') === f4, 'fingerprint unchanged by a resolve');
+    db.run(`UPDATE products SET images = '["data:x"]' WHERE id='p1'`);
+    ok(resolver.galleryFingerprint('p1') === 'legacy', 'fingerprint: non-empty legacy column → legacy');
+    db.run(`UPDATE products SET images = 'not json' WHERE id='p1'`);
+    ok(resolver.galleryFingerprint('p1').startsWith('legacy_format_error:'), 'fingerprint: malformed legacy → its own value');
   }
 
   console.log(`\nMEDIA-04A-3A-R1 gallery+resolver: ${PASS}/${PASS + FAIL} checks passed`);

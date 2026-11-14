@@ -162,12 +162,44 @@ export class ProductMediaResolver {
    *   4. Nothing at all → `none`.
    */
   async resolveProductMedia(productId: string): Promise<ProductMediaResolution> {
-    const db = this.dbProvider();
+    // The whole decision runs synchronously BEFORE the first byte read, so the
+    // gallery it reads is the one `galleryFingerprint` would name at that instant.
+    const decided = this.decide(this.dbProvider(), productId);
+    if (decided.kind === 'final') return decided.resolution;
+    return this.readGallery(decided.active);
+  }
+
+  /**
+   * COLLECTIONS-S1 — the identity of what `resolveProductMedia` shows, WITHOUT
+   * reading a single byte: the same decision, then the active gallery's ids,
+   * hashes and order. Equal fingerprint ⇒ the resolve would return the same
+   * images (they are content-addressed), so a card may keep its cached copy.
+   * Any non-media outcome gets its own fingerprint, so it never matches a
+   * cached image.
+   */
+  galleryFingerprint(productId: string): string {
+    const decided = this.decide(this.dbProvider(), productId);
+    if (decided.kind === 'final') {
+      const r = decided.resolution;
+      return r.kind === 'legacy' || r.kind === 'none' ? r.kind : `${r.kind}:${'code' in r ? r.code : ''}`;
+    }
+    return 'media:' + decided.active.map((row) => [
+      row.link_id, row.media_id, row.sort_order, row.is_primary,
+      row.stored_blob_hash, row.extension, row.mime_type, row.byte_size,
+    ].map((v) => (v == null ? '' : String(v))).join(',')).join('|');
+  }
+
+  /** The decision order of `resolveProductMedia` (see there), byte-free. */
+  private decide(
+    db: RawDb,
+    productId: string,
+  ): { kind: 'final'; resolution: ProductMediaResolution } | { kind: 'read'; active: Array<Record<string, unknown>> } {
+    const final = (resolution: ProductMediaResolution) => ({ kind: 'final' as const, resolution });
 
     // Parse legacy up front — it is the authority on "cutover finished?".
     const legacyRaw = this.legacyImagesValue(db, productId);
     const legacy = parseLegacyImages(legacyRaw);
-    if (!legacy.ok) return { kind: 'legacy_format_error', code: legacy.code };
+    if (!legacy.ok) return final({ kind: 'legacy_format_error', code: legacy.code });
 
     const active = this.activeGallery(db, productId);
 
@@ -181,18 +213,18 @@ export class ProductMediaResolver {
     // partial. Legacy-mid-cutover keeps its full legacy column (handled below).
     if (legacy.items.length === 0) {
       const pend = classifyPendingIngest(this.nonTerminalIntents(db, productId));
-      if (pend.kind === 'conflict') return { kind: 'conflict', code: pend.code };
-      if (pend.kind === 'create_pending') return { kind: 'pending', code: 'MEDIA_BATCH_IN_PROGRESS' };
+      if (pend.kind === 'conflict') return final({ kind: 'conflict', code: pend.code });
+      if (pend.kind === 'create_pending') return final({ kind: 'pending', code: 'MEDIA_BATCH_IN_PROGRESS' });
     }
 
     // ── No active links ────────────────────────────────────────────────────
     if (active.length === 0) {
       // A retired link is proof the gallery was deliberately emptied → `none`,
       // even if a legacy value lingers: a deleted image never resurrects.
-      if (this.hasLinkHistory(db, productId)) return { kind: 'none' };
+      if (this.hasLinkHistory(db, productId)) return final({ kind: 'none' });
       // Never migrated → the legacy column is authoritative.
-      if (legacy.items.length > 0) return { kind: 'legacy', items: legacy.items };
-      return { kind: 'none' };
+      if (legacy.items.length > 0) return final({ kind: 'legacy', items: legacy.items });
+      return final({ kind: 'none' });
     }
 
     // ── Active links present ───────────────────────────────────────────────
@@ -201,16 +233,20 @@ export class ProductMediaResolver {
     // partial media gallery must never show. Only the durable clear of the
     // column flips visibility to the new gallery.
     if (legacy.items.length > 0) {
-      return { kind: 'legacy', items: legacy.items };
+      return final({ kind: 'legacy', items: legacy.items });
     }
 
-    {
-      // Migrated (legacy cleared) with active links → the media gallery.
-      // Gallery invariants — shared with the coordinator so both sides judge
-      // identically. Never pick one arbitrarily via LIMIT 1.
-      const issue = inspectGallery(active);
-      if (issue) return { kind: 'conflict', code: issue };
+    // Migrated (legacy cleared) with active links → the media gallery.
+    // Gallery invariants — shared with the coordinator so both sides judge
+    // identically. Never pick one arbitrarily via LIMIT 1.
+    const issue = inspectGallery(active);
+    if (issue) return final({ kind: 'conflict', code: issue });
+    return { kind: 'read', active };
+  }
 
+  /** Verified-read every item of a decided media gallery (one failure fails all). */
+  private async readGallery(active: Array<Record<string, unknown>>): Promise<ProductMediaResolution> {
+    {
       const items: ResolvedMediaItem[] = [];
       for (const row of active) {
         const mediaId = String(row.media_id);

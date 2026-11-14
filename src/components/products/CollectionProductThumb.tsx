@@ -9,14 +9,17 @@
 // Performance: a product whose legacy `images` column is non-empty is painted
 // directly (that value is the resolver's own step-1 answer), so the hook is
 // mounted ONLY for products with an empty legacy column — the media-pipeline
-// products that actually need a resolve. The hook owns the Object-URL lifecycle
-// and revokes on unmount (card removal / filter change), so nothing leaks.
+// products that actually need a resolve. COLLECTIONS-S1/S2: that hook keeps only
+// the card image in a bounded RAM cache (`core/media/card-image-cache`, revoked on
+// eviction/logout/scope change, never under a card showing it) and resolves only
+// once the card is near the viewport.
 // ════════════════════════════════════════════════════════════════════════════
 
 import type { CSSProperties } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { Package } from 'lucide-react';
-import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
+import { useCollectionCardImage } from '@/hooks/useCollectionCardImage';
+import { useNearViewport } from '@/hooks/useNearViewport';
 import { decideCollectionThumb, planPendingRetry } from '@/core/media/collection-thumb';
 
 interface ThumbProps {
@@ -37,7 +40,7 @@ export function CollectionProductThumb(props: ThumbProps) {
   // Fast path: a non-empty legacy column is authoritative (resolver step 1) and
   // shown directly — no resolve, no gateway read for the legacy catalog.
   if (legacyFirst) {
-    return <img src={legacyFirst} alt="" style={props.imgStyle ?? DEFAULT_IMG} />;
+    return <img src={legacyFirst} alt="" loading="lazy" decoding="async" style={props.imgStyle ?? DEFAULT_IMG} />;
   }
   return <ResolvedThumb {...props} />;
 }
@@ -58,10 +61,15 @@ function ResolvedThumb(props: ThumbProps) {
   const [nonce, setNonce] = useState(0);
   const [pendingExhausted, setPendingExhausted] = useState(false);
   const attemptsRef = useRef(0);
-  // `enabled = hasAuthKey`: with no authorised tenant/branch the hook stays idle
-  // (and still owns teardown), so we fall through to the placeholder — never a
-  // cross-scope read.
-  const state = useProductMediaPresentation(product.id, tenantId, branchId, hasAuthKey, nonce);
+  // COLLECTIONS-S2 — the card resolves only once it is visible or about to be
+  // (shared IntersectionObserver); until then it shows the neutral skeleton.
+  const [el, setEl] = useState<Element | null>(null);
+  const near = useNearViewport(el);
+  // COLLECTIONS-S1 — a card image already loaded this session comes from the RAM
+  // cache at once; the hook then only re-checks the gallery fingerprint.
+  // `enabled = hasAuthKey`: with no authorised tenant/branch the hook stays idle,
+  // so we fall through to the placeholder — never a cross-scope read.
+  const state = useCollectionCardImage(product.id, tenantId, branchId, hasAuthKey, near, nonce);
 
   // A new resolve key is a brand-new retry budget (the previous chain's timer is
   // torn down by the effect below, whose deps also change).
@@ -88,13 +96,14 @@ function ResolvedThumb(props: ThumbProps) {
   const decision = decideCollectionThumb({ legacyFirst: undefined, state, hasAuthKey, pendingExhausted });
 
   if (decision.kind === 'image') {
-    return <img src={decision.src} alt="" style={imgStyle ?? DEFAULT_IMG} />;
+    return <img ref={setEl} src={decision.src} alt="" decoding="async" style={imgStyle ?? DEFAULT_IMG} />;
   }
   if (decision.kind === 'skeleton') {
     // A resolve is genuinely in flight — show a neutral skeleton, never the
     // empty placeholder yet (mirrors ProductDetail's mediaResolving skeleton).
     return (
       <div
+        ref={setEl}
         aria-hidden
         style={{ width: iconSize, height: iconSize, borderRadius: 6, background: 'rgba(107,114,128,0.15)' }}
       />
