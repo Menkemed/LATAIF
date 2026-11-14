@@ -32,17 +32,30 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
-import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '@/core/agents/transfer-rules';
-import { createTransferOnPrimary } from '@/core/agents/transfer-house';
+import {
+  TRANSFER_BATCH_MAX, TransferActionRejected, clampTransferSplitPct, isTransferableStock, normalizeTransferBatch,
+  transferBatchBody, transferBatchItemTerms, transferCreateBody, type TransferBatchForm,
+} from '@/core/agents/transfer-rules';
+import { createTransferOnPrimary, createTransfersOnPrimary } from '@/core/agents/transfer-house';
 import { saveAgentUpdate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName } from '@/core/products/display-name';
 import { useListState } from '@/hooks/useListNav';
 
 
+/** Owner 14.11.2026 — ein gewähltes Stück der Mehrfachauswahl: eigener Preis, auf Wunsch eigenes Modell / eigener Anteil. */
+interface AuswahlStueck {
+  productId: string;
+  /** Text wie im Feld (vorbelegt mit dem geplanten Verkaufspreis). */
+  ourPrice: string;
+  /** Leer = das gemeinsame Modell. */
+  settlementModel?: 'full' | 'split';
+  /** Leer = der gemeinsame Anteil. */
+  excessSplitPct?: number;
+}
+
+/** Die gemeinsamen Angaben der Maske (Kunde, Daten, Mitarbeiter, Notiz, Modell); Stück und Preis stehen je Auswahl. */
 interface NewTransferForm {
   customerId?: string;
-  productId?: string;
-  ourPrice?: number;
   returnBy?: string;
   /** BUSINESS-DATE — Tag der Übergabe (leer = heute). */
   transferredAt?: string;
@@ -72,6 +85,8 @@ export function AgentList() {
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [tab, setTab] = useListState<'agents' | 'transfers'>('tab', 'agents');
   const [transferForm, setTransferForm] = useState<NewTransferForm>({});
+  // Owner 14.11.2026 — Mehrfachauswahl: die gewählten Stücke in der Reihenfolge des Ankreuzens (bleiben über die Suche hinweg).
+  const [auswahl, setAuswahl] = useState<AuswahlStueck[]>([]);
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});
   const [agentFehler, setAgentFehler] = useState('');
@@ -131,19 +146,59 @@ export function AgentList() {
     return availableProducts.filter(p => productSearchText(p).includes(q));
   }, [availableProducts, transferSearch]);
 
-  async function handleCreateTransfer() {
-    if (!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice) return;
-    // Die Werte der Maske so, wie sie sind: Modell (sonst „full") und Anteil (bei „split", sonst 50)
-    // setzt DIESELBE Regel auf beiden Seiten (`normalizeTransferCreate`).
-    const form = { ...transferForm };
-    const r = await w.save('transfers.create', {
-      local: () => createTransferOnPrimary(form),
-      remote: () => transferCreateBody(form),
+  // Owner 14.11.2026 — ein Stück an- oder abwählen (höchstens TRANSFER_BATCH_MAX); der Preis ist mit dem geplanten
+  // Verkaufspreis vorbelegt, wie bisher beim Einzeltransfer.
+  function auswahlUmschalten(p: { id: string; plannedSalePrice?: number; purchasePrice?: number }) {
+    setAuswahl((a) => {
+      if (a.some((x) => x.productId === p.id)) return a.filter((x) => x.productId !== p.id);
+      if (a.length >= TRANSFER_BATCH_MAX) return a;
+      const preis = p.plannedSalePrice || p.purchasePrice;
+      return [...a, { productId: p.id, ourPrice: preis ? String(preis) : '' }];
     });
+  }
+  const auswahlAendern = (id: string, patch: Partial<AuswahlStueck>) =>
+    setAuswahl((a) => a.map((x) => (x.productId === id ? { ...x, ...patch } : x)));
+
+  // Die Mehrfachauswahl in der Form der geteilten Regel — dieselbe Prüfung wie am Primary und fern (`normalizeTransferBatch`).
+  const batchForm: TransferBatchForm = {
+    customerId: transferForm.customerId, returnBy: transferForm.returnBy, transferredAt: transferForm.transferredAt,
+    notes: transferForm.notes, staffId: transferForm.staffId,
+    settlementModel: transferForm.settlementModel, excessSplitPct: transferForm.excessSplitPct,
+    items: auswahl.map((x) => ({
+      productId: x.productId, ourPrice: Number(x.ourPrice) || undefined,
+      ...(x.settlementModel ? { settlementModel: x.settlementModel } : {}),
+      ...(x.excessSplitPct !== undefined ? { excessSplitPct: x.excessSplitPct } : {}),
+    })),
+  };
+  const auswahlProblem = ((): string | null => {
+    if (auswahl.length === 0) return null;
+    try { normalizeTransferBatch({ ...batchForm, customerId: batchForm.customerId || 'pending' }); return null; }
+    catch (e) { return e instanceof TransferActionRejected ? e.message : String(e); }
+  })();
+
+  async function handleCreateTransfer() {
+    if (!transferForm.customerId || auswahl.length === 0 || auswahlProblem) return;
+    // Ein Stück: der bisherige Einzelauftrag (auch ein älterer Primary versteht ihn). Mehrere: EIN Auftrag mit Artikelliste —
+    // am Primary in EINER Transaktion, alle oder keiner. Modell und Anteil setzt DIESELBE Regel auf beiden Seiten.
+    let r;
+    if (auswahl.length === 1) {
+      const [x] = batchForm.items!;
+      const form = { ...transferForm, productId: x.productId, ourPrice: x.ourPrice, ...transferBatchItemTerms(transferForm, x) };
+      r = await w.save('transfers.create', {
+        local: () => createTransferOnPrimary(form),
+        remote: () => transferCreateBody(form),
+      });
+    } else {
+      r = await w.save('transfers.create', {
+        local: () => createTransfersOnPrimary(batchForm),
+        remote: () => transferBatchBody(batchForm),
+      });
+    }
     if (r.kind !== 'ok') return;
     loadTransfers(); loadAgents(); loadProducts();
     setShowNewTransfer(false);
     setTransferForm({});
+    setAuswahl([]);
   }
 
   return (
@@ -295,7 +350,7 @@ export function AgentList() {
       {/* New Transfer Modal — vereinfachter Approval-Flow (User-Spec):
           Customer direkt wählen oder neu anlegen. Approval-Account wird
           automatisch beim Speichern erzeugt/aktualisiert. */}
-      <Modal open={showNewTransfer} onClose={() => setShowNewTransfer(false)} title="New Transfer" width={520}>
+      <Modal open={showNewTransfer} onClose={() => setShowNewTransfer(false)} title="New Transfer" width={620}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <WriteError text={w.fehler} />
           {/* Customer Select + New Client */}
@@ -322,9 +377,9 @@ export function AgentList() {
           {/* Product Select — mit Suche + Hover-Preview-Card (2026-05-18) */}
           <div>
             <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-              <span className="text-overline">ITEM</span>
-              <span style={{ fontSize: 10, color: '#9CA3AF' }}>
-                {filteredTransferProducts.length} / {availableProducts.length}
+              <span className="text-overline">ITEMS</span>
+              <span style={{ fontSize: 10, color: '#9CA3AF' }} data-transfer-selected-count>
+                {auswahl.length} selected · {filteredTransferProducts.length} / {availableProducts.length}
               </span>
             </div>
             <div className="flex items-center gap-2" style={{
@@ -362,21 +417,25 @@ export function AgentList() {
                 </div>
               ) : filteredTransferProducts.map(p => {
                 const res = productReservations.get(p.id);
+                const gewaehlt = auswahl.some((x) => x.productId === p.id);
+                const voll = !gewaehlt && auswahl.length >= TRANSFER_BATCH_MAX;
                 return (
                   <div
                     key={p.id}
                     data-transfer-product={p.id}
-                    onClick={() => setTransferForm({ ...transferForm, productId: p.id, ourPrice: p.plannedSalePrice || p.purchasePrice })}
+                    onClick={() => { if (!voll) auswahlUmschalten(p); }}
                     onMouseEnter={e => {
                       setTransferHovered({ id: p.id, rect: (e.currentTarget as HTMLDivElement).getBoundingClientRect() });
                     }}
                     className="cursor-pointer rounded transition-colors"
                     style={{
-                      padding: '8px 10px', marginBottom: 2,
-                      background: transferForm.productId === p.id ? 'rgba(15,15,16,0.06)' : 'transparent',
-                      border: `1px solid ${transferForm.productId === p.id ? '#0F0F10' : 'transparent'}`,
+                      padding: '8px 10px', marginBottom: 2, opacity: voll ? 0.5 : 1,
+                      background: gewaehlt ? 'rgba(15,15,16,0.06)' : 'transparent',
+                      border: `1px solid ${gewaehlt ? '#0F0F10' : 'transparent'}`,
                     }}>
                     <div className="flex justify-between items-center">
+                      <input type="checkbox" checked={gewaehlt} readOnly tabIndex={-1} data-transfer-product-check={p.id}
+                        style={{ width: 16, height: 16, marginRight: 10, accentColor: '#0F0F10', pointerEvents: 'none', flexShrink: 0 }} />
                       <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
                         <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {productDisplayName(p)}
@@ -402,13 +461,10 @@ export function AgentList() {
             </div>
           </div>
 
-          <Input required label="OUR PRICE (BHD)" type="number" placeholder="Amount we want to receive"
-            value={transferForm.ourPrice || ''}
-            onChange={e => setTransferForm({ ...transferForm, ourPrice: Number(e.target.value) || undefined })} />
-
-          {/* v0.7.22 — Abrechnungsmodell: Full vs. Our Price + Split. */}
+          {/* v0.7.22 — Abrechnungsmodell: Full vs. Our Price + Split. Owner 14.11.2026 — gilt für alle gewählten Stücke; je
+              Stück unten überschreibbar. */}
           <div>
-            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SETTLEMENT MODEL</span>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SETTLEMENT MODEL{auswahl.length > 1 ? ' (ALL ITEMS)' : ''}</span>
             <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
               {([
                 { key: 'full', label: 'Full amount to us' },
@@ -446,6 +502,69 @@ export function AgentList() {
             </div>
           )}
 
+          {/* Owner 14.11.2026 — die gewählten Stücke: je Stück „Our Price" (vorbelegt), auf Wunsch eigenes Modell und eigener
+              Anteil, entfernbar. Jedes Stück wird ein eigener Transfer (eigene Nummer, eigener Preis, eigener Status). */}
+          <div data-transfer-selected>
+            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SELECTED ITEMS ({auswahl.length}/{TRANSFER_BATCH_MAX})</span>
+            {auswahl.length === 0 ? (
+              <div style={{ fontSize: 12, color: '#9CA3AF', padding: '8px 0' }}>Tick one or more items above.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflowY: 'auto' }}>
+                {auswahl.map((x) => {
+                  const p = products.find((q) => q.id === x.productId);
+                  const gemeinsam = transferForm.settlementModel || 'full';
+                  const wirksam = x.settlementModel || gemeinsam;
+                  return (
+                    <div key={x.productId} data-transfer-item={x.productId}
+                      style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: '8px 10px', background: '#FAFBFC' }}>
+                      <div className="flex justify-between items-center" style={{ marginBottom: 6 }}>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {p ? productDisplayName(p) : x.productId}
+                          </div>
+                          {p?.sku && <div className="font-mono" style={{ fontSize: 10, color: '#9CA3AF' }}>{p.sku}</div>}
+                        </div>
+                        <button type="button" title="Remove from selection" data-transfer-item-remove={x.productId}
+                          onClick={() => setAuswahl((a) => a.filter((y) => y.productId !== x.productId))}
+                          className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 16, padding: '0 4px' }}>×</button>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: wirksam === 'split' ? '1fr 1fr 90px' : '1fr 1fr', gap: 8, alignItems: 'end' }}>
+                        <Input required label="OUR PRICE (BHD)" type="number" placeholder="Amount we want to receive"
+                          value={x.ourPrice} onChange={(e) => auswahlAendern(x.productId, { ourPrice: e.target.value })}
+                          data-transfer-item-price={x.productId} />
+                        <div>
+                          <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>MODEL</span>
+                          <select value={x.settlementModel || ''} data-transfer-item-model={x.productId}
+                            onChange={(e) => auswahlAendern(x.productId, {
+                              settlementModel: (e.target.value || undefined) as AuswahlStueck['settlementModel'], excessSplitPct: undefined,
+                            })}
+                            style={{ width: '100%', padding: '9px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF' }}>
+                            <option value="">As above ({gemeinsam === 'split' ? 'Split' : 'Full'})</option>
+                            <option value="full">Full</option>
+                            <option value="split">Split</option>
+                          </select>
+                        </div>
+                        {wirksam === 'split' && (
+                          <Input label="SHARE (%)" type="number"
+                            placeholder={String(gemeinsam === 'split' ? (transferForm.excessSplitPct ?? 50) : 50)}
+                            value={x.excessSplitPct ?? ''}
+                            onChange={(e) => auswahlAendern(x.productId, { excessSplitPct: e.target.value === '' ? undefined : clampTransferSplitPct(e.target.value) })}
+                            data-transfer-item-pct={x.productId} />
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {auswahl.length >= TRANSFER_BATCH_MAX && (
+              <div style={{ fontSize: 11, color: '#B45309', marginTop: 6 }}>At most {TRANSFER_BATCH_MAX} items in one transfer.</div>
+            )}
+            {auswahlProblem && (
+              <div style={{ fontSize: 11, color: '#B45309', marginTop: 6 }} data-transfer-problem>{auswahlProblem}</div>
+            )}
+          </div>
+
           {/* BUSINESS-DATE — der Tag der Übergabe ist wählbar (nachträglich erfasst); vorbelegt mit heute. */}
           <div data-transfer-date>
             <Input label="TRANSFER DATE" type="date" value={transferForm.transferredAt || todayIso()} max={latestBusinessDate()}
@@ -455,13 +574,16 @@ export function AgentList() {
           <Input label="RETURN BY (DATE)" type="date" value={transferForm.returnBy || ''} onChange={e => setTransferForm({ ...transferForm, returnBy: e.target.value })} />
 
           <StaffSelect value={transferForm.staffId || ''} onChange={(id) => setTransferForm({ ...transferForm, staffId: id || undefined })}
-            helper="Who handed over this item (optional)." />
+            helper="Who handed over the items (optional)." />
+
+          <Input label="NOTES (OPTIONAL)" value={transferForm.notes || ''} data-transfer-notes
+            onChange={(e) => setTransferForm({ ...transferForm, notes: e.target.value || undefined })} />
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewTransfer(false)}>Cancel</Button>
             <Button variant="primary" onClick={() => void handleCreateTransfer()} data-create-transfer
-              disabled={!transferForm.customerId || !transferForm.productId || !transferForm.ourPrice || w.busy}>
-              Transfer Item
+              disabled={!transferForm.customerId || auswahl.length === 0 || !!auswahlProblem || w.busy}>
+              {auswahl.length > 1 ? `Transfer ${auswahl.length} items` : 'Transfer Item'}
             </Button>
           </div>
         </div>

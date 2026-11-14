@@ -779,7 +779,8 @@ async function bruchWelt(weg: 'primary' | 'fern', sammel: boolean, brich: (db: D
   // Die Klammer am Primary: exklusiv, eine Transaktion, dann durabel.
   ok(/runExclusive\(/.test(h) && /beginLedgerTransaction\(\)/.test(h) && /rollbackLedgerTransaction\(\)/.test(h) && /saveDatabaseDurably\(\)/.test(h),
     'DOMAIN die Maske des Primary schreibt in EINER Klammer');
-  ok((h.match(/return amPrimary\(/g) || []).length === 3, 'DOMAIN …fuer alle drei Handlungen');
+  // Owner 14.11.2026 — dazu „Transfer N items" (`createTransfersOnPrimary`): vier Handlungen in derselben Klammer.
+  ok((h.match(/return amPrimary\(/g) || []).length === 4, 'DOMAIN …fuer alle vier Handlungen');
 }
 
 // ════════════════════════════════════════════════════════════════════════════

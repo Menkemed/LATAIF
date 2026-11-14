@@ -27,8 +27,8 @@ import { useProductStore } from '@/stores/productStore';
 import type { AgentTransfer } from '@/core/models/types';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 import {
-  TransferActionRejected, agentAutoCustomer, normalizeTransferCreate, planTransferCreate, transferConvertBlocker,
-  type TransferBillTo, type TransferCreateForm, type TransferHousePort,
+  TransferActionRejected, agentAutoCustomer, normalizeTransferBatch, normalizeTransferCreate, planTransferCreate, transferConvertBlocker,
+  type TransferBatchForm, type TransferBillTo, type TransferCreateForm, type TransferHousePort,
 } from './transfer-rules';
 
 /** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
@@ -84,6 +84,47 @@ export function createTransferInHouse(form: TransferCreateForm, branchId: string
     settlementModel: input.settlementModel,
     excessSplitPct: input.excessSplitPct,
   });
+}
+
+/** Ein Stück lesbar für eine Meldung: SKU, sonst Marke + Name. */
+function stueckName(productId: string): string {
+  const p = query('SELECT sku, brand, name FROM products WHERE id = ?', [productId])[0];
+  if (!p) return productId;
+  return String(p.sku || [p.brand, p.name].filter(Boolean).join(' ') || productId);
+}
+
+/**
+ * Owner 14.11.2026 — „New Transfer" mit mehreren Stücken: in der Transaktion des Aufrufers (`amPrimary` bzw. der
+ * Fernbefehl). ZUERST jedes Stück durch dieselben Prüfungen wie der Einzeltransfer (Kunde, im Lager, keine Kommission, nicht
+ * schon draußen, Mitarbeiter) — erst wenn ALLE gehen, wird geschrieben: je Stück die Hausfunktion des Einzeltransfers (eigene
+ * Nummer, eigener Preis, Bestand „with agent"). Scheitert irgendetwas, rollt der Aufrufer alles zurück — kein halber Vorgang.
+ */
+export function createTransfersInHouse(form: TransferBatchForm, branchId: string): AgentTransfer[] {
+  const inputs = normalizeTransferBatch(form);
+  const port = houseTransferPort(branchId);
+  inputs.forEach((input, i) => {
+    try {
+      planTransferCreate(input, port);
+    } catch (e) {
+      if (e instanceof TransferActionRejected) {
+        throw new TransferActionRejected(e.code, `item ${i + 1} (${stueckName(input.productId)}): ${e.message}`);
+      }
+      throw e;
+    }
+  });
+  useCustomerStore.getState().loadCustomers();
+  useAgentStore.getState().loadAgents();
+  return inputs.map((input) => useAgentStore.getState().createTransferForCustomer({
+    customerId: input.customerId,
+    productId: input.productId,
+    ourPrice: input.ourPrice,
+    returnBy: input.returnBy,
+    transferredAt: input.transferredAt,
+    notes: input.notes,
+    staffId: input.staffId,
+    settlementModel: input.settlementModel,
+    excessSplitPct: input.excessSplitPct,
+  }));
 }
 
 export interface TransferConversion {
@@ -191,6 +232,11 @@ function amPrimary<T>(work: () => T): Promise<T> {
 /** „Transfer Item" am Primary — dieselbe Folge wie der Fernbefehl. */
 export function createTransferOnPrimary(form: TransferCreateForm): Promise<AgentTransfer> {
   return amPrimary(() => createTransferInHouse(form, currentBranchId()));
+}
+
+/** Owner 14.11.2026 — „Transfer N items" am Primary: alle Stücke in EINER Transaktion (dieselbe Folge wie fern). */
+export function createTransfersOnPrimary(form: TransferBatchForm): Promise<AgentTransfer[]> {
+  return amPrimary(() => createTransfersInHouse(form, currentBranchId()));
 }
 
 /** „Create Invoice" am Primary. */

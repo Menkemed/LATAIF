@@ -48,8 +48,11 @@ import {
 } from '@/core/repairs/repair-rules';
 import { changeRepairCustomerInHouse, houseRepairPort } from '@/core/repairs/repair-house';
 import { applyRepairGallery, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
-import { TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferCreate } from '@/core/agents/transfer-rules';
-import { createTransferInHouse } from '@/core/agents/transfer-house';
+import {
+  TRANSFER_BATCH_MAX, TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferBatch, normalizeTransferCreate,
+  type TransferBatchForm, type TransferBatchItem,
+} from '@/core/agents/transfer-rules';
+import { createTransferInHouse, createTransfersInHouse } from '@/core/agents/transfer-house';
 import {
   assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, isStagingId,
   readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
@@ -538,6 +541,52 @@ export interface TransferCreateRequest {
  * R5D — die Werte prüft DIESELBE Regel wie die Maske des Primary (`normalizeTransferCreate`): dazu
  * der Mitarbeiter, und der Anteil am Überschuss so, wie die Maske ihn zulässt (0–100, sonst 50).
  */
+/**
+ * Owner 14.11.2026 — derselbe Befehl mit Artikelliste (`items`, 1–50 Stücke): je Stück `productId`, `agentPrice` und — schon
+ * aufgelöst — `settlementModel`/`excessSplitPct`; gemeinsam Kunde, Übergabe- und Rückgabedatum, Mitarbeiter, Notiz. Jedes Stück
+ * geht durch dieselbe Regel wie der Einzeltransfer (`normalizeTransferBatch` → `normalizeTransferCreate`). Ein Rumpf ohne
+ * `items` ist der bisherige Einzelauftrag (ältere zweite Rechner) — unverändert.
+ */
+export interface TransferBatchRequest { batch: true; form: TransferBatchForm }
+export function parseTransferCreateAny(raw: unknown): TransferCreateRequest | TransferBatchRequest {
+  if (!isPlain(raw) || raw.items === undefined) return parseTransferCreate(raw);
+  onlyKnownFields(raw, ['customerId', 'items', 'returnBy', 'notes', 'staffId', 'transferredAt']);
+  if (!Array.isArray(raw.items)) throw new ServicePayloadError('items must be a list');
+  if (raw.items.length === 0 || raw.items.length > TRANSFER_BATCH_MAX) {
+    throw new ServicePayloadError(`items must hold 1 to ${TRANSFER_BATCH_MAX} entries`);
+  }
+  const items: TransferBatchItem[] = raw.items.map((it, i) => {
+    if (!isPlain(it)) throw new ServicePayloadError(`item ${i + 1} must be an object`);
+    onlyKnownFields(it, ['productId', 'agentPrice', 'settlementModel', 'excessSplitPct']);
+    if (typeof it.agentPrice !== 'number' || !Number.isFinite(it.agentPrice) || it.agentPrice <= 0) {
+      throw new ServicePayloadError(`item ${i + 1}: agentPrice must be a positive number`);
+    }
+    const model = it.settlementModel === undefined ? 'full' : String(it.settlementModel);
+    if (model !== 'split' && it.excessSplitPct !== undefined && it.excessSplitPct !== null) {
+      throw new ServicePayloadError(`item ${i + 1}: excessSplitPct belongs to the split settlement model`);
+    }
+    if (it.excessSplitPct !== undefined && typeof it.excessSplitPct !== 'number') {
+      throw new ServicePayloadError(`item ${i + 1}: the shop's share must be a number`);
+    }
+    return {
+      productId: reqString(it.productId, `items[${i}].productId`), ourPrice: it.agentPrice, settlementModel: model,
+      ...(it.excessSplitPct !== undefined ? { excessSplitPct: it.excessSplitPct as number } : {}),
+    };
+  });
+  const form: TransferBatchForm = {
+    customerId: reqString(raw.customerId, 'customerId'), items,
+    returnBy: optString(raw.returnBy, 'returnBy'), transferredAt: optString(raw.transferredAt, 'transferredAt'),
+    notes: optString(raw.notes, 'notes'), staffId: optString(raw.staffId, 'staffId'),
+  };
+  try {
+    normalizeTransferBatch(form);
+  } catch (e) {
+    if (e instanceof TransferActionRejected) throw new ServicePayloadError(e.message);
+    throw e;
+  }
+  return { batch: true, form };
+}
+
 export function parseTransferCreate(raw: unknown): TransferCreateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
   onlyKnownFields(raw, ['customerId', 'productId', 'agentPrice', 'settlementModel', 'excessSplitPct', 'returnBy', 'notes', 'staffId', 'transferredAt']);
@@ -601,11 +650,18 @@ function transferState(id: string): ServiceResult {
 }
 
 export function runTransferCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const req = parseTransferCreate(raw);
+  const any = parseTransferCreateAny(raw);
   return runRemoteCommand(deps, identity, () => {
     // R5D — in die Bücher DIESER Filiale, oder gar nicht: Agent, Nummer und Transfer entstehen in
     // der Filiale der Sitzung.
     assertHouseBranch(identity);
+    if ('batch' in any) {
+      // Owner 14.11.2026 — mehrere Stücke: EINE Transaktion, EIN Auftrag (Wiederholung derselben Kennung → dieselbe Antwort,
+      // nichts doppelt). Dieselbe Folge wie „Transfer N items" am Primary (`createTransfersOnPrimary`).
+      const transfers = house(() => createTransfersInHouse(any.form, identity.branchId));
+      return { transfers: transfers.map((t) => transferState(t.id)), count: transfers.length } as unknown as Record<string, unknown>;
+    }
+    const req = any;
     // Dieselbe Folge wie „Transfer Item" am Primary (`createTransferOnPrimary`): Kunde der Auswahl,
     // das Stück im Lager und nicht schon draußen (der eigentliche Wettlaufschutz: die Ware ist
     // EINE, und ihr Zustand entscheidet), Mitarbeiter der Auswahl — dann die Hausfunktion, auf dem

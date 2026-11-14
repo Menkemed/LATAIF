@@ -190,6 +190,91 @@ export function transferCreateBody(form: TransferCreateForm): Record<string, unk
   return body;
 }
 
+// ── Anlegen: mehrere Stücke in EINEM Vorgang (Owner 14.11.2026) ──────────────────────────────────
+//
+// „New Transfer" mit Mehrfachauswahl: EIN Kunde, gemeinsame Angaben (Übergabe- und Rückgabedatum, Mitarbeiter, Notiz,
+// Abrechnungsmodell mit Anteil) — dazu je Stück der eigene „Our Price" und, wenn gewollt, ein eigenes Modell bzw. ein eigener
+// Anteil. Jedes Stück bleibt EIN Transfer (eigene Nummer, eigener Preis, eigener Status); jedes geht durch DIESELBE Regel wie
+// der Einzeltransfer (`normalizeTransferCreate`, im Haus `planTransferCreate`). Abrechnung unverändert (Full / Split).
+
+/** Höchstens so viele Stücke in einem Vorgang. */
+export const TRANSFER_BATCH_MAX = 50;
+
+/** Ein Stück der Mehrfachauswahl: Preis, und — nur wenn abweichend — eigenes Modell / eigener Anteil. */
+export interface TransferBatchItem {
+  productId?: string;
+  ourPrice?: number;
+  /** Leer = das gemeinsame Modell. */
+  settlementModel?: string;
+  /** Leer = der gemeinsame Anteil (bei „split"), sonst 50. */
+  excessSplitPct?: number;
+}
+
+/** Was die Maske mit Mehrfachauswahl erfasst. */
+export interface TransferBatchForm extends Omit<TransferCreateForm, 'productId' | 'ourPrice'> {
+  items?: TransferBatchItem[];
+}
+
+/** Das wirksame Modell und der wirksame Anteil eines Stücks: seine Angabe, sonst die gemeinsame. */
+export function transferBatchItemTerms(form: Pick<TransferBatchForm, 'settlementModel' | 'excessSplitPct'>, item: TransferBatchItem): {
+  settlementModel: string; excessSplitPct?: number;
+} {
+  const model = item.settlementModel ?? form.settlementModel ?? 'full';
+  if (model !== 'split') return { settlementModel: model };
+  const pct = item.excessSplitPct ?? ((form.settlementModel ?? 'full') === 'split' ? form.excessSplitPct : undefined);
+  return { settlementModel: model, ...(pct !== undefined ? { excessSplitPct: pct } : {}) };
+}
+
+/**
+ * Die Mehrfachauswahl geprüft und in die Form des Hauses gebracht — je Stück GENAU der Einzeltransfer
+ * (`normalizeTransferCreate`). Vorher: mindestens eins, höchstens `TRANSFER_BATCH_MAX`, kein Stück doppelt. Ein Nein nennt
+ * die Stelle („item 3: …"), damit die Maske es zuordnen kann.
+ */
+export function normalizeTransferBatch(form: TransferBatchForm): TransferCreateInput[] {
+  const items = Array.isArray(form.items) ? form.items : [];
+  if (items.length === 0) throw new TransferActionRejected('NO_ITEMS_SELECTED', 'choose at least one item');
+  if (items.length > TRANSFER_BATCH_MAX) {
+    throw new TransferActionRejected('TOO_MANY_ITEMS', `at most ${TRANSFER_BATCH_MAX} items in one transfer`);
+  }
+  const gesehen = new Set<string>();
+  return items.map((item, i) => {
+    const pid = text(item.productId);
+    if (pid && gesehen.has(pid)) throw new TransferActionRejected('ITEM_LISTED_TWICE', `item ${i + 1}: this item is listed twice`);
+    if (pid) gesehen.add(pid);
+    try {
+      return normalizeTransferCreate({
+        customerId: form.customerId, productId: item.productId, ourPrice: item.ourPrice,
+        ...transferBatchItemTerms(form, item),
+        returnBy: form.returnBy, transferredAt: form.transferredAt, notes: form.notes, staffId: form.staffId,
+      });
+    } catch (e) {
+      if (e instanceof TransferActionRejected) throw new TransferActionRejected(e.code, `item ${i + 1}: ${e.message}`);
+      throw e;
+    }
+  });
+}
+
+/**
+ * Der Rumpf von `transfers.create` mit Artikelliste, wie ihn die Maske am zweiten Rechner baut: je Stück Preis, Modell und
+ * Anteil schon AUFGELÖST (keine Vererbung auf dem Draht) — der Primary prüft jedes Stück mit derselben Regel.
+ */
+export function transferBatchBody(form: TransferBatchForm): Record<string, unknown> {
+  const inputs = normalizeTransferBatch(form);
+  const erstes = inputs[0];
+  const body: Record<string, unknown> = {
+    customerId: erstes.customerId,
+    items: inputs.map((x) => ({
+      productId: x.productId, agentPrice: x.ourPrice, settlementModel: x.settlementModel,
+      ...(x.excessSplitPct !== undefined ? { excessSplitPct: x.excessSplitPct } : {}),
+    })),
+  };
+  if (erstes.returnBy) body.returnBy = erstes.returnBy;
+  if (erstes.transferredAt) body.transferredAt = erstes.transferredAt;
+  if (erstes.notes) body.notes = erstes.notes;
+  if (erstes.staffId) body.staffId = erstes.staffId;
+  return body;
+}
+
 // ── Ändern ────────────────────────────────────────────────────────────────
 
 /** Was „Save" der Änderungsmaske schreibt — genau die drei Felder der Maske, sonst nichts. */
