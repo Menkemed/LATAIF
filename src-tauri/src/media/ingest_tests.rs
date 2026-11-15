@@ -1032,3 +1032,35 @@ fn lock_registry_shrinks_back_to_zero_after_operations_complete() {
         "all identity locks must be released once prepares return"
     );
 }
+
+// ── OWNER-WARTUNG: read-only journal presence probe ─────────────────────────────
+
+#[test]
+fn journal_entry_present_is_read_only_and_exact() {
+    let (svc, root, bytes, hash) = svc_and_input();
+    // no journal dir at all → nothing present, and the probe creates no journal dir
+    assert!(!svc.journal_entry_present(SCOPE, REQ_ID).unwrap());
+    assert!(!root.path().join(".ingest-journal").exists(), "probe must not create the journal dir");
+    svc.prepare(SCOPE, REQ_ID, &hash, &bytes, None).unwrap();
+    let listing = |p: &Path| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(p.join(".ingest-journal")).unwrap()
+            .filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    };
+    let before = listing(root.path());
+    let j_before = std::fs::read(journal_file(root.path(), SCOPE, REQ_ID)).unwrap();
+    assert!(svc.journal_entry_present(SCOPE, REQ_ID).unwrap(), "prepared journal is present");
+    assert_eq!(listing(root.path()), before, "probe changes nothing");
+    assert_eq!(std::fs::read(journal_file(root.path(), SCOPE, REQ_ID)).unwrap(), j_before, "journal bytes unchanged");
+    // another identity with a shared prefix is NOT matched
+    assert!(!svc.journal_entry_present(SCOPE, "11111111-1111-4111-8111-11111111111").unwrap());
+    // only a stray temp file left (journal gone) still counts as present (fail-closed)
+    std::fs::remove_file(journal_file(root.path(), SCOPE, REQ_ID)).unwrap();
+    assert!(temp_file(root.path(), SCOPE, REQ_ID, "main").exists());
+    assert!(svc.journal_entry_present(SCOPE, REQ_ID).unwrap(), "a stray temp file counts as present");
+    // malformed input is refused, never resolved to a path
+    assert!(matches!(svc.journal_entry_present(SCOPE, "../x"), Err(IngestError::InvalidRequest)));
+    assert!(matches!(svc.journal_entry_present("../t", REQ_ID), Err(IngestError::InvalidRequest)));
+    assert!(matches!(svc.journal_entry_present(SCOPE, "edit:gallery-edit:tenant-1"), Err(IngestError::InvalidRequest)));
+}

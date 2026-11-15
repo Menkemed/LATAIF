@@ -233,13 +233,14 @@ export class StockMediaOrchestrator {
    * BILDSPEICHER — eine Wartungsoperation (Migration bestehender Bilder) unter DERSELBEN
    * Medien-Sperre und DEMSELBEN DB-Lease wie jeder Upload: während sie läuft, kann im Renderer kein
    * Ingest, kein Edit und keine Recovery dazwischenschreiben, und ein DB-Austausch (Reload/Restore)
-   * wartet, bis der Lease freigegeben ist. `fn` bekommt den Lease (DB + `saveDurably`).
+   * wartet, bis der Lease freigegeben ist. `fn` bekommt den Lease (DB + `saveDurably`) und einen
+   * Coordinator auf genau dieser DB (für nur lesende Prüfungen wie `inspectStoredEditPlan`).
    */
-  async runMaintenanceExclusive<T>(fn: (lease: OrchestratorLease) => Promise<T>): Promise<T> {
+  async runMaintenanceExclusive<T>(fn: (lease: OrchestratorLease, coordinator: MediaDbCoordinator) => Promise<T>): Promise<T> {
     return this.withOpsLock(async () => {
       const lease = await this.leaseFactory();
       try {
-        return await fn(lease);
+        return await fn(lease, this.coordinatorFactory(lease.db, this.gateway));
       } finally {
         lease.release();
       }

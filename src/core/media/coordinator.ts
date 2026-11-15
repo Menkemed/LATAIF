@@ -212,6 +212,30 @@ export interface EditApplyResult {
   batchId: string;
 }
 
+/** Die Konvergenz eines eingefrorenen Edit-Plans gegen den HEUTIGEN Stand — dieselbe Rechnung, mit
+ *  der `applyEditBatch` entscheidet (eine Quelle, kein Nachbau). `product*` ist `null`, wenn der Plan
+ *  keine Produktfelder trägt. `wouldApply` = applyEditBatch liefe über die Konvergenzprüfung hinaus. */
+export interface EditPlanConvergence {
+  galleryAtBaseline: boolean;
+  galleryAtTarget: boolean;
+  productAtBaseline: boolean | null;
+  productAtTarget: boolean | null;
+  wouldApply: boolean;
+  /** Signatur der heute aktiven Galerie (Slot, media_id, gespeicherter Hash, primär). */
+  currentGallerySignature: string;
+  baselineGallerySignature: string;
+}
+
+/** OWNER-WARTUNG — nur lesende Sicht auf einen gespeicherten Edit-Plan. */
+export interface StoredEditPlanView {
+  job: Record<string, unknown>;
+  /** `null`, wenn `result_json` kein Edit-Plan ist; `corrupt`, wenn er nicht lesbar ist. */
+  env: EditPlanEnvelope | null;
+  corrupt: boolean;
+  /** Nur für einen lesbaren Plan. */
+  convergence: EditPlanConvergence | null;
+}
+
 /**
  * The frozen link position for one ingest request. Persisted inside
  * `PendingIntentPayload` so a crash/restart replays the identical slot.
@@ -1225,21 +1249,11 @@ export class MediaDbCoordinator {
       tenantId: plan.tenantId, scopeKind: plan.scopeKind, branchId: plan.branchId,
       entityType: plan.entityType, entityId: plan.entityId, role: plan.role,
     };
-    const current = this.activeGalleryWithHash(scope);
-    const curSig = gallerySignature(current.map((r) => ({
-      mediaId: String(r.media_id), storedHash: String(r.stored_blob_hash),
-      sortOrder: Number(r.sort_order), isPrimary: Number(r.is_primary) === 1,
-    })));
-    const tgtSig = gallerySignature(targetGallery(plan));
-    const baseSig = gallerySignature(plan.baseline.map((b) => ({
-      mediaId: b.mediaId, storedHash: b.storedHash, sortOrder: b.sortOrder, isPrimary: b.isPrimary,
-    })));
+    const { conv, current } = this.editConvergenceWithRows(plan);
 
     // Gallery must be at its frozen BASELINE (normal) or already at the TARGET
     // (a prior tx that never durably saved) — anything else changed under us.
-    const galleryAtBaseline = curSig === baseSig;
-    const galleryAtTarget = curSig === tgtSig;
-    if (!galleryAtBaseline && !galleryAtTarget) {
+    if (!conv.galleryAtBaseline && !conv.galleryAtTarget) {
       throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_BASELINE_CHANGED');
     }
     // Product half (3B2C2): the product must be at its baseline or already at
@@ -1248,11 +1262,8 @@ export class MediaDbCoordinator {
     if (plan.productEdit && plan.entityType !== 'product') {
       throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED');
     }
-    if (plan.productEdit) {
-      const st = this.productEditState(plan);
-      if (!st.atBaseline && !st.atTarget) {
-        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED');
-      }
+    if (plan.productEdit && !conv.productAtBaseline && !conv.productAtTarget) {
+      throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED');
     }
     // "Nothing to do" is ONLY job.state==='ready' (checked at the top). Here the
     // job is still accepted, so we (re)apply idempotently: a save-loss after a
@@ -1346,6 +1357,56 @@ export class MediaDbCoordinator {
       this.markEditReady(plan, irid);
     });
     return { status: 'edit_applied', batchId: plan.batchId };
+  }
+
+  /** Die Konvergenzrechnung von `applyEditBatch` (Galerie + Produkthälfte), plus die heute aktiven
+   *  Galeriezeilen, die applyEditBatch für den Tausch weiterverwendet. Liest nur. */
+  private editConvergenceWithRows(plan: EditPlan, full = false): { conv: EditPlanConvergence; current: Array<Record<string, unknown>> } {
+    const current = this.activeGalleryWithHash({
+      tenantId: plan.tenantId, scopeKind: plan.scopeKind, branchId: plan.branchId,
+      entityType: plan.entityType, entityId: plan.entityId, role: plan.role,
+    });
+    const curSig = gallerySignature(current.map((r) => ({
+      mediaId: String(r.media_id), storedHash: String(r.stored_blob_hash),
+      sortOrder: Number(r.sort_order), isPrimary: Number(r.is_primary) === 1,
+    })));
+    const tgtSig = gallerySignature(targetGallery(plan));
+    const baseSig = gallerySignature(plan.baseline.map((b) => ({
+      mediaId: b.mediaId, storedHash: b.storedHash, sortOrder: b.sortOrder, isPrimary: b.isPrimary,
+    })));
+    const galleryAtBaseline = curSig === baseSig;
+    const galleryAtTarget = curSig === tgtSig;
+    // Die Produkthälfte gibt es nur an einem Produkt (MEDIA-S1); an etwas anderem würde applyEditBatch abweisen.
+    // Wie bisher wird die Produktzeile für applyEditBatch erst gelesen, wenn die Galerie passt (`full` = die
+    // Wartungssicht will beide Hälften sehen).
+    const needProduct = plan.productEdit && plan.entityType === 'product' && (full || galleryAtBaseline || galleryAtTarget);
+    const productState = needProduct ? this.productEditState(plan) : null;
+    const productOk = !plan.productEdit || (productState != null && (productState.atBaseline || productState.atTarget));
+    return {
+      current,
+      conv: {
+        galleryAtBaseline, galleryAtTarget,
+        productAtBaseline: productState ? productState.atBaseline : null,
+        productAtTarget: productState ? productState.atTarget : null,
+        wouldApply: (galleryAtBaseline || galleryAtTarget) && productOk,
+        currentGallerySignature: curSig,
+        baselineGallerySignature: baseSig,
+      },
+    };
+  }
+
+  /**
+   * OWNER-WARTUNG — nur lesend: der gespeicherte Job zu `ingestRequestId`, sein eingefrorener Edit-Plan
+   * und die Konvergenz gegen den heutigen Stand (dieselbe Rechnung wie applyEditBatch). Schreibt nichts,
+   * ruft Rust nicht auf. `null`, wenn es den Job nicht gibt.
+   */
+  inspectStoredEditPlan(tenantId: string, ingestRequestId: string): StoredEditPlanView | null {
+    const job = this.jobRow(tenantId, ingestRequestId);
+    if (!job) return null;
+    let env: EditPlanEnvelope | null = null;
+    let corrupt = false;
+    try { env = parseCachedEditPlan(job.result_json); } catch { corrupt = true; }
+    return { job, env, corrupt, convergence: env ? this.editConvergenceWithRows(env.plan, true).conv : null };
   }
 
   /** Current product row is at the plan's baseline / already at the target for

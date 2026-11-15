@@ -924,6 +924,34 @@ impl MediaIngestService {
         Ok(())
     }
 
+    // ── read-only presence probe (owner maintenance) ───────────────────────────
+
+    /// OWNER-WARTUNG — nur lesend: liegt für diese Identität noch IRGENDETWAS im Journal-Ordner — der
+    /// Journal-Eintrag (`{scope}__{id}.json`) oder eine seiner Temp-/Schreibdateien (`{scope}__{id}.…`)?
+    /// Liest keinen Inhalt, ändert nichts, folgt keinem Link. Ein nicht lesbarer Ordner ist ein Fehler
+    /// (fail-closed), ein fehlender Ordner heißt „nichts vorhanden“.
+    pub fn journal_entry_present(&self, scope: &str, request_id: &str) -> Result<bool, IngestError> {
+        if !storage::is_valid_scope(scope) || !is_valid_request_id(request_id) {
+            return Err(IngestError::InvalidRequest);
+        }
+        let canon_root = storage::ensure_root_canonical(&self.media_root)?;
+        let lock = self.identity_lock(scope, request_id);
+        let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let prefix = format!("{}.", Self::entry_key(scope, request_id));
+        let entries = match fs::read_dir(self.journal_dir(&canon_root)) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(io_err(&e)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err(&e))?;
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     // ── abort ────────────────────────────────────────────────────────────────
 
     pub fn abort(&self, scope: &str, request_id: &str) -> Result<AbortResult, IngestError> {

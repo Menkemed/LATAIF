@@ -2418,6 +2418,19 @@ fn media_recover_ingests(
     svc.recover().map_err(|e| e.code().to_string())
 }
 
+/// OWNER-WARTUNG — nur lesend: hält das Ingest-Journal für diese Anfrage noch einen Eintrag oder eine
+/// Temp-Datei? (Abbruch überholter Edit-Pläne: nur wenn nichts mehr vorhanden ist.)
+#[tauri::command]
+fn media_ingest_journal_present(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    ingest_request_id: String,
+) -> Result<bool, String> {
+    let svc = media_ingest_service(&state);
+    svc.journal_entry_present(&tenant_scope, &ingest_request_id)
+        .map_err(|e| e.code().to_string())
+}
+
 // ── MOBILE-04B2A2 — internal mobile-upload claim/handoff bridge ───────────────
 // INTERNAL Tauri commands ONLY — no HTTP route, no `mobile_page.rs` change, no legacy /sync/push
 // touch. The JS/WebView drain worker uses these to lease one `accepted` upload job, hand its
@@ -3629,6 +3642,7 @@ pub fn run() {
             media_publish_original,
             media_stat_original,
             media_recover_ingests,
+            media_ingest_journal_present,
             media_recompress_stored,
             // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
             // but activation is scope-gated: every wrapper's first act (after opening the config DB and

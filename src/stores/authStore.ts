@@ -41,6 +41,10 @@ function triggerMediaRecoveryPostAuth(): void {
       void import('@/core/media/image-store-migration-wiring')
         .then((m) => m.installImageMigrationBridge())
         .catch(() => { /* never blocks auth */ });
+      // OWNER-WARTUNG — überholte Galerie-Bearbeitungen: Einstieg NUR im E2E-Build; sonst nichts.
+      void import('@/core/media/superseded-edit-plans-wiring')
+        .then((m) => m.installSupersededEditPlansBridge())
+        .catch(() => { /* never blocks auth */ });
     });
 }
 
