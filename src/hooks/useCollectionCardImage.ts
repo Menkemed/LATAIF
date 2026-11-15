@@ -1,23 +1,28 @@
 // ════════════════════════════════════════════════════════════════════════════
-// COLLECTIONS-S1/S2 — das Kartenbild eines Artikels: RAM-Cache + Laden erst bei Sichtbarkeit.
+// COLLECTIONS-S1/S2/S3 — das Kartenbild eines Artikels: RAM-Cache, Laden erst bei Sichtbarkeit, Vorschau.
 //
-// • Liegt das Bild im Cache (`core/media/card-image-cache`), erscheint es SOFORT — auch nach
-//   „Artikel öffnen → zurück" oder einem Kategorienwechsel. Danach prüft die Karte, sobald sie
-//   sichtbar ist, nur den Fingerabdruck der Galerie (Primary: eine Abfrage ohne Bildbytes; PC2: eine
-//   Auskunft `products.get`, kein Bild). Weicht er ab (Bearbeitung, Mobile-Upload, Restore, ein
-//   anderer Rechner), wird neu geladen.
-// • Ohne Cache lädt die Karte erst, wenn sie (bald) sichtbar ist (`near`), und hält danach nur das
-//   Kartenbild — nie die Galerie.
+// • S1: Liegt das Bild im Cache (`core/media/card-image-cache`), erscheint es SOFORT — auch nach
+//   „Artikel öffnen → zurück" oder einem Kategorienwechsel. Danach prüft die Karte nur den Fingerabdruck;
+//   weicht er ab (Bearbeitung, Mobile-Upload, Restore, Generationswechsel, ein anderer Rechner), lädt sie neu.
+// • S2: Ohne Cache lädt die Karte erst, wenn sie (bald) sichtbar ist (`near`).
+// • S3: Die Karte zeigt die VORSCHAU (≤ 256 px) des Hauptbilds, nicht das Hauptbild und nie die Galerie.
+//     Primary — Entscheidung + Fingerabdruck ohne Bytes (`cardThumbnailPlan`), dann EINE geprüfte Lesung
+//               über den Rohweg (kein JSON-Bytefeld); fehlt/defekt → Hauptbild über denselben Weg.
+//     PC2     — der Verweis kommt mit der Artikelliste (`store.products.get` → `cardThumbs`): KEINE
+//               Einzelauskunft je Karte; gleicher Fingerabdruck → keine Anfrage. Liefert der Primary keine
+//               Verweise (älterer Stand), gilt der S1-Weg (`products.get` + Hauptbild).
 // • Gleiche Ladeanfragen mehrerer Karten (z. B. Raster + Hover-Karte) laufen nur einmal.
 //
-// Der Zustand ist derselbe `PresentationState` wie bisher, damit `decideCollectionThumb` und der
-// begrenzte Pending-Retry unverändert gelten. Nur lesend; kein Schreiben in Store oder Datenbank.
+// Item Details ist unberührt: dort zeigt die Galerie weiterhin die Hauptbilder in voller Qualität.
+// Nur lesend; kein Schreiben in Store, Datenbank oder Browser-Speicher.
 // ════════════════════════════════════════════════════════════════════════════
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { sharedCardImageCache } from '@/core/media/card-image-cache';
+import { cardThumbFingerprint, type CardThumbRef } from '@/core/media/card-thumbs';
 import { IDLE_STATE, type PresentationState } from '@/core/media/presentation';
+import { useProductStore } from '@/stores/productStore';
 
 type CardLoad =
   | { kind: 'same' }
@@ -38,7 +43,7 @@ function errorState(e: unknown, fallback: string): PresentationState {
 }
 
 async function loadLocal(productId: string, tenantId: string, branchId: string, known: string | undefined): Promise<CardLoad> {
-  const [{ acquireDbLease }, { ProductMediaResolver }, { TauriMediaGateway }] = await Promise.all([
+  const [{ acquireDbLease }, { ProductMediaResolver }, { TauriMediaGateway, OriginalMediaTransport }] = await Promise.all([
     import('@/core/db/database'),
     import('@/core/media/product-media-resolver'),
     import('@/core/media/gateway'),
@@ -48,22 +53,18 @@ async function loadLocal(productId: string, tenantId: string, branchId: string, 
     // Eine neue DB-Epoche (Restore/Neuladen) macht jeden alten Eintrag wertlos.
     if (lastEpoch !== null && lastEpoch !== lease.epoch) sharedCardImageCache().clear();
     lastEpoch = lease.epoch;
-    const resolver = new ProductMediaResolver({
-      dbProvider: () => lease.db,
-      gateway: new TauriMediaGateway(),
-      tenantId,
-      branchId,
-    });
-    // Fingerabdruck und Auflösung sehen dieselbe Datenbank: zwischen beiden liegt kein `await`.
-    const fingerprint = resolver.galleryFingerprint(productId);
-    if (known !== undefined && fingerprint === known) return { kind: 'same' };
-    const r = await resolver.resolvePrimaryProductMedia(productId);
+    const gateway = new TauriMediaGateway();
+    const raw = new OriginalMediaTransport(); // Rohweg: Bytes als ArrayBuffer, geprüft im Kern
+    const resolver = new ProductMediaResolver({ dbProvider: () => lease.db, gateway, tenantId, branchId });
+    // Fingerabdruck und Lesung sehen dieselbe Datenbank: zwischen Plan und Lesebeginn liegt kein `await`.
+    if (known !== undefined && resolver.cardThumbnailPlan(productId).fingerprint === known) return { kind: 'same' };
+    const { fingerprint, result } = await resolver.resolveCardThumbnail(productId, (i) => raw.readVerifiedRaw(i));
+    if (result.kind === 'media') {
+      const blob = new Blob([result.bytes as BlobPart], { type: result.mimeType });
+      return { kind: 'media', url: putHanded(productId, blob, fingerprint), fingerprint };
+    }
+    const r = result.resolution;
     switch (r.kind) {
-      case 'media': {
-        const it = r.items[0];
-        const blob = new Blob([new Uint8Array(it.bytes)], { type: it.mimeType });
-        return { kind: 'media', url: putHanded(productId, blob, fingerprint), fingerprint };
-      }
       case 'legacy':
         sharedCardImageCache().delete(productId);
         return { kind: 'state', state: { status: 'legacy', srcs: r.items.slice(0, 1) } };
@@ -74,16 +75,21 @@ async function loadLocal(productId: string, tenantId: string, branchId: string, 
         return { kind: 'state', state: { status: 'pending', srcs: [] } };
       default:
         sharedCardImageCache().delete(productId);
-        return { kind: 'state', state: { status: 'error', code: r.code, srcs: [] } };
+        return { kind: 'state', state: { status: 'error', code: 'code' in r ? r.code : 'MEDIA_PRESENTATION_FAILED', srcs: [] } };
     }
   } finally {
     lease.release();
   }
 }
 
-async function loadRemote(productId: string, known: string | undefined): Promise<CardLoad> {
-  const { loadRemoteCardImage } = await import('@/core/media/client-media-source');
-  const r = await loadRemoteCardImage(productId, known);
+/** PC2. `ref`: `undefined` = der Primary liefert keine Verweise (älterer Stand) → S1-Weg; `null` = Artikel ohne Bild. */
+async function loadRemote(productId: string, known: string | undefined, ref: CardThumbRef | null | undefined): Promise<CardLoad> {
+  const { loadRemoteCardImage, loadRemoteCardThumb } = await import('@/core/media/client-media-source');
+  if (ref === null) {
+    sharedCardImageCache().delete(productId);
+    return { kind: 'state', state: { status: 'empty', srcs: [] } };
+  }
+  const r = ref ? await loadRemoteCardThumb(ref, known) : await loadRemoteCardImage(productId, known);
   if (r.kind === 'same') return { kind: 'same' };
   if (r.kind === 'empty') {
     sharedCardImageCache().delete(productId);
@@ -103,11 +109,14 @@ function putHanded(productId: string, blob: Blob, fingerprint: string): string {
   return url;
 }
 
-function loadCard(remote: boolean, scope: string, productId: string, tenantId: string, branchId: string, known: string | undefined): Promise<CardLoad> {
-  const key = `${scope}|${productId}|${known ?? ''}`;
+function loadCard(
+  remote: boolean, scope: string, productId: string, tenantId: string, branchId: string,
+  known: string | undefined, ref: CardThumbRef | null | undefined, refFp: string,
+): Promise<CardLoad> {
+  const key = `${scope}|${productId}|${known ?? ''}|${refFp}`;
   let p = inflight.get(key);
   if (!p) {
-    p = (remote ? loadRemote(productId, known) : loadLocal(productId, tenantId, branchId, known))
+    p = (remote ? loadRemote(productId, known, ref) : loadLocal(productId, tenantId, branchId, known))
       .catch((e): CardLoad => {
         sharedCardImageCache().delete(productId);
         return { kind: 'state', state: errorState(e, remote ? 'REMOTE_MEDIA_FAILED' : 'MEDIA_PRESENTATION_FAILED') };
@@ -142,6 +151,10 @@ export function useCollectionCardImage(
   const scope = `${remote ? 'remote' : 'local'}|${tenantId ?? ''}|${branchId ?? ''}`;
   const k = `${scope}|${productId}`;
   const cache = sharedCardImageCache();
+  // S3 (PC2): der Verweis aus der Artikelliste. `undefined` = nicht geliefert (älterer Primary / am Primary).
+  const ref = useProductStore((s): CardThumbRef | null | undefined =>
+    !remote || s.cardThumbsVersion !== 1 ? undefined : (s.cardThumbs?.[productId] ?? null));
+  const refFp = ref === undefined ? '' : ref === null ? 'none' : cardThumbFingerprint(ref);
 
   const initial = (): View => {
     if (!enabled) return { k, state: IDLE_STATE };
@@ -182,7 +195,7 @@ export function useCollectionCardImage(
     if (!viewRef.current.url) {
       setView((v) => (v.k === k && v.state.status !== 'loading' ? { k, state: LOADING } : v));
     }
-    void loadCard(remote, scope, productId, tenantId, branchId, known).then((res) => {
+    void loadCard(remote, scope, productId, tenantId, branchId, known, ref, refFp).then((res) => {
       if (dead || res.kind === 'same') return;
       if (res.kind === 'media') {
         pinTo(res.url); // noch in der Übergabe — erst danach darf sie enden
@@ -194,7 +207,9 @@ export function useCollectionCardImage(
     return () => {
       dead = true;
     };
-  }, [k, scope, remote, productId, tenantId, branchId, enabled, near, reloadNonce]);
+    // `ref` wird über `refFp` verfolgt: ein neuer Listenstand mit anderem Kartenbild prüft neu.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [k, scope, remote, productId, tenantId, branchId, enabled, near, reloadNonce, refFp]);
 
   return current.state;
 }

@@ -393,6 +393,10 @@ interface ProductStore {
    * Auslegung und Suche — nie fuer eine Auswahlliste.
    */
   categorySchema: Category[];
+  /** COLLECTIONS-S3 — nur auf PC2, aus `store.products.get`: je Artikel der Verweis auf sein Kartenbild. */
+  cardThumbs?: Record<string, import('@/core/media/card-thumbs').CardThumbRef>;
+  /** Gesetzt, wenn der Primary die Verweise liefert; fehlt er (älterer Primary), gilt der alte Weg. */
+  cardThumbsVersion?: number;
   loading: boolean;
   searchQuery: string;
   filterCategory: string;

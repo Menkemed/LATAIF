@@ -55,6 +55,19 @@ export type ProductMediaResolution =
   | { kind: 'conflict'; code: string }
   | { kind: 'legacy_format_error'; code: string };
 
+/** COLLECTIONS-S3 — eine gespeicherte Fassung (Hauptbild oder Vorschau) für die Karte. */
+export interface CardRendition {
+  hash: string;
+  extension: string;
+  mimeType: string;
+  byteSize: number;
+}
+
+/** COLLECTIONS-S3 — die Bytes der Karte (Vorschau, ersatzweise Hauptbild) oder die Entscheidung ohne Bild. */
+export type CardThumbnailResult =
+  | { kind: 'media'; bytes: Uint8Array; mimeType: string; source: 'thumbnail' | 'main' }
+  | { kind: 'final'; resolution: ProductMediaResolution };
+
 // ── legacy parser ───────────────────────────────────────────────────────────
 //
 // Format census taken against a byte-identical copy of the productive DB
@@ -187,6 +200,82 @@ export class ProductMediaResolver {
       row.link_id, row.media_id, row.sort_order, row.is_primary,
       row.stored_blob_hash, row.extension, row.mime_type, row.byte_size,
     ].map((v) => (v == null ? '' : String(v))).join(',')).join('|');
+  }
+
+  /**
+   * COLLECTIONS-S3 — was die Karte zeigt, OHNE ein Byte zu lesen: dieselbe Entscheidung wie
+   * `resolveProductMedia`, dann NUR das Hauptbild und dessen Vorschau (Variante `thumbnail`, aktuelle,
+   * verfügbare Generation). Der Fingerabdruck umfasst die Galerie (wie `galleryFingerprint`) UND die
+   * aktuelle Generation der Vorschau — ein Generationswechsel bei gleicher Medienkennung ändert ihn.
+   */
+  cardThumbnailPlan(productId: string):
+    | { kind: 'final'; fingerprint: string; resolution: ProductMediaResolution }
+    | { kind: 'read'; fingerprint: string; main: CardRendition; thumb: CardRendition | null } {
+    const db = this.dbProvider();
+    const decided = this.decide(db, productId);
+    if (decided.kind === 'final') {
+      const r = decided.resolution;
+      const fp = r.kind === 'legacy' || r.kind === 'none' ? r.kind : `${r.kind}:${'code' in r ? r.code : ''}`;
+      return { kind: 'final', fingerprint: fp, resolution: r.kind === 'legacy' ? { kind: 'legacy', items: r.items.slice(0, 1) } : r };
+    }
+    const gal = 'media:' + decided.active.map((row) => [
+      row.link_id, row.media_id, row.sort_order, row.is_primary,
+      row.stored_blob_hash, row.extension, row.mime_type, row.byte_size,
+    ].map((v) => (v == null ? '' : String(v))).join(',')).join('|');
+    // inspectGallery (in decide) garantiert genau ein Hauptbild an Platz 0.
+    const p = decided.active.find((row) => Number(row.is_primary) === 1) ?? decided.active[0];
+    const rendition = (row: Record<string, unknown> | undefined): CardRendition | null => {
+      if (!row || row.stored_blob_hash == null || row.extension == null || row.mime_type == null) return null;
+      return { hash: String(row.stored_blob_hash), extension: String(row.extension), mimeType: String(row.mime_type), byteSize: Number(row.byte_size) };
+    };
+    const main = rendition(p);
+    if (!main) {
+      return { kind: 'final', fingerprint: `${gal}|t:-`, resolution: { kind: 'integrity_error', code: 'MEDIA_GENERATION_UNAVAILABLE', mediaId: String(p?.media_id ?? '') } };
+    }
+    const thumbRow = firstRow(
+      db,
+      `SELECT g.stored_blob_hash, g.extension, g.mime_type, g.byte_size
+         FROM media_variants v
+         JOIN media_blobs b ON b.tenant_id = v.tenant_id AND b.blob_id = v.blob_id
+                           AND b.deleted_at IS NULL AND b.blob_status = 'present'
+         JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id
+                                      AND g.generation_no = b.current_generation_no
+                                      AND g.gen_status = 'available' AND g.deleted_at IS NULL
+        WHERE v.tenant_id = $t AND v.media_id = $m AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+        ORDER BY v.variant_id ASC LIMIT 1`,
+      { $t: this.tenantId, $m: String(p.media_id) },
+    );
+    const thumb = rendition(thumbRow ?? undefined);
+    const fingerprint = `${gal}|t:${thumb ? `${thumb.hash},${thumb.extension},${thumb.byteSize}` : '-'}`;
+    return { kind: 'read', fingerprint, main, thumb };
+  }
+
+  /**
+   * COLLECTIONS-S3 — die Bytes für die Karte: die Vorschau über den Rohweg (kein JSON-Bytefeld). Fehlt
+   * sie oder ist sie beschädigt, das Hauptbild über denselben Weg. `readRaw` liest geprüft (der Kern
+   * prüft den Inhalts-Hash); zusätzlich muss die Länge der gespeicherten Größe entsprechen.
+   */
+  async resolveCardThumbnail(
+    productId: string,
+    readRaw: (input: { tenantScope: string; hash: string; extension: string }) => Promise<Uint8Array>,
+  ): Promise<{ fingerprint: string; result: CardThumbnailResult }> {
+    const plan = this.cardThumbnailPlan(productId);
+    if (plan.kind === 'final') return { fingerprint: plan.fingerprint, result: { kind: 'final', resolution: plan.resolution } };
+    const read = async (r: CardRendition): Promise<Uint8Array | null> => {
+      try {
+        const bytes = await readRaw({ tenantScope: this.tenantId, hash: r.hash, extension: r.extension });
+        return bytes.byteLength === r.byteSize ? bytes : null;
+      } catch {
+        return null;
+      }
+    };
+    if (plan.thumb) {
+      const t = await read(plan.thumb);
+      if (t) return { fingerprint: plan.fingerprint, result: { kind: 'media', bytes: t, mimeType: plan.thumb.mimeType, source: 'thumbnail' } };
+    }
+    const m = await read(plan.main);
+    if (m) return { fingerprint: plan.fingerprint, result: { kind: 'media', bytes: m, mimeType: plan.main.mimeType, source: 'main' } };
+    return { fingerprint: plan.fingerprint, result: { kind: 'final', resolution: { kind: 'integrity_error', code: 'MEDIA_READ_FAILED', mediaId: '' } } };
   }
 
   /** The decision order of `resolveProductMedia` (see there), byte-free. */

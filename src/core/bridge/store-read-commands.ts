@@ -94,7 +94,26 @@ registerCommand(OP_STORE_PRODUCTS_GET, {
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = contextOf(payload, actor);
     const store = await import('@/stores/productStore');
-    return { data: { ...store.loadProductsFor(ctx), ...store.loadCategoriesFor(ctx) } };
+    // COLLECTIONS-S3 — je Artikel der Verweis auf sein Kartenbild (kein Byte); `cardThumbsVersion`
+    // zeigt dem Client, dass der Primary ihn liefert (fehlt er, bleibt der Client beim alten Weg).
+    const [{ cardThumbsFor, CARD_THUMBS_VERSION }, { getDatabase }] = await Promise.all([
+      import('@/core/media/card-thumbs'), import('@/core/db/database'),
+    ]);
+    const rows = (sql: string, params: unknown[]) => {
+      const res = getDatabase().exec(sql, params as never[]);
+      if (res.length === 0) return [];
+      const { columns, values } = res[0];
+      return values.map((v) => Object.fromEntries(columns.map((c, i) => [c, v[i]])));
+    };
+    // Die Liste darf an den Verweisen nie scheitern: gelingt ihre Abfrage nicht, reist die Liste ohne
+    // sie (ohne `cardThumbsVersion`) — der Client nimmt dann den bisherigen Weg über `products.get`.
+    let thumbs: Record<string, unknown> = {};
+    try {
+      thumbs = { cardThumbs: cardThumbsFor(rows, ctx.tenantId, ctx.branchId), cardThumbsVersion: CARD_THUMBS_VERSION };
+    } catch (e) {
+      console.warn('[store.products.get] card thumbnails unavailable:', e);
+    }
+    return { data: { ...store.loadProductsFor(ctx), ...store.loadCategoriesFor(ctx), ...thumbs } };
   },
 });
 

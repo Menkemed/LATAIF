@@ -1,15 +1,18 @@
 // ════════════════════════════════════════════════════════════════════════════
-// COLLECTIONS-S1/S2 — RAM-Cache der Kartenbilder + Laden erst bei Sichtbarkeit (Primary UND PC2).
+// COLLECTIONS-S1/S2/S3 — RAM-Cache der Kartenbilder, Laden erst bei Sichtbarkeit, Vorschau statt Hauptbild (Primary UND PC2).
 // Run: node scripts/e2e-diag-runner.mjs <out> test/e2e/collections-card-cache.e2e.mjs
 //
-//   SETUP    N Artikel über den echten Fernweg (Ablage + products.create), jeder dritte mit 3 Bildern, zwei Kategorien.
-//   KALT     /collection: es laden nur sichtbare/bald sichtbare Karten (nicht alle N).
-//   SCROLL   nach unten: die übrigen laden nach, jede Karte einmal.
-//   ZURÜCK   Artikel öffnen → zurück: sichtbare Bilder aus dem RAM — Primary 0 Bildlesungen, PC2 0 /api/media.
+//   SETUP    N Artikel über den echten Fernweg (Ablage + products.create), jeder dritte mit 3 Bildern, zwei Kategorien;
+//            dazu ein Altbestand-Artikel (Bild nur in products.images).
+//   KALT     /collection: es laden nur sichtbare/bald sichtbare Karten (nicht alle N). S3: Primary nur Rohlesungen der
+//            Vorschau (kein JSON-Bytefeld), PC2 ohne products.get je Karte; übertragene KB werden gemessen.
+//   SCROLL   nach unten: die übrigen laden nach, jede Karte einmal. S3: RAM-Belegung, Altbestand-Bild.
+//   ZURÜCK   Artikel öffnen (Item Details zeigt das HAUPTBILD in voller Fassung) → zurück: Bilder aus dem RAM.
 //   KATEGORIE wechseln und zurück: keine erneute Bildabfrage.
-//   ÄNDERUNG products.update ersetzt das Hauptbild → die Karte zeigt das NEUE Bild (Bytes = Datei des neuen Hauptbilds).
-//   MOBILE   gallery_edit über /api/mobile/upload → die Karte zeigt das neue Bild.
-//   SPUREN   Navigation schreibt keine Zeile in die Datenbanken, keine Datei, kein localStorage/IndexedDB-Eintrag.
+//   ÄNDERUNG products.update ersetzt das Hauptbild → die Karte zeigt die VORSCHAU des neuen Hauptbilds.
+//   MOBILE   gallery_edit über /api/mobile/upload → die Karte zeigt die Vorschau des neuen Bilds.
+//   SPUREN   Navigation schreibt keine Zeile in die Datenbanken, keine Datei, kein Browser-Speicher; Medientabellen gleich.
+//   RÜCKFALL Vorschau-Datei fehlt (nur im Testordner weggelegt, danach zurück) → die Karte zeigt das Hauptbild.
 //   ALT      zum Vergleich gemessen: die Arbeitslast des bisherigen Wegs (jede Karte liest ihre ganze Galerie) — im selben
 //            Test-Binary nachgestellt (Primary: media_read_verified je Galeriebild; PC2: products.get + /api/media je Bild).
 //
@@ -21,10 +24,11 @@ import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
-import { existsSync, mkdirSync, rmSync, readdirSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readdirSync, statSync, readFileSync, renameSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { deflateSync, crc32 } from 'node:zlib';
 
 const IDENT = 'com.lataif.app.e2e';
 const CLIENT_IDENT = 'com.lataif.app.e2e.client';
@@ -125,20 +129,43 @@ const geh = (c, route) => c.ev(`history.pushState({}, '', ${S(route)}); window.d
 const spuelen = (p) => p.ev('return await window.__TAURI_INTERNALS__.invoke("flush_database_now").catch((e)=>String(e));');
 
 // ── Zählung: Primary-IPC (ipc.localhost/<cmd>) und PC2-Netz (/api/media, /api/command products.get) über CDP ──
+// Zähler + übertragene Bytes je Art (S3: Bildbytes sind die Messgröße, nicht nur die Anzahl).
+//   mediaRead   Primary: Bildlesungen über die IPC (`media_read_verified` = JSON-Bytefeld, `_raw` = Rohweg)
+//   apiMedia    PC2: Bildübertragungen `/api/media?key=`
+//   productsGet PC2: Einzelauskünfte `products.get`;  storeProducts: die Artikelliste `store.products.get`
 function zaehler(c) {
-  const z = { mediaRead: 0, apiMedia: 0, productsGet: 0, ipcAll: 0 };
+  const z = { mediaRead: 0, mediaReadJson: 0, mediaReadRaw: 0, apiMedia: 0, productsGet: 0, storeProducts: 0, ipcAll: 0,
+    mediaReadBytes: 0, apiMediaBytes: 0, productsGetBytes: 0, storeProductsBytes: 0 };
+  const art = new Map(); const daten = new Map();
   c.on((m) => {
-    if (m.method !== 'Network.requestWillBeSent') return;
-    const r = m.params.request; const u = String(r?.url || '');
-    if (r?.method === 'OPTIONS') return;   // CORS-Vorabanfrage: keine Übertragung
-    if (/ipc\.localhost\//.test(u)) { z.ipcAll++; if (/ipc\.localhost\/media_read_verified(_raw)?(\?|$)/.test(u)) z.mediaRead++; }
-    if (/\/api\/media\?key=/.test(u)) z.apiMedia++;
-    if (/\/api\/command$/.test(u) && r.postData) { try { if (JSON.parse(r.postData).op === 'products.get') z.productsGet++; } catch { /* egal */ } }
+    if (m.method === 'Network.requestWillBeSent') {
+      const r = m.params.request; const u = String(r?.url || '');
+      if (r?.method === 'OPTIONS') return;   // CORS-Vorabanfrage: keine Übertragung
+      if (/ipc\.localhost\//.test(u)) {
+        z.ipcAll++;
+        if (/ipc\.localhost\/media_read_verified_raw(\?|$)/.test(u)) { z.mediaRead++; z.mediaReadRaw++; art.set(m.params.requestId, 'mediaReadBytes'); }
+        else if (/ipc\.localhost\/media_read_verified(\?|$)/.test(u)) { z.mediaRead++; z.mediaReadJson++; art.set(m.params.requestId, 'mediaReadBytes'); }
+      }
+      if (/\/api\/media\?key=/.test(u)) { z.apiMedia++; art.set(m.params.requestId, 'apiMediaBytes'); }
+      if (/\/api\/command$/.test(u) && r.postData) {
+        try {
+          const op = JSON.parse(r.postData).op;
+          if (op === 'products.get') { z.productsGet++; art.set(m.params.requestId, 'productsGetBytes'); }
+          if (op === 'store.products.get') { z.storeProducts++; art.set(m.params.requestId, 'storeProductsBytes'); }
+        } catch { /* egal */ }
+      }
+    } else if (m.method === 'Network.dataReceived') {
+      const id = m.params.requestId; if (art.has(id)) daten.set(id, (daten.get(id) || 0) + Number(m.params.dataLength || 0));
+    } else if (m.method === 'Network.loadingFinished') {
+      const id = m.params.requestId; const k = art.get(id); if (!k) return;
+      z[k] += Math.max(Number(m.params.encodedDataLength || 0), daten.get(id) || 0);
+      art.delete(id); daten.delete(id);
+    }
   });
   return z;
 }
 const snap = (z) => ({ ...z });
-const diff = (a, b) => ({ mediaRead: b.mediaRead - a.mediaRead, apiMedia: b.apiMedia - a.apiMedia, productsGet: b.productsGet - a.productsGet });
+const diff = (a, b) => Object.fromEntries(Object.keys(b).filter((k) => k !== 'ipcAll').map((k) => [k, b[k] - a[k]]));
 
 // ── Seite: Karten, sichtbare Karten, geladene Bilder ─────────────────────────
 const KARTEN = `
@@ -221,8 +248,35 @@ function seed() {
     for (const [id, name, i] of [['cc-cat-a', 'CCWatch', 0], ['cc-cat-b', 'CCRing', 1]]) {
       insert(db, 'categories', { id, branch_id, name, icon: 'Watch', color: '#000000', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: i, created_at: now, updated_at: now });
     }
+    // S3 — ein Altbestand-Artikel: Bild nur in `products.images` (Daten-URL), keine Medienzeile. Ganz unten sortiert.
+    insert(db, 'products', { id: 'cc-legacy-1', branch_id, category_id: 'cc-cat-a', brand: 'CC', name: LEGACY_NAME, images: JSON.stringify([LEGACY_PNG]),
+      stock_status: 'in_stock', quantity: 1, purchase_price: 0, created_at: '2020-01-01T00:00:00.000Z', updated_at: '2020-01-01T00:00:00.000Z' });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
+const LEGACY_NAME = 'CC Legacy 999';
+// 2×2-PNG, hier erzeugt (gültige Prüfsummen), als Daten-URL wie im Altbestand.
+const LEGACY_PNG = (() => {
+  const w = 2, h = 2; const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const o = y * (w * 3 + 1) + 1 + x * 3; raw[o] = 200; raw[o + 1] = 60; raw[o + 2] = 40; }
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type), data]); const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td) >>> 0); return Buffer.concat([len, td, crc]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2;
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+  return 'data:image/png;base64,' + png.toString('base64');
+})();
+// S3 — die Vorschau (Variante `thumbnail`, aktuelle Generation) des Hauptbilds.
+const THUMB_OF = `SELECT gt.storage_key AS key FROM media_links l
+    JOIN media_variants v ON v.tenant_id = l.tenant_id AND v.media_id = l.media_id AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+    JOIN media_blobs bt ON bt.tenant_id = v.tenant_id AND bt.blob_id = v.blob_id
+    JOIN media_blob_generations gt ON gt.tenant_id = bt.tenant_id AND gt.blob_id = bt.blob_id AND gt.generation_no = bt.current_generation_no
+   WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL ORDER BY l.is_primary DESC, l.sort_order LIMIT 1`;
+const MEDIA_TABLES = ['media_links', 'media_objects', 'media_variants', 'media_blobs', 'media_blob_generations'];
+const medienHash = () => createHash('sha256').update(S(MEDIA_TABLES.map((t) => dbQ(BIZ_DB, `SELECT * FROM ${t} ORDER BY rowid`)))).digest('hex').slice(0, 16);
+/** S3 — Summe der Bildbytes, die die Karten im RAM halten (je verschiedener blob:-URL einmal). */
+const ramKarten = (c) => c.ev(`${KARTEN} const urls=[...new Set(window.__ccBoxes().map((b)=>b.querySelector('img')?.src).filter((s)=>/^blob:/.test(s||'')))];
+  let t=0; for (const u of urls) t += (await (await fetch(u)).blob()).size; return { bilder: urls.length, kb: Math.round(t/1024) };`);
+/** S3 — Item Details: die SHA-256 aller gezeigten blob:-Bilder (das Hauptbild muss in voller Fassung dabei sein). */
+const detailBildShas = (c) => c.ev(`const urls=[...new Set([...document.querySelectorAll('img')].map((i)=>i.src).filter((s)=>/^blob:/.test(s)))];
+  const out=[]; for (const u of urls) { const b=await (await fetch(u)).arrayBuffer(); const h=await crypto.subtle.digest('SHA-256', b); out.push([...new Uint8Array(h)].map((x)=>x.toString(16).padStart(2,'0')).join('')); } return out;`);
 const MAIN_OF = `SELECT g.storage_key AS key, l.media_id AS mid FROM media_links l
     JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
     JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
@@ -343,6 +397,7 @@ try {
   schritt('Messung beginnt');
   const zP = zaehler(primary), zC = zaehler(client);
 
+  const medienVorher = medienHash();
   const spurenVorher = { biz: zeilen(BIZ_DB), srv: zeilen(SERVER_DB), dP: dateien(APP_DATA_DIR), dC: dateien(CLIENT_DATA_DIR), bP: await browserSpeicher(primary), bC: await browserSpeicher(client) };
 
   for (const [rolle, c, z] of [['PRIMARY', primary, zP], ['PC2', client, zC]]) {
@@ -360,6 +415,9 @@ try {
       `${rolle} LAZY beim Öffnen laden nur sichtbare/bald sichtbare Karten (${sk.blob} von ${sk.cards} geladen, ${sk.skeleton} warten)`);
     if (rolle === 'PRIMARY') ok(M.kalt.mediaRead > 0 && M.kalt.mediaRead < galerieBilder / 2, `${rolle} LAZY Bildlesungen ${M.kalt.mediaRead} statt ${galerieBilder} (alle Galerien)`);
     else ok(geladeneKarten > 0 && geladeneKarten <= sk.blob && M.kalt.productsGet < N / 2, `${rolle} LAZY /api/media ${geladeneKarten}, products.get ${M.kalt.productsGet} statt ${N} + ${galerieBilder}`);
+    // S3 — Vorschau statt Hauptbild: Primary über den Rohweg (kein JSON-Bytefeld), PC2 ohne Einzelauskunft je Karte.
+    if (rolle === 'PRIMARY') ok(M.kalt.mediaReadJson === 0 && M.kalt.mediaReadRaw === M.kalt.mediaRead && M.kalt.mediaReadBytes / Math.max(1, M.kalt.mediaRead) < 20000, `${rolle} S3 KALT ${M.kalt.mediaRead} Rohlesungen, 0 JSON, Ø ${Math.round(M.kalt.mediaReadBytes / Math.max(1, M.kalt.mediaRead) / 1024)} KB je Karte`);
+    else ok(M.kalt.productsGet === 0 && M.kalt.apiMediaBytes / Math.max(1, M.kalt.apiMedia) < 20000, `${rolle} S3 KALT 0 products.get (${M.kalt.productsGet}), Ø ${Math.round(M.kalt.apiMediaBytes / Math.max(1, M.kalt.apiMedia) / 1024)} KB je Karte`);
 
     schritt(rolle + ' SCROLL');
     // ── SCROLL ──
@@ -368,13 +426,23 @@ try {
     const ss = await karten(c);
     M.scroll = { ...diff(a, snap(z)), state: ss };
     ok(ss.skeleton === 0 && ss.blob === N, `${rolle} SCROLL alle ${N} Karten haben ihr Bild (${ss.blob})`);
+    if (rolle === 'PRIMARY') ok(M.scroll.mediaReadJson === 0 && M.scroll.mediaRead === N - M.kalt.mediaRead, `${rolle} S3 SCROLL je Karte genau EINE Rohlesung (${M.kalt.mediaRead + M.scroll.mediaRead} für ${N} Karten, 0 JSON)`);
+    else ok(M.scroll.productsGet === 0, `${rolle} S3 SCROLL 0 products.get (${M.scroll.productsGet})`);
+    M.ram = await ramKarten(c);
+    ok(M.ram.bilder === N && M.ram.kb < N * 20, `${rolle} S3 RAM: ${M.ram.bilder} Kartenbilder halten ${M.ram.kb} KB`);
+    { const lg = await c.ev(KARTEN + ` const b = window.__ccBoxes().find((x) => (x.parentElement?.textContent || '').includes(${S(LEGACY_NAME)})); const i = b?.querySelector('img'); return i ? { src: i.src.slice(0, 22), ok: i.complete && i.naturalWidth > 0 } : null;`);
+      ok(lg && lg.src.startsWith('data:image/png') && lg.ok, `${rolle} S3 Altbestand (products.images) zeigt sein Bild (${S(lg)})`); }
     if (rolle === 'PC2') ok(M.kalt.apiMedia + M.scroll.apiMedia === N, `${rolle} SCROLL jede Karte holte genau EIN Bild (${M.kalt.apiMedia + M.scroll.apiMedia} /api/media für ${N} Karten, Galerie hätte ${galerieBilder})`);
 
     schritt(rolle + ' ZURÜCK');
     // ── ZURÜCK aus Item Details ──
-    await c.ev(KARTEN + ` const b = window.__ccVisible()[0]; b.click(); return 1;`);
+    const geklickt = await c.ev(KARTEN + ` const b = window.__ccVisible()[0]; const n = (b.parentElement?.textContent.match(/CC Item \\d{3}/) || [''])[0]; b.click(); return n;`);
     await warteAuf(async () => !(await c.ev("return location.pathname === '/collection';")), 10000);
-    await sleep(2500);
+    { // S3 — Item Details zeigt weiterhin das HAUPTBILD in voller Fassung (nicht die Vorschau).
+      const x = artikel.find((a0) => a0.name === geklickt); const haupt = x ? dateiSha(dbQ(BIZ_DB, MAIN_OF, [x.id])[0]?.key) : 'KEIN';
+      const da = await warteAuf(async () => (await detailBildShas(c)).includes(haupt), 20000);
+      ok(da, `${rolle} S3 Item Details zeigt das Hauptbild in voller Fassung (${geklickt}, ${haupt.slice(0, 8)})`); }
+    await sleep(1500);
     a = snap(z);
     const zb = await c.ev(BIS_SICHTBAR_GELADEN('history.back();'));
     await sleep(1500);
@@ -382,7 +450,7 @@ try {
     ok(zb.ms >= 0 && zb.first && zb.first.loaded === zb.first.of,
       `${rolle} ZURÜCK sichtbare Bilder sofort da: ${zb.first?.loaded}/${zb.first?.of} beim ersten Bild nach ${zb.first?.ms} ms, alle nach ${zb.ms} ms`);
     if (rolle === 'PRIMARY') ok(M.zurueck.mediaRead === 0, `${rolle} ZURÜCK 0 Bildlesungen (${M.zurueck.mediaRead}) — Bild aus dem RAM-Cache`);
-    else ok(M.zurueck.apiMedia === 0, `${rolle} ZURÜCK 0 Bildübertragungen /api/media (${M.zurueck.apiMedia}); nur Fingerabdruck products.get ${M.zurueck.productsGet}`);
+    else ok(M.zurueck.apiMedia === 0 && M.zurueck.productsGet === 0, `${rolle} ZURÜCK 0 Bildübertragungen /api/media (${M.zurueck.apiMedia}), 0 products.get (${M.zurueck.productsGet}); Liste ${M.zurueck.storeProducts}`);
 
     schritt(rolle + ' KATEGORIE');
     // ── KATEGORIE wechseln und zurück ──
@@ -395,7 +463,7 @@ try {
     M.kategorie = { ...ka, ring: kb.cards, ...diff(a, snap(z)) };
     ok(r1 === 'OK' && r2 === 'OK' && kb.cards === Math.floor(N / 2) && ka.ms >= 0, `${rolle} KATEGORIE CCRing (${kb.cards} Karten) → All, sichtbar geladen nach ${ka.ms} ms`);
     if (rolle === 'PRIMARY') ok(M.kategorie.mediaRead === 0, `${rolle} KATEGORIE keine erneute Bildlesung (${M.kategorie.mediaRead})`);
-    else ok(M.kategorie.apiMedia === 0, `${rolle} KATEGORIE keine erneute Bildübertragung (${M.kategorie.apiMedia}); Fingerabdruck products.get ${M.kategorie.productsGet}`);
+    else ok(M.kategorie.apiMedia === 0 && M.kategorie.productsGet === 0, `${rolle} KATEGORIE keine erneute Bildübertragung (${M.kategorie.apiMedia}), 0 products.get (${M.kategorie.productsGet})`);
   }
 
   // ── SPUREN: die Navigation hat nichts geschrieben ──
@@ -409,7 +477,8 @@ try {
     ok(!bizD.some((t) => /media|image|thumb|cache/i.test(t)) && !srvD.some((t) => /media|image|thumb|cache/i.test(t)), 'SPUREN keine Medien-/Cache-Tabelle gewachsen');
     ok(neueDateienP.length === 0 && neueDateienC.length === 0, `SPUREN keine neue Datei in den Datenordnern (Primary ${S(neueDateienP)}, PC2 ${S(neueDateienC)})`);
     ok(nachher.bP === spurenVorher.bP && nachher.bC === spurenVorher.bC, `SPUREN localStorage/sessionStorage/IndexedDB/CacheStorage unverändert (${nachher.bP} | ${nachher.bC})`);
-    MESS.spuren = { biz: bizD, srv: srvD };
+    ok(medienHash() === medienVorher, 'SPUREN S3: Medien, Zuordnungen, Varianten, Blobs, Generationen unverändert (Inhalt, nicht nur Anzahl)');
+    MESS.spuren = { biz: bizD, srv: srvD, dbBytes: statSync(BIZ_DB).size };
   }
 
   // ── ÄNDERUNG: products.update ersetzt das Hauptbild eines sichtbaren Artikels ──
@@ -427,7 +496,8 @@ try {
     schritt('ÄNDERUNG antwort ' + r.status + ' ' + S(r.j).slice(0, 160));
     await spuelen(primary);
     const nach = dbQ(BIZ_DB, MAIN_OF, [x.id]);
-    const soll = dateiSha(nach[0]?.key);
+    const soll = dateiSha(dbQ(BIZ_DB, THUMB_OF, [x.id])[0]?.key);
+    const hauptNeu = dateiSha(nach[0]?.key);
     ok(r.status === 200 && nach[0]?.key !== vorher[0]?.key, `ÄNDERUNG Hauptbild über products.update ersetzt (${r.status} ${S(r.j?.error || '')})`);
     for (const [rolle, c] of [['PRIMARY', primary], ['PC2', client]]) {
       schritt(rolle + ' ÄNDERUNG prüfen');
@@ -435,7 +505,7 @@ try {
       await c.ev(KARTEN + ` const b = window.__ccVisible()[1]; b.click(); return 1;`); await sleep(2000);
       await c.ev('history.back(); return 1;');
       const ist = await warteAuf(async () => (await kartenBildSha(c, x.name)) === soll, 15000);
-      ok(ist && alt !== soll, `${rolle} ÄNDERUNG die Karte zeigt nach Rückkehr das NEUE Hauptbild (vorher ${String(alt).slice(0, 8)}, jetzt ${String(await kartenBildSha(c, x.name)).slice(0, 8)}, Datei ${soll.slice(0, 8)})`);
+      ok(ist && alt !== soll && soll !== hauptNeu, `${rolle} ÄNDERUNG die Karte zeigt nach Rückkehr die VORSCHAU des neuen Hauptbilds (vorher ${String(alt).slice(0, 8)}, jetzt ${String(await kartenBildSha(c, x.name)).slice(0, 8)}, Datei ${soll.slice(0, 8)})`);
     }
   }
 
@@ -473,15 +543,54 @@ try {
       angewandt = await warteAuf(async () => uebernommen(), 60000);
       await geh(primary, '/collection'); await sleep(1500);
     }
-    const soll = dateiSha(dbQ(BIZ_DB, MAIN_OF, [y.id])[0]?.key);
+    const soll = dateiSha(dbQ(BIZ_DB, THUMB_OF, [y.id])[0]?.key);
     ok(res.status >= 200 && res.status < 300 && angewandt, `MOBILE gallery_edit angenommen und am Primary übernommen (${res.status})`);
     ok(altPc2 !== soll && altPc2 !== 'KEIN-BILD', `MOBILE PC2 zeigte vorher das alte Bild aus dem RAM (${String(altPc2).slice(0, 8)} ≠ ${soll.slice(0, 8)})`);
     for (const [rolle, c] of [['PRIMARY', primary], ['PC2', client]]) {
       schritt(rolle + ' MOBILE prüfen');
       await geh(c, '/tasks'); await sleep(800); await c.ev('history.back(); return 1;');
       const ist = await warteAuf(async () => (await kartenBildSha(c, y.name)) === soll, 15000);
-      ok(ist && angewandt, `${rolle} MOBILE die Karte zeigt das per Handy geänderte Hauptbild (${String(await kartenBildSha(c, y.name)).slice(0, 8)} = ${soll.slice(0, 8)})`);
+      ok(ist && angewandt, `${rolle} MOBILE die Karte zeigt die Vorschau des per Handy geänderten Hauptbilds (${String(await kartenBildSha(c, y.name)).slice(0, 8)} = ${soll.slice(0, 8)})`);
     }
+  }
+
+  // ── S3 RÜCKFALL: die Vorschau-Datei eines Artikels fehlt → die Karte zeigt sein Hauptbild (Primary + PC2) ──
+  // Ein NEUER Artikel, dessen Vorschau noch kein Rechner geladen hat: eine schon übertragene Vorschau liefert der
+  // HTTP-Cache der PC2-WebView weiter (inhaltsadressierte Schlüssel, `immutable` — dieselben, richtigen Bytes).
+  {
+    await geh(primary, '/tasks'); await geh(client, '/tasks'); await sleep(800);
+    const sid = await ablegen(await aufnahme(9003));
+    const z = { name: 'CC Rueckfall 001' };
+    const cr = await befehl('products.create', { categoryId: 'cc-cat-a', brand: 'CC', name: z.name, stagingIds: [sid] }, TOKEN);
+    z.id = cr.j?.value?.productId;
+    await spuelen(primary);
+    ok(cr.status === 200 && !!z.id, `S3 RÜCKFALL neuer Artikel angelegt (${cr.status})`);
+    const tk = dbQ(BIZ_DB, THUMB_OF, [z.id])[0]?.key; const mk = dbQ(BIZ_DB, MAIN_OF, [z.id])[0]?.key;
+    const tPfad = join(APP_DATA_DIR, 'media', String(tk));
+    const hauptSha = dateiSha(mk);
+    renameSync(tPfad, tPfad + '.e2e-weg');   // nur im isolierten Testordner, danach zurück
+    try {
+      // RAM-Cache leeren: beide Seiten neu laden
+      await primary.ev('location.reload(); return 1;').catch(() => null); await sleep(4000);
+      primary.close(); primary = await attachOnly(APP_CDP); await waitFor(primary, SHELL, 90000);
+      await primary.ev('window.confirm = () => true; return 1;');
+      await client.ev('location.reload(); return 1;').catch(() => null); await sleep(4000);
+      client.close(); client = await attachOnly(CLIENT_CDP);
+      await waitFor(client, SHELL + ', input[type="password"]', 90000);
+      if (!(await exists(client, SHELL))) {
+        await setVal(client, 'input[type="email"]', OWNER_EMAIL); await setVal(client, 'input[type="password"]', OWNER_PW);
+        await klick(client, '[data-client-signin]'); await waitFor(client, SHELL, 90000);
+      }
+      await client.ev('window.confirm = () => true; return 1;');
+      for (const [rolle, c] of [['PRIMARY', primary], ['PC2', client]]) {
+        await geh(c, '/tasks'); await sleep(800); await geh(c, '/collection');
+        const ist = await warteAuf(async () => (await kartenBildSha(c, z.name)) === hauptSha, 30000);
+        ok(ist, `${rolle} S3 RÜCKFALL Vorschau-Datei fehlt → die Karte zeigt das Hauptbild (${String(await kartenBildSha(c, z.name)).slice(0, 8)} = ${hauptSha.slice(0, 8)})`);
+      }
+    } finally {
+      renameSync(tPfad + '.e2e-weg', tPfad);
+    }
+    ok(existsSync(tPfad), 'S3 RÜCKFALL Vorschau-Datei wieder an ihrem Platz (nichts gelöscht)');
   }
 
   schritt('ALT');

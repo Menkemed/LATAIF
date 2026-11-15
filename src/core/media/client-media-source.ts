@@ -17,6 +17,7 @@
 import { remoteRead } from '@/core/bridge/remote-read';
 import { clientConfig } from '@/core/bridge/client-mode';
 import { MAX_REMOTE_IMAGES } from '@/core/bridge/remote-create-support';
+import { cardThumbFingerprint, type CardThumbRef } from '@/core/media/card-thumbs';
 
 export interface RemoteGalleryItem {
   blob: Blob;
@@ -55,6 +56,29 @@ export async function loadRemoteCardImage(
   });
   if (!res.ok) throw new Error(`MEDIA_UNAVAILABLE_${res.status}`);
   return { kind: 'media', fingerprint, blob: await res.blob() };
+}
+
+/**
+ * COLLECTIONS-S3 — das Kartenbild über den Verweis aus der Artikelliste: KEINE Einzelauskunft. Gleicher
+ * Fingerabdruck → nichts reist. Sonst genau die Vorschau; fehlt sie oder ist sie nicht lesbar, das
+ * Hauptbild (nie ein falsches Bild: beide Schlüssel stammen aus derselben Zeile des Primary).
+ */
+export async function loadRemoteCardThumb(
+  ref: CardThumbRef,
+  knownFingerprint: string | undefined,
+  fetchFn: typeof fetch = fetch,
+): Promise<RemoteCardImage> {
+  const fingerprint = cardThumbFingerprint(ref);
+  if (fingerprint === knownFingerprint) return { kind: 'same', fingerprint };
+  const c = clientConfig();
+  if (!c?.token) throw new Error('NOT_AUTHENTICATED');
+  const get = async (key: string): Promise<Blob | null> => {
+    const res = await fetchFn(`${c.serverUrl}/api/media?key=${encodeURIComponent(key)}`, { headers: { Authorization: `Bearer ${c.token}` } });
+    return res.ok ? res.blob() : null;
+  };
+  const blob = (ref.thumbKey ? await get(ref.thumbKey) : null) ?? await get(ref.mainKey);
+  if (!blob) throw new Error('MEDIA_UNAVAILABLE');
+  return { kind: 'media', fingerprint, blob };
 }
 
 export async function loadRemoteGallery(productId: string, fetchFn: typeof fetch = fetch): Promise<RemoteGalleryItem[]> {
