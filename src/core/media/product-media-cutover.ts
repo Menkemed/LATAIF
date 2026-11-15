@@ -24,6 +24,7 @@ import type { FinalizeResult } from './coordinator.ts';
 import type { IngestAndFinalizeInput } from './orchestrator.ts';
 import { parseLegacyImages } from './product-media-resolver.ts';
 import { toIngestRequestId } from './ingest-request-id.ts';
+import { SIZE_PROFILE_NORM_PARAMS, type MediaSizeProfile } from './size-profile.ts';
 
 // ── error contract ──────────────────────────────────────────────────────────
 
@@ -552,9 +553,12 @@ function utf8ToBytes(s: string): Uint8Array {
 export const CUTOVER_PROTO_VERSION = 'media-ingest-v1';
 export const CUTOVER_NORM_PARAMS = 'main<=100000;thumb<=20000;out=jpeg';
 
-export async function canonicalRequestHash(bytes: Uint8Array, scope: string): Promise<string> {
+/** BILDSPEICHER — `profile` ist Teil der Anfrage-Identität (Spiegel von Rust
+ *  `canonical_request_hash_profiled`); ohne Angabe `standard`, bitgleich mit dem bisherigen Hash. */
+export async function canonicalRequestHash(bytes: Uint8Array, scope: string, profile: MediaSizeProfile = 'standard'): Promise<string> {
   const inputSha = await sha256Hex(bytes);
-  const material = `${CUTOVER_PROTO_VERSION}|${scope}|stock_image|${inputSha}|${CUTOVER_NORM_PARAMS}`;
+  const norm = profile === 'standard' ? CUTOVER_NORM_PARAMS : SIZE_PROFILE_NORM_PARAMS[profile];
+  const material = `${CUTOVER_PROTO_VERSION}|${scope}|stock_image|${inputSha}|${norm}`;
   return sha256Hex(utf8ToBytes(material));
 }
 

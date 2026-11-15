@@ -269,3 +269,44 @@ fn an_absent_media_schema_means_no_required_media_rather_than_an_error() {
     // …and a database that is not there at all is not an error either.
     assert!(required_keys_from_db(&dir.join("nope.db")).unwrap().is_empty());
 }
+
+// ── BILDSPEICHER — the GC weakness: a generation that reached `deleted` must become collectable ──
+
+#[test]
+fn a_superseded_generation_stays_preserved_until_it_is_explicitly_deleted() {
+    let c = db();
+    add_linked_media(&c);
+    add_generation(&c, "b1", 2, ORPH, "available");
+    c.execute("UPDATE media_blobs SET current_generation_no=2 WHERE blob_id='b1'", []).unwrap();
+    c.execute("UPDATE media_blob_generations SET gen_status='superseded' WHERE blob_id='b1' AND generation_no=1", []).unwrap();
+    assert!(preserved_keys(&c).unwrap().contains(&key(H1)), "superseded = still protected");
+    c.execute("UPDATE media_blob_generations SET gen_status='gc_pending' WHERE blob_id='b1' AND generation_no=1", []).unwrap();
+    assert!(preserved_keys(&c).unwrap().contains(&key(H1)), "gc_pending = still protected");
+    c.execute("UPDATE media_blob_generations SET gen_status='deleted' WHERE blob_id='b1' AND generation_no=1", []).unwrap();
+    let pres = preserved_keys(&c).unwrap();
+    assert!(!pres.contains(&key(H1)), "only an explicitly deleted generation becomes collectable");
+    assert!(pres.contains(&key(ORPH)), "the current generation is untouched");
+}
+
+#[test]
+fn a_deleted_generation_that_a_backup_pins_stays_preserved() {
+    let c = db();
+    c.execute_batch(
+        "CREATE TABLE media_backup_generation_pins (tenant_id TEXT, backup_id TEXT, blob_id TEXT, generation_no INTEGER);",
+    )
+    .unwrap();
+    add_linked_media(&c);
+    add_generation(&c, "b1", 2, ORPH, "available");
+    c.execute("UPDATE media_blobs SET current_generation_no=2 WHERE blob_id='b1'", []).unwrap();
+    c.execute("UPDATE media_blob_generations SET gen_status='deleted' WHERE blob_id='b1' AND generation_no=1", []).unwrap();
+    c.execute("INSERT INTO media_backup_generation_pins VALUES ('t1','bk1','b1',1)", []).unwrap();
+    assert!(preserved_keys(&c).unwrap().contains(&key(H1)), "a pin outranks the deleted state");
+}
+
+#[test]
+fn a_generation_table_without_status_keeps_the_widest_answer() {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch("CREATE TABLE media_blob_generations (storage_key TEXT PRIMARY KEY); INSERT INTO media_blob_generations VALUES ('t1/aa/x.jpg');")
+        .unwrap();
+    assert_eq!(preserved_keys(&c).unwrap().len(), 1);
+}

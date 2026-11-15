@@ -42,8 +42,13 @@ pub mod record_image;
 pub(crate) mod storage;
 // MEDIA-S1 — raw binary transport for byte-exact originals (documents); no writer uses it yet.
 pub(crate) mod raw_transport;
+// BILDSPEICHER — bestehendes Bild in kleinerer Fassung neu schreiben (Migration, Generation n+1).
+pub(crate) mod recompress;
 
-pub use normalize::{create_thumbnail, inspect_image_bytes, normalize_stock_image};
+pub use normalize::{
+    create_thumbnail, create_thumbnail_profiled, encode_rendition, inspect_image_bytes, normalize_stock_image,
+    normalize_stock_image_profiled, rendition_budget_ok, Rendition, SizeProfile,
+};
 pub use storage::{
     derive_storage_path, publish_atomically, read_verified_media, resolve_within_root, sha256_hex,
     Published,
@@ -100,6 +105,8 @@ pub enum MediaError {
     /// parent of the app data dir / DB / media / staging). Rejected to prevent a backup snapshotting the
     /// live databases in place or nesting backups recursively.
     BackupLocationOverlapsAppData,
+    /// BILDSPEICHER — unbekannte Größenklasse oder Byte-Grenze außerhalb des zulässigen Bereichs.
+    InvalidSizeProfile,
     /// Filesystem error (kind only, never a path).
     Io(String),
 }
@@ -127,6 +134,7 @@ impl MediaError {
             MediaError::BackupLocationNotAbsolute => "MEDIA_BACKUP_LOCATION_NOT_ABSOLUTE",
             MediaError::BackupLocationNotWritable => "MEDIA_BACKUP_LOCATION_NOT_WRITABLE",
             MediaError::BackupLocationOverlapsAppData => "MEDIA_BACKUP_LOCATION_OVERLAPS_APPDATA",
+            MediaError::InvalidSizeProfile => "MEDIA_SIZE_PROFILE_INVALID",
             MediaError::Io(_) => "MEDIA_IO_ERROR",
         }
     }

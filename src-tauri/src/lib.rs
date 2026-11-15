@@ -2113,6 +2113,8 @@ fn media_prepare_stock_image(
     request_hash: String,
     image_bytes: Vec<u8>,
     original_name: Option<String>,
+    // BILDSPEICHER — Größenklasse (`standard` | `main60` | `main30`); fehlt sie, gilt `standard`.
+    size_profile: Option<String>,
 ) -> Result<media::ingest::PrepareResult, String> {
     // IPC boundary guard: refuse oversized uploads before allocating a service,
     // touching the media root or handing bytes to the image decoder. The same
@@ -2121,15 +2123,46 @@ fn media_prepare_stock_image(
     if image_bytes.len() > media::ingest::MAX_INGEST_INPUT_BYTES {
         return Err("MEDIA_INGEST_INPUT_TOO_LARGE".to_string());
     }
+    let profile = media::SizeProfile::from_wire(size_profile.as_deref()).map_err(|e| e.code().to_string())?;
     let svc = media_ingest_service(&state);
-    svc.prepare(
+    svc.prepare_profiled(
         &tenant_scope,
         &ingest_request_id,
         &request_hash,
         &image_bytes,
         original_name.as_deref(),
+        profile,
     )
     .map_err(|e| e.code().to_string())
+}
+
+/// BILDSPEICHER — ein gespeichertes Bild in kleinerer Fassung neu kodieren (Migration bestehender
+/// Bilder, Generation n+1). `publish = false` ist der Probelauf: nur messen, nichts schreiben.
+/// Liest die Quelle verifiziert, schreibt die neue Datei inhaltsadressiert + atomar und liest sie
+/// verifiziert zurück; die alte Datei wird nie angefasst. Die DB-Zeilen schreibt der Renderer.
+/// Läuft neben dem Hauptfaden: Dekodieren + Leiter kosten pro Bild einige hundert Millisekunden.
+#[tauri::command]
+async fn media_recompress_stored(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    source_hash: String,
+    source_extension: String,
+    rendition: String,
+    max_bytes: u32,
+    publish: bool,
+    publish_only_below: Option<u32>,
+) -> Result<media::recompress::RecompressResult, String> {
+    let r = media::recompress::rendition_from_wire(&rendition).map_err(|e| e.code().to_string())?;
+    let svc = media_ingest_service(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        media::recompress::recompress_stored(
+            &svc, &tenant_scope, &source_hash, &source_extension, r, max_bytes as usize, publish,
+            publish_only_below.map(|v| v as usize),
+        )
+        .map_err(|e| e.code().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ── SINGLE-PC-STORAGE-I2 §14 A — free space on the volume that holds the database ────────────
@@ -2495,7 +2528,10 @@ fn mobile_upload_prepare_image(
     expected_binding_revision: i64,
     expected_tenant_id: String,
     expected_branch_id: String,
+    // BILDSPEICHER — Größenklasse des Artikels (aus seiner Kategorie); fehlt sie, gilt `standard`.
+    size_profile: Option<String>,
 ) -> Result<media::ingest::PrepareResult, String> {
+    let profile = media::SizeProfile::from_wire(size_profile.as_deref()).map_err(|e| e.code().to_string())?;
     let (mut conn, install_id) = open_config_db(&state.server)?;
     let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
     // MOBILE-04B2A6-I1 — evidence-driven gate: fail closed unless an active binding EXACTLY matches the
@@ -2512,10 +2548,18 @@ fn mobile_upload_prepare_image(
     let prepare_request_id = sync::mobile_upload::prepare_request_id(
         &trusted, &upload_event_id, &p.entity_id, &p.payload_hash, slot, p.is_primary, &p.content_hash,
     );
-    let request_hash = media::ingest::canonical_request_hash(&tenant_scope, &p.bytes);
+    // BILDSPEICHER — eine andere Klasse ist eine andere Aufnahme: die Kennung bekommt die Klasse
+    // dazu (nur außerhalb von `standard`, damit alte, schon vorbereitete Aufnahmen ihre Kennung
+    // behalten). Sonst träfe eine nach dem Update wiederholte Vorbereitung auf das alte Journal mit
+    // dem alten Hash und bliebe für immer im Konflikt hängen.
+    let prepare_request_id = match profile {
+        media::SizeProfile::Standard => prepare_request_id,
+        p2 => media::sha256_hex(format!("{prepare_request_id}|{}", p2.wire()).as_bytes()),
+    };
+    let request_hash = media::ingest::canonical_request_hash_profiled(&tenant_scope, &p.bytes, profile);
     // PHASE B — media prepare under the deterministic, provenance-bound prepareRequestId.
     let prepared = media_ingest_service(&state)
-        .prepare(&tenant_scope, &prepare_request_id, &request_hash, &p.bytes, None)
+        .prepare_profiled(&tenant_scope, &prepare_request_id, &request_hash, &p.bytes, None, profile)
         .map_err(|e| e.code().to_string())?;
     // PHASE C — before RELEASING the prepared descriptor to JS, re-run the fenced read in a fresh
     // IMMEDIATE tx: the binding revision/scope must be unchanged, the claim/lease/job still valid, and
@@ -3585,6 +3629,7 @@ pub fn run() {
             media_publish_original,
             media_stat_original,
             media_recover_ingests,
+            media_recompress_stored,
             // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
             // but activation is scope-gated: every wrapper's first act (after opening the config DB and
             // building the caller's expected scope) is the evidence-driven `mobile_runtime_gate`, and

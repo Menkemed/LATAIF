@@ -204,13 +204,15 @@ function parsePhotos(raw: unknown, allowKeep: boolean): RepairPhotoSlot[] | unde
  */
 async function resolvePhotoMedia(
   slots: readonly RepairPhotoSlot[], repairId: string | undefined, owner: StagingOwner, read: StagedMediaReader,
+  categoryId?: string | null,
 ): Promise<string[]> {
   const ids = [...new Set(slots.flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])))];
   // POST-PARITY R7B PP-12 — der Standardleser gibt das Foto so heraus, wie es gespeichert wird (≤ 100 000 B).
   const data = await readStagedAsRecordImages(ids, owner, read, (m) => new ServicePayloadError(m));
   const byId = new Map(ids.map((id, i) => [id, data[i]]));
   const plan = slots.map((x) => ('stagingId' in x ? { dataUrl: String(byId.get(x.stagingId)) } : { keep: x.keep }));
-  return resolveRepairPhotoSlots(plan, undefined, repairId);
+  // BILDSPEICHER — Größenklasse aus der Artikelkategorie (genannt oder aus der Zeile der Reparatur).
+  return resolveRepairPhotoSlots(plan, undefined, repairId, categoryId);
 }
 
 const stagedIdsOf = (slots: readonly RepairPhotoSlot[] | undefined): string[] =>
@@ -348,7 +350,7 @@ export async function runRepairCreate(
     // Kosten aus der geteilten Ableitung (C3F FINAL), und bei eigener Ware die Angaben DES ARTIKELS.
     const data = house(() => planRepairCreate(req.input, houseRepairPort(identity.branchId)));
     // Die Fotos INNERHALB des Auftrags: eine Wiederholung derselben Kennung kommt gar nicht bis hierher.
-    const mediaIds = await resolvePhotoMedia(req.photos, undefined, owner, read);
+    const mediaIds = await resolvePhotoMedia(req.photos, undefined, owner, read, data.itemCategoryId);
     // Ab hier rechnet das Haus: Belegnummer und Gutscheincode aus seinen eigenen Quellen, der
     // Anfangsstatus, bei eigener Ware `in_repair` am Artikel und der Platzhalter-Kunde, und — wenn
     // Werkstatt und Kosten zusammenkommen — die erste Arbeitszeile.

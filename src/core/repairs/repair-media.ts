@@ -38,18 +38,27 @@ export function repairMediaOwner(repairId: string, scope = repairMediaScope(repa
   };
 }
 
-export function repairPhotoScope(scope = repairMediaScope(), orchestrator?: StockMediaOrchestrator): RecordPhotoScope {
-  return { tenantId: scope.tenantId, branchId: scope.branchId, ownerType: REPAIR_MEDIA_ENTITY, role: REPAIR_MEDIA_ROLE, orchestrator };
+export function repairPhotoScope(scope = repairMediaScope(), orchestrator?: StockMediaOrchestrator, categoryId?: string | null): RecordPhotoScope {
+  return { tenantId: scope.tenantId, branchId: scope.branchId, ownerType: REPAIR_MEDIA_ENTITY, role: REPAIR_MEDIA_ROLE, orchestrator, categoryId };
+}
+
+/** BILDSPEICHER — die Artikelkategorie der Reparatur für die Größenklasse: genannt (Maske) oder,
+ *  bei einer bestehenden Reparatur, aus ihrer Zeile. Ohne Kategorie gilt 60 KB. */
+function repairCategory(repairId: string | undefined, categoryId: string | null | undefined): string | null {
+  if (typeof categoryId === 'string' && categoryId) return categoryId;
+  if (!repairId) return null;
+  const row = query('SELECT item_category_id FROM repairs WHERE id = ?', [repairId])[0];
+  return row?.item_category_id ? String(row.item_category_id) : null;
 }
 
 /** Aufnehmen VOR der Klammer: aus Daten-URLs werden geprüfte, noch unverknüpfte Objekte. */
-export function ingestRepairPhotos(urls: readonly string[], orchestrator?: StockMediaOrchestrator, repairId?: string): Promise<string[]> {
-  return ingestRecordPhotos(urls, repairPhotoScope(repairMediaScope(repairId), orchestrator));
+export function ingestRepairPhotos(urls: readonly string[], orchestrator?: StockMediaOrchestrator, repairId?: string, categoryId?: string | null): Promise<string[]> {
+  return ingestRecordPhotos(urls, repairPhotoScope(repairMediaScope(repairId), orchestrator, repairCategory(repairId, categoryId)));
 }
 
 /** Dasselbe für eine Maske, die behaltene Medien und neue Aufnahmen mischt. */
-export function resolveRepairPhotoSlots(slots: readonly PhotoSlotRequest[], orchestrator?: StockMediaOrchestrator, repairId?: string): Promise<string[]> {
-  return resolvePhotoSlots(slots, repairPhotoScope(repairMediaScope(repairId), orchestrator));
+export function resolveRepairPhotoSlots(slots: readonly PhotoSlotRequest[], orchestrator?: StockMediaOrchestrator, repairId?: string, categoryId?: string | null): Promise<string[]> {
+  return resolvePhotoSlots(slots, repairPhotoScope(repairMediaScope(repairId), orchestrator, repairCategory(repairId, categoryId)));
 }
 
 /**

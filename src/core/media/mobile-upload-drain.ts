@@ -16,6 +16,7 @@
 import type { ProductCreateResult } from './product-media-create';
 import type { MobileUploadReceiptIntent } from '../../stores/productStore';
 import type { PrepareResult } from './gateway';
+import type { MediaSizeProfile } from './size-profile.ts';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
 import { SKU_TAKEN } from '../products/sku-unique.ts';
@@ -82,7 +83,8 @@ export interface MobileUploadBridge {
    *  descriptor whose `ingest_request_id` is the SERVER-derived, provenance-bound prepareRequestId
    *  (JS does not supply it). Rejects for a stale/foreign token, wrong origin user, a non-processing
    *  job, or a bad slot. NO image bytes cross IPC. */
-  prepareImage(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, slot: number, tenantScope: string, scope: DrainScope): Promise<PrepareResult>;
+  /** BILDSPEICHER — `sizeProfile` = Größenklasse des Artikels; ohne Angabe `standard`. */
+  prepareImage(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, slot: number, tenantScope: string, scope: DrainScope, sizeProfile?: MediaSizeProfile): Promise<PrepareResult>;
   renew(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, claimantInstanceId: string, leaseSeconds: number, scope: DrainScope): Promise<boolean>;
   release(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, scope: DrainScope): Promise<boolean>;
   /** MOBILE-QUEUE — eine WIEDERHOLBARE Panne des Auftrags selbst: zurueck auf `accepted`, Zaehler +1,
@@ -107,8 +109,8 @@ export function createTauriMobileUploadBridge(
   return {
     claim: (claimantInstanceId, leaseSeconds, scope) =>
       invoke<ClaimGrant | null>('mobile_upload_claim', { claimantInstanceId, leaseSeconds, ...scope }),
-    prepareImage: (originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, scope) =>
-      invoke<PrepareResult>('mobile_upload_prepare_image', { originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, ...scope }),
+    prepareImage: (originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, scope, sizeProfile) =>
+      invoke<PrepareResult>('mobile_upload_prepare_image', { originAuthenticatedUserId, uploadEventId, claimToken, slot, tenantScope, ...scope, sizeProfile: sizeProfile ?? null }),
     renew: (originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds, scope) =>
       invoke<boolean>('mobile_upload_renew', { originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds, ...scope }),
     release: (originAuthenticatedUserId, uploadEventId, claimToken, scope) =>

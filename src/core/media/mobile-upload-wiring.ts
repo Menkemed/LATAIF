@@ -20,6 +20,7 @@ import { TauriMediaGateway } from '@/core/media/gateway';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { getStockMediaOrchestrator } from '@/core/media/orchestrator';
 import { canonicalRequestHash } from '@/core/media/product-media-cutover';
+import { sizeProfileFor } from '@/core/media/size-profile';
 import { buildMobileGalleryEnvelope, type MobileGalleryPlan } from '@/core/media/mobile-gallery-edit';
 import { diffProductText } from '@/core/media/product-edit-draft';
 import { isSyncConfigured } from '@/core/sync/sync-service';
@@ -112,17 +113,30 @@ function deriveCreateBatchId(entityId: string): string {
   return s ? `create:${s.tenantId}:${s.branchId}:${entityId}:${ROLE}` : '';
 }
 
+/** BILDSPEICHER — die Kategorie eines Mobile-Auftrags (Upload-Metadaten, sonst der Artikel). */
+function mobileGrantCategory(grant: ClaimGrant): string | null {
+  try {
+    const meta = JSON.parse(grant.metadataJson) as Record<string, unknown>;
+    if (typeof meta.categoryId === 'string' && meta.categoryId) return meta.categoryId;
+  } catch { /* keine Metadaten → Artikelzeile */ }
+  const row = query('SELECT category_id FROM products WHERE id = ?', [grant.entityId])[0];
+  return row?.category_id ? String(row.category_id) : null;
+}
+
 /** Prepare every image via the Rust media core (bytes stay in Rust) → ordered opaque descriptors. */
 async function preparePreparedMedia(grant: ClaimGrant, sc: DrainScope): Promise<PreparedMediaItem[]> {
   const scope = currentScope();
   if (!scope) throw new MaterializeError('unavailable');
   const sorted = [...grant.images].sort((a, b) => a.slot - b.slot);
   const out: PreparedMediaItem[] = [];
+  // BILDSPEICHER — Größenklasse aus der Kategorie: bei einer Neuanlage aus dem Upload, bei einer
+  // Galerie-Bearbeitung aus dem bestehenden Artikel. Rust nimmt die Klasse in Hash und Kennung auf.
+  const sizeProfile = sizeProfileFor({ categoryId: mobileGrantCategory(grant), role: ROLE });
   for (const im of sorted) {
     let prepared;
     try {
       // MOBILE-04B2A7-I1 — forward the validated worker scope so prepare_image passes the server fence.
-      prepared = await bridge.prepareImage(grant.authenticatedUserId, grant.uploadEventId, grant.claimToken, im.slot, scope.tenantId, sc);
+      prepared = await bridge.prepareImage(grant.authenticatedUserId, grant.uploadEventId, grant.claimToken, im.slot, scope.tenantId, sc, sizeProfile);
     } catch (e) {
       // A staging integrity/manifest failure is permanent → quarantine; anything else (stale token,
       // transient IPC) → retry. Rust returns MOBILE_UPLOAD_INTEGRITY_FAILURE / _MANIFEST_INVALID.

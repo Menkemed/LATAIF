@@ -154,7 +154,7 @@ export async function createOrderOnPrimary(input: OrderCreateInput): Promise<Ord
   // (Rust normalisiert, prüft, veröffentlicht), verknüpfen INNERHALB. Ins Schema kommt sie nicht
   // mehr — der Auftrag hält keine Bytes.
   const { spec: customProductSpec, urls } = ohneVorlagenbilder(input.customProductSpec);
-  const referenceMediaIds = await ingestOrderPhotos(urls);
+  const referenceMediaIds = await ingestOrderPhotos(urls, undefined, undefined, customProductSpec?.categoryId);
   return runOnPrimary(
     () => createOrderInHouse({ ...input, lines, customProductSpec }, currentBranchId(), {}, referenceMediaIds),
     frischLesen,

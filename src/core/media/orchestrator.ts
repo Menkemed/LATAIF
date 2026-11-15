@@ -56,6 +56,7 @@ import type {
   ObjectIngestResult,
 } from './coordinator.ts';
 import { MediaDbCoordinator } from './coordinator.ts';
+import type { MediaSizeProfile } from './size-profile.ts';
 
 // ── edit-batch DTOs (3B2C1) ──────────────────────────────────────────────────
 
@@ -74,6 +75,8 @@ export interface EditNewImageInput {
   requestHash: string;
   imageBytes: Uint8Array;
   originalName?: string;
+  /** BILDSPEICHER — Größenklasse, mit der `requestHash` berechnet wurde. */
+  sizeProfile?: MediaSizeProfile;
 }
 
 // ── error contract ──────────────────────────────────────────────────────────
@@ -100,6 +103,8 @@ export interface IngestAndFinalizeInput extends FinalizeInput {
   /** Raw bytes to prepare in JS→Rust. Absent when `prepared` is supplied (mobile handoff). */
   imageBytes?: Uint8Array;
   originalName?: string;
+  /** BILDSPEICHER — Größenklasse, mit der `requestHash` berechnet wurde (ohne: `standard`). */
+  sizeProfile?: MediaSizeProfile;
   /** MOBILE-04B2A2 — a descriptor already prepared ELSEWHERE (a Rust command reading the mobile
    *  staging file). When present, the batch registers it directly, skipping `prepareStockImage`,
    *  so no image bytes ever cross into JS. The prepared request is staged in the SAME media journal
@@ -110,6 +115,7 @@ export interface IngestAndFinalizeInput extends FinalizeInput {
 export interface ReplaceStockImageInput extends ReplaceInput {
   imageBytes: Uint8Array;
   originalName?: string;
+  sizeProfile?: MediaSizeProfile;
 }
 
 export interface RemoveStockMediaLinkInput {
@@ -223,6 +229,23 @@ export class StockMediaOrchestrator {
     }
   }
 
+  /**
+   * BILDSPEICHER — eine Wartungsoperation (Migration bestehender Bilder) unter DERSELBEN
+   * Medien-Sperre und DEMSELBEN DB-Lease wie jeder Upload: während sie läuft, kann im Renderer kein
+   * Ingest, kein Edit und keine Recovery dazwischenschreiben, und ein DB-Austausch (Reload/Restore)
+   * wartet, bis der Lease freigegeben ist. `fn` bekommt den Lease (DB + `saveDurably`).
+   */
+  async runMaintenanceExclusive<T>(fn: (lease: OrchestratorLease) => Promise<T>): Promise<T> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        return await fn(lease);
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
   /** Translate the DB-side lease-invalidation into the orchestrator's
    *  wire-facing code. */
   private wrapLeaseError(e: unknown, code: 'MEDIA_ORCH_DB_INSTANCE_CHANGED' | 'MEDIA_ORCH_DB_PERSIST_FAILED'): never {
@@ -280,6 +303,7 @@ export class StockMediaOrchestrator {
             requestHash: input.requestHash,
             imageBytes: singleBytes,
             originalName: input.originalName,
+            sizeProfile: input.sizeProfile,
           });
         } catch (e) {
           throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
@@ -320,7 +344,7 @@ export class StockMediaOrchestrator {
    * own business transaction (`MediaOwnerLinks`). One pipeline: same Rust prepare/commit, same
    * coordinator writers, same recovery.
    */
-  async ingestObject(input: ObjectIngestInput & { imageBytes: Uint8Array; originalName?: string }): Promise<ObjectIngestResult> {
+  async ingestObject(input: ObjectIngestInput & { imageBytes: Uint8Array; originalName?: string; sizeProfile?: MediaSizeProfile }): Promise<ObjectIngestResult> {
     return this.withOpsLock(async () => {
       const lease = await this.leaseFactory();
       try {
@@ -333,6 +357,7 @@ export class StockMediaOrchestrator {
             requestHash: input.requestHash,
             imageBytes: input.imageBytes,
             originalName: input.originalName,
+            sizeProfile: input.sizeProfile,
           });
         } catch (e) {
           throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
@@ -400,6 +425,7 @@ export class StockMediaOrchestrator {
                 requestHash: input.requestHash,
                 imageBytes: input.imageBytes,
                 originalName: input.originalName,
+                sizeProfile: input.sizeProfile,
               });
             } catch (e) {
               throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
@@ -496,6 +522,7 @@ export class StockMediaOrchestrator {
               requestHash: item.requestHash,
               imageBytes: item.imageBytes,
               originalName: item.originalName,
+              sizeProfile: item.sizeProfile,
             });
           } catch (e) {
             throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
@@ -620,6 +647,7 @@ export class StockMediaOrchestrator {
             requestHash: input.requestHash,
             imageBytes: input.imageBytes,
             originalName: input.originalName,
+            sizeProfile: input.sizeProfile,
           });
         } catch (e) {
           throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);

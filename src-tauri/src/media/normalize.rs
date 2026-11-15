@@ -20,6 +20,82 @@ const THUMB_MAX_BYTES: usize = 20_000;
 const THUMB_MAX_DIM: u32 = 256;
 const THUMB_MIN_DIM: u32 = 96;
 
+/// BILDSPEICHER — die Größenklasse eines Bildes (Hauptbild / Vorschau).
+///
+/// `Standard` ist die bisherige Grenze (100 000 / 20 000 B). Sie bleibt für Ausweise und für jeden
+/// Aufrufer, der keine Klasse nennt — damit bleiben auch die Anfrage-Hashes alter, noch offener
+/// Aufnahmen gültig. `Main60` (Uhren, Reparaturen ohne eindeutige Kategorie, alles Unbekannte) und
+/// `Main30` (Schmuck, Accessories) gelten für neue Uploads und für die Migration bestehender Bilder,
+/// beide mit einer Vorschau von höchstens 10 000 B. Die Zuordnung Kategorie → Klasse trifft EINE
+/// Stelle in TypeScript (`size-profile.ts`); hier stehen nur die Grenzen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeProfile {
+    Standard,
+    Main60,
+    Main30,
+}
+
+impl SizeProfile {
+    /// Draht-Name → Klasse. Fehlt die Angabe, gilt `Standard`; ein unbekannter Name ist ein Fehler,
+    /// nie ein stiller Rückfall auf eine andere Grenze.
+    pub fn from_wire(s: Option<&str>) -> Result<Self, MediaError> {
+        match s {
+            None | Some("standard") => Ok(SizeProfile::Standard),
+            Some("main60") => Ok(SizeProfile::Main60),
+            Some("main30") => Ok(SizeProfile::Main30),
+            Some(_) => Err(MediaError::InvalidSizeProfile),
+        }
+    }
+
+    pub fn wire(self) -> &'static str {
+        match self {
+            SizeProfile::Standard => "standard",
+            SizeProfile::Main60 => "main60",
+            SizeProfile::Main30 => "main30",
+        }
+    }
+
+    pub fn main_max_bytes(self) -> usize {
+        match self {
+            SizeProfile::Standard => MAIN_MAX_BYTES,
+            SizeProfile::Main60 => 60_000,
+            SizeProfile::Main30 => 30_000,
+        }
+    }
+
+    pub fn thumb_max_bytes(self) -> usize {
+        match self {
+            SizeProfile::Standard => THUMB_MAX_BYTES,
+            SizeProfile::Main60 | SizeProfile::Main30 => 10_000,
+        }
+    }
+
+    /// Teil der kanonischen Anfrage-Identität. `Standard` ist WORTGLEICH mit dem bisherigen Wert.
+    pub fn norm_params(self) -> &'static str {
+        match self {
+            SizeProfile::Standard => "main<=100000;thumb<=20000;out=jpeg",
+            SizeProfile::Main60 => "main<=60000;thumb<=10000;out=jpeg",
+            SizeProfile::Main30 => "main<=30000;thumb<=10000;out=jpeg",
+        }
+    }
+}
+
+/// Welche Fassung eines Bildes erzeugt wird.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rendition {
+    Main,
+    Thumbnail,
+}
+
+/// Zulässiger Bereich einer frei gewählten Byte-Grenze (Migration): nie über dem Schema-Limit,
+/// nie so klein, dass nur noch ein unbrauchbares Bild herauskäme.
+pub fn rendition_budget_ok(r: Rendition, max_bytes: usize) -> bool {
+    match r {
+        Rendition::Main => (10_000..=MAIN_MAX_BYTES).contains(&max_bytes),
+        Rendition::Thumbnail => (4_000..=THUMB_MAX_BYTES).contains(&max_bytes),
+    }
+}
+
 /// Descending JPEG quality ladder tried at each candidate dimension.
 const QUALITY_LADDER: [u8; 7] = [85, 78, 70, 62, 55, 48, 40];
 
@@ -151,6 +227,53 @@ fn encode_within_budget(
     min_dim: u32,
     max_bytes: usize,
 ) -> Result<(Vec<u8>, u32, u32), MediaError> {
+    // BILDSPEICHER — dieselbe Wahl wie die einfache Leiter (je Größe von oben die höchste passende
+    // Qualität, sonst 15 % kleiner), aber ohne aussichtslose Kodierungen: passt auf einer Größe nicht
+    // einmal die NIEDRIGSTE Stufe, passt dort keine (die JPEG-Größe fällt mit der Qualität) — also
+    // gleich die nächste Größe. Gemessen (Release, 24 gespeicherte Artikelbilder): 30 KB vorher
+    // 48 Kodierungen / 1,8 s je Bild im Median, 60 KB 34 / 1,3 s. Auf der ersten Größe wird zuerst die
+    // höchste Stufe versucht: meist passt sie (100-KB-Klasse) — dann bleibt es bei EINER Kodierung.
+    let mut dim = max_dim;
+    let lowest = QUALITY_LADDER.len() - 1;
+    loop {
+        let scaled = downscale_longest(src, dim);
+        let (w, h) = (scaled.width(), scaled.height());
+        let start = if dim == max_dim {
+            let top = encode_jpeg(&scaled, QUALITY_LADDER[0])?;
+            if top.len() <= max_bytes {
+                return Ok((top, w, h));
+            }
+            1
+        } else {
+            0
+        };
+        let floor = encode_jpeg(&scaled, QUALITY_LADDER[lowest])?;
+        if floor.len() <= max_bytes {
+            for &q in &QUALITY_LADDER[start..lowest] {
+                let bytes = encode_jpeg(&scaled, q)?;
+                if bytes.len() <= max_bytes {
+                    return Ok((bytes, w, h));
+                }
+            }
+            return Ok((floor, w, h));
+        }
+        let next = dim * 85 / 100;
+        if next < min_dim {
+            return Err(MediaError::ImageDetailInsufficient);
+        }
+        dim = next;
+    }
+}
+
+/// Die einfache Leiter (alle Stufen je Größe) — NUR als Vergleich im Test: die schnelle Suche oben
+/// muss für jedes Bild dasselbe Ergebnis liefern.
+#[cfg(test)]
+pub(crate) fn encode_within_budget_reference(
+    src: &image::RgbImage,
+    max_dim: u32,
+    min_dim: u32,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, u32, u32), MediaError> {
     let mut dim = max_dim;
     loop {
         let scaled = downscale_longest(src, dim);
@@ -166,6 +289,16 @@ fn encode_within_budget(
         }
         dim = next;
     }
+}
+
+#[cfg(test)]
+pub(crate) fn encode_within_budget_for_test(
+    src: &image::RgbImage,
+    max_dim: u32,
+    min_dim: u32,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, u32, u32), MediaError> {
+    encode_within_budget(src, max_dim, min_dim, max_bytes)
 }
 
 /// Build a `MediaDescriptor` from final JPEG bytes.
@@ -185,17 +318,38 @@ fn descriptor(bytes: Vec<u8>, width: u32, height: u32) -> MediaDescriptor {
 
 /// Produce the durable main raster (`byte_size <= 100_000`, guaranteed).
 pub fn normalize_stock_image(bytes: &[u8], limits: &Limits) -> Result<MediaDescriptor, MediaError> {
+    encode_rendition(bytes, limits, Rendition::Main, MAIN_MAX_BYTES)
+}
+
+/// BILDSPEICHER — Hauptbild in der Grenze der Klasse.
+pub fn normalize_stock_image_profiled(bytes: &[u8], limits: &Limits, profile: SizeProfile) -> Result<MediaDescriptor, MediaError> {
+    encode_rendition(bytes, limits, Rendition::Main, profile.main_max_bytes())
+}
+
+/// BILDSPEICHER — Vorschau in der Grenze der Klasse.
+pub fn create_thumbnail_profiled(bytes: &[u8], limits: &Limits, profile: SizeProfile) -> Result<MediaDescriptor, MediaError> {
+    encode_rendition(bytes, limits, Rendition::Thumbnail, profile.thumb_max_bytes())
+}
+
+/// EIN Weg für jede Fassung: derselbe Decoder (Ausrichtung, Alpha), dieselbe Qualitätsleiter,
+/// derselbe Verkleinerer — nur die Byte-Grenze ist Parameter. Die Ausgabe ist garantiert
+/// `<= max_bytes`; eine Grenze außerhalb des zulässigen Bereichs wird abgewiesen.
+pub fn encode_rendition(bytes: &[u8], limits: &Limits, rendition: Rendition, max_bytes: usize) -> Result<MediaDescriptor, MediaError> {
+    if !rendition_budget_ok(rendition, max_bytes) {
+        return Err(MediaError::InvalidSizeProfile);
+    }
     let rgb = decode_normalized(bytes, limits)?;
-    let (out, w, h) = encode_within_budget(&rgb, MAIN_MAX_DIM, MAIN_MIN_DIM, MAIN_MAX_BYTES)?;
-    debug_assert!(out.len() <= MAIN_MAX_BYTES);
+    let (max_dim, min_dim) = match rendition {
+        Rendition::Main => (MAIN_MAX_DIM, MAIN_MIN_DIM),
+        Rendition::Thumbnail => (THUMB_MAX_DIM, THUMB_MIN_DIM),
+    };
+    let (out, w, h) = encode_within_budget(&rgb, max_dim, min_dim, max_bytes)?;
+    debug_assert!(out.len() <= max_bytes);
     Ok(descriptor(out, w, h))
 }
 
 /// Produce the durable thumbnail (`byte_size <= 20_000`, guaranteed),
 /// measured and validated independently of the main image.
 pub fn create_thumbnail(bytes: &[u8], limits: &Limits) -> Result<MediaDescriptor, MediaError> {
-    let rgb = decode_normalized(bytes, limits)?;
-    let (out, w, h) = encode_within_budget(&rgb, THUMB_MAX_DIM, THUMB_MIN_DIM, THUMB_MAX_BYTES)?;
-    debug_assert!(out.len() <= THUMB_MAX_BYTES);
-    Ok(descriptor(out, w, h))
+    encode_rendition(bytes, limits, Rendition::Thumbnail, THUMB_MAX_BYTES)
 }

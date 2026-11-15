@@ -37,6 +37,10 @@ function triggerMediaRecoveryPostAuth(): void {
       void import('@/core/lifecycle/restore-wiring')
         .then((m) => m.installRestoreBridge())
         .catch(() => { /* never blocks auth */ });
+      // BILDSPEICHER — Migrations-Einstieg NUR im E2E-Build (`window.__LATAIF_E2E__`); sonst nichts.
+      void import('@/core/media/image-store-migration-wiring')
+        .then((m) => m.installImageMigrationBridge())
+        .catch(() => { /* never blocks auth */ });
     });
 }
 

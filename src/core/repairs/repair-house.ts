@@ -101,7 +101,7 @@ export async function createRepairOnPrimary(form: Partial<Repair> & RepairCreate
   // MEDIA-REPAIR — die Fotos werden VOR der Klammer zu geprüften Medienobjekten (noch ohne
   // Verknüpfung, eigene durable Haltepunkte). Danach: Reparatur + Verknüpfungen in EINER Klammer.
   const images = await normalizeRecordImages(form.images ?? []);
-  const mediaIds = await ingestRepairPhotos(images);
+  const mediaIds = await ingestRepairPhotos(images, undefined, undefined, form.itemCategoryId);
   return amPrimary(() => {
     const data = planRepairCreate(normalizeRepairCreate(form), houseRepairPort(currentBranchId()));
     const repair = useRepairStore.getState().createRepair({ ...data, images: [] });
@@ -140,7 +140,7 @@ export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, e
     const neu = await normalizeRecordImages(wunsch.filter((x) => x.startsWith('data:')));
     let i = 0;
     galleryMediaIds = await resolveRepairPhotoSlots(
-      wunsch.map((x) => (x.startsWith('data:') ? { dataUrl: neu[i++] } : { keep: x })), undefined, id,
+      wunsch.map((x) => (x.startsWith('data:') ? { dataUrl: neu[i++] } : { keep: x })), undefined, id, form.itemCategoryId,
     );
   }
   return amPrimary(() => {

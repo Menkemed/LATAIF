@@ -23,6 +23,7 @@ import { computeImageEmbedding, cosineSimilarity, EMBEDDING_SAME_THRESHOLD, EMBE
 import { durableCheckpoint } from '@/core/db/database';
 import { createProductWithDurableMedia, sameImageIntent, shouldStartEmbedding, type ProductCreateResult, type MediaSource } from '@/core/media/product-media-create';
 import { createRequestId, canonicalRequestHash, decodeDataUrl, ProductMediaCutoverService, type DecodedLegacyImage } from '@/core/media/product-media-cutover';
+import { sizeProfileFor } from '@/core/media/size-profile';
 import { getStockMediaOrchestrator, type IngestAndFinalizeInput, type EditScope, type EditNewImageInput } from '@/core/media/orchestrator';
 import { buildEditPlanEnvelope } from '@/core/media/product-media-edit';
 import type { ProductEditIntent } from '@/core/media/coordinator';
@@ -1008,13 +1009,16 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // slot 0..N-1, and the shared batch grouping (batchId + expectedCount).
       buildBatchItems: async (pid, images: DecodedLegacyImage[]) => {
         const items: IngestAndFinalizeInput[] = [];
+        // BILDSPEICHER — Größenklasse aus der Kategorie (Uhr 60 KB, Schmuck/Accessory 30 KB).
+        const sizeProfile = sizeProfileFor({ categoryId: data.categoryId, role });
         for (let i = 0; i < images.length; i++) {
           const bytes = images[i].bytes;
           items.push({
             tenantId, branchId, entityType: 'product', entityId: pid,
             scopeKind: 'branch', role,
             ingestRequestId: createRequestId(tenantId, branchId, pid, role, i),
-            requestHash: await canonicalRequestHash(bytes, tenantId),
+            requestHash: await canonicalRequestHash(bytes, tenantId, sizeProfile),
+            sizeProfile,
             isPrimary: i === 0, sortOrder: i,
             imageBytes: bytes,
             batch: { batchId, expectedCount: images.length },
@@ -1233,10 +1237,12 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // failed attempt is retried under the SAME id (and therefore the same new-image identities).
     retryEditBatches.set(id, batchId);
     let newItems: EditNewImageInput[];
+    // BILDSPEICHER — neue Bilder in der Klasse der (ggf. gerade geänderten) Kategorie.
+    const sizeProfile = sizeProfileFor({ categoryId: data.categoryId ?? (cur?.category_id as string | undefined), role });
     try {
       newItems = await Promise.all(newImages.map(async (n) => {
         const decoded: DecodedLegacyImage = decodeDataUrl(n.dataUrl);
-        return { tenantId, ingestRequestId: n.clientId, requestHash: await canonicalRequestHash(decoded.bytes, tenantId), imageBytes: decoded.bytes };
+        return { tenantId, ingestRequestId: n.clientId, requestHash: await canonicalRequestHash(decoded.bytes, tenantId, sizeProfile), imageBytes: decoded.bytes, sizeProfile };
       }));
     } catch (e) {
       return { status: 'edit_incomplete', errorCode: (e as { message?: string })?.message ?? 'MEDIA_EDIT_DECODE_FAILED', batchId };

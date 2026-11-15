@@ -971,7 +971,7 @@ export async function runOrderCreate(
   if (req.finalSpec?.stagingIds?.length) {
     try {
       const urls = await readStagedAsRecordImages(req.finalSpec.stagingIds, owner, read, (m) => new CommercialPayloadError(m));
-      referenceMediaIds = await ingestOrderPhotos(urls);
+      referenceMediaIds = await ingestOrderPhotos(urls, undefined, undefined, req.finalSpec.spec?.categoryId);
     } catch (e) { fotoFehler = e; }
   }
   const outcome = await runRemoteCommand(deps, identity, async () => {

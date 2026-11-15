@@ -769,10 +769,8 @@ export class MediaDbCoordinator {
     await this.readVerified(input.tenantId, commit.thumbnail_descriptor);
     return this.withTx(() => {
       this.upsertJob(shape, commit, now);
-      const mainBlobId = blobIdFor(commit.main_descriptor.hash);
-      const thumbBlobId = blobIdFor(commit.thumbnail_descriptor.hash);
-      this.ensureBlobGeneration(input.tenantId, mainBlobId, commit.main_descriptor, commit.main_storage_key, now);
-      this.ensureBlobGeneration(input.tenantId, thumbBlobId, commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
+      const mainBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commit.main_descriptor.hash), commit.main_descriptor, commit.main_storage_key, now);
+      const thumbBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commit.thumbnail_descriptor.hash), commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
       const mediaId = mediaIdFor(input.ingestRequestId);
       this.ensureObject(shape, mainBlobId, mediaId, now);
       const variantId = variantIdFor(mediaId, 'thumbnail');
@@ -892,22 +890,8 @@ export class MediaDbCoordinator {
       this.upsertJob(input, commitResult, now);
 
       // 2) Blobs + generations (idempotent, existing rows validated).
-      const mainBlobId = blobIdFor(commitResult.main_descriptor.hash);
-      const thumbBlobId = blobIdFor(commitResult.thumbnail_descriptor.hash);
-      this.ensureBlobGeneration(
-        input.tenantId,
-        mainBlobId,
-        commitResult.main_descriptor,
-        commitResult.main_storage_key,
-        now,
-      );
-      this.ensureBlobGeneration(
-        input.tenantId,
-        thumbBlobId,
-        commitResult.thumbnail_descriptor,
-        commitResult.thumbnail_storage_key,
-        now,
-      );
+      const mainBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commitResult.main_descriptor.hash), commitResult.main_descriptor, commitResult.main_storage_key, now);
+      const thumbBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commitResult.thumbnail_descriptor.hash), commitResult.thumbnail_descriptor, commitResult.thumbnail_storage_key, now);
 
       // 3) Master media object + thumbnail variant.
       const mediaId = mediaIdFor(input.ingestRequestId);
@@ -1329,10 +1313,8 @@ export class MediaDbCoordinator {
             scopeKind: plan.scopeKind, role: plan.role, isPrimary: false, sortOrder: i,
             securityClass: 'internal', retentionClass: 'standard',
           };
-          const mainBlobId = blobIdFor(commit.main_descriptor.hash);
-          const thumbBlobId = blobIdFor(commit.thumbnail_descriptor.hash);
-          this.ensureBlobGeneration(plan.tenantId, mainBlobId, commit.main_descriptor, commit.main_storage_key, now);
-          this.ensureBlobGeneration(plan.tenantId, thumbBlobId, commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
+          const mainBlobId = this.ensureBlobGeneration(plan.tenantId, blobIdFor(commit.main_descriptor.hash), commit.main_descriptor, commit.main_storage_key, now);
+          const thumbBlobId = this.ensureBlobGeneration(plan.tenantId, blobIdFor(commit.thumbnail_descriptor.hash), commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
           const mediaId = mediaIdFor(slot.requestId);
           this.ensureObject(input, mainBlobId, mediaId, now);
           const variantId = variantIdFor(mediaId, 'thumbnail');
@@ -1923,7 +1905,32 @@ export class MediaDbCoordinator {
     desc: RustStoredDescriptor,
     storageKey: string,
     now: string,
-  ): void {
+  ): string {
+    // BILDSPEICHER — dieselben Bytes können schon als NEUERE Generation eines anderen Blobs liegen
+    // (ein migriertes Bild: blob-<alter Hash> zeigt auf Generation 2 mit genau diesem Inhalt). Die
+    // Datei ist dieselbe, der Speicherschlüssel eindeutig — also wird dieser Blob wiederverwendet,
+    // statt eine zweite Zeile mit demselben Schlüssel zu versuchen (UNIQUE) oder abzubrechen.
+    const sameContent = firstRow(
+      this.db,
+      `SELECT g.blob_id, g.generation_no, g.gen_status, g.stored_blob_hash, g.byte_size, g.content_kind, g.mime_type, g.extension,
+              b.current_generation_no, b.blob_status
+         FROM media_blob_generations g
+         JOIN media_blobs b ON b.tenant_id = g.tenant_id AND b.blob_id = g.blob_id
+        WHERE g.tenant_id = $t AND g.storage_key = $sk`,
+      { $t: tenantId, $sk: storageKey },
+    );
+    if (sameContent && String(sameContent.blob_id) !== blobId) {
+      const current = Number(sameContent.current_generation_no) === Number(sameContent.generation_no);
+      if (
+        !current || sameContent.gen_status !== 'available' || sameContent.blob_status !== 'present' ||
+        sameContent.stored_blob_hash !== desc.hash || Number(sameContent.byte_size) !== desc.byte_size ||
+        sameContent.content_kind !== desc.content_kind || sameContent.mime_type !== desc.mime_type ||
+        sameContent.extension !== desc.extension
+      ) {
+        throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
+      }
+      return String(sameContent.blob_id);
+    }
     const existing = this.blobGenerationRow(tenantId, blobId, 1);
     if (existing) {
       if (
@@ -1942,10 +1949,13 @@ export class MediaDbCoordinator {
         `SELECT * FROM media_blobs WHERE tenant_id = $t AND blob_id = $b`,
         { $t: tenantId, $b: blobId },
       );
-      if (!blob || blob.blob_status !== 'present' || Number(blob.current_generation_no) !== 1) {
+      // BILDSPEICHER — ein migrierter Blob steht auf Generation ≥ 2 (Generation 1 ist `superseded`
+      // und trägt noch genau diese Bytes). Wiederverwenden ist richtig: es ist dasselbe Bild, nur
+      // in der kleineren Fassung. Der Zeiger ist durch die Schema-Trigger immer `available`.
+      if (!blob || blob.blob_status !== 'present' || !(Number(blob.current_generation_no) >= 1)) {
         throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT');
       }
-      return;
+      return blobId;
     }
     // Fresh insert: generation first in 'available' state, then the pointer
     // in 'present' — the pointer trigger requires an existing 'available' gen.
@@ -1974,6 +1984,7 @@ export class MediaDbCoordinator {
        VALUES ($t, $b, $tok, 1, 'present', $now, $now)`,
       [tenantId, blobId, dedupTokenFor(tenantId, desc.hash), now] as unknown[],
     );
+    return blobId;
   }
 
   private ensureObject(
@@ -2194,10 +2205,8 @@ export class MediaDbCoordinator {
     return this.withTx(() => {
       preambleInsideTx();
       this.upsertJob(input, commitResult, now);
-      const mainBlobId = blobIdFor(commitResult.main_descriptor.hash);
-      const thumbBlobId = blobIdFor(commitResult.thumbnail_descriptor.hash);
-      this.ensureBlobGeneration(input.tenantId, mainBlobId, commitResult.main_descriptor, commitResult.main_storage_key, now);
-      this.ensureBlobGeneration(input.tenantId, thumbBlobId, commitResult.thumbnail_descriptor, commitResult.thumbnail_storage_key, now);
+      const mainBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commitResult.main_descriptor.hash), commitResult.main_descriptor, commitResult.main_storage_key, now);
+      const thumbBlobId = this.ensureBlobGeneration(input.tenantId, blobIdFor(commitResult.thumbnail_descriptor.hash), commitResult.thumbnail_descriptor, commitResult.thumbnail_storage_key, now);
       const mediaId = mediaIdFor(input.ingestRequestId);
       this.ensureObject(input, mainBlobId, mediaId, now);
       const variantId = variantIdFor(mediaId, 'thumbnail');

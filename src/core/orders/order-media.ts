@@ -48,22 +48,30 @@ export function orderMediaOwner(orderId: string, scope = orderMediaScope(orderId
   };
 }
 
-export function orderPhotoScope(scope = orderMediaScope(), orchestrator?: StockMediaOrchestrator): RecordPhotoScope {
-  return { tenantId: scope.tenantId, branchId: scope.branchId, ownerType: ORDER_MEDIA_ENTITY, role: ORDER_MEDIA_ROLE, orchestrator };
+export function orderPhotoScope(scope = orderMediaScope(), orchestrator?: StockMediaOrchestrator, categoryId?: string | null): RecordPhotoScope {
+  return { tenantId: scope.tenantId, branchId: scope.branchId, ownerType: ORDER_MEDIA_ENTITY, role: ORDER_MEDIA_ROLE, orchestrator, categoryId };
+}
+
+/** BILDSPEICHER — Kategorie für die Größenklasse: genannt (Sonderstück) oder aus der Auftragszeile. */
+function orderCategory(orderId: string | undefined, categoryId: string | null | undefined): string | null {
+  if (typeof categoryId === 'string' && categoryId) return categoryId;
+  if (!orderId) return null;
+  const row = query('SELECT category_id FROM orders WHERE id = ?', [orderId])[0];
+  return row?.category_id ? String(row.category_id) : null;
 }
 
 /** Aufnehmen VOR der Klammer: aus Daten-URLs werden geprüfte, noch unverknüpfte Objekte. */
 export function ingestOrderPhotos(
-  urls: readonly string[], orchestrator?: StockMediaOrchestrator, orderId?: string,
+  urls: readonly string[], orchestrator?: StockMediaOrchestrator, orderId?: string, categoryId?: string | null,
 ): Promise<string[]> {
-  return ingestRecordPhotos(urls, orderPhotoScope(orderMediaScope(orderId), orchestrator));
+  return ingestRecordPhotos(urls, orderPhotoScope(orderMediaScope(orderId), orchestrator, orderCategory(orderId, categoryId)));
 }
 
 /** Dasselbe für einen Plan aus behaltenen Medien und neuen Aufnahmen. */
 export function resolveOrderPhotoSlots(
-  slots: readonly PhotoSlotRequest[], orchestrator?: StockMediaOrchestrator, orderId?: string,
+  slots: readonly PhotoSlotRequest[], orchestrator?: StockMediaOrchestrator, orderId?: string, categoryId?: string | null,
 ): Promise<string[]> {
-  return resolvePhotoSlots(slots, orderPhotoScope(orderMediaScope(orderId), orchestrator));
+  return resolvePhotoSlots(slots, orderPhotoScope(orderMediaScope(orderId), orchestrator, orderCategory(orderId, categoryId)));
 }
 
 /**

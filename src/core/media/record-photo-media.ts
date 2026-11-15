@@ -14,6 +14,7 @@ import { getStockMediaOrchestrator } from '@/core/media/orchestrator';
 import { toIngestRequestId } from '@/core/media/ingest-request-id';
 import { canonicalRequestHash } from '@/core/media/product-media-cutover';
 import type { StockMediaOrchestrator } from '@/core/media/orchestrator';
+import { sizeProfileFor, type MediaSizeProfile } from '@/core/media/size-profile';
 
 /** Wem die Fotos gehören werden — der Datensatz muss dafür noch nicht existieren. */
 export interface RecordPhotoScope {
@@ -30,6 +31,12 @@ export interface RecordPhotoScope {
    * Ohne Angabe bleibt es `internal` wie bisher.
    */
   securityClass?: 'public' | 'internal' | 'sensitive';
+  /**
+   * BILDSPEICHER — Kategorie des Gegenstands (Reparatur: Artikelkategorie, Auftrag: Kategorie).
+   * Bestimmt die Größenklasse (`sizeProfileFor`): Schmuck/Accessory 30 KB, sonst 60 KB; Ausweise
+   * bleiben unabhängig davon beim bisherigen Limit.
+   */
+  categoryId?: string | null;
   /** Test-Einsprung; in der Anwendung der Produktions-Orchestrator. */
   orchestrator?: StockMediaOrchestrator;
 }
@@ -55,7 +62,8 @@ export function bytesOfDataUrl(url: string): Uint8Array {
 
 /** Die Aufnahmekennung dieser Bytes für diesen Besitzertyp — stabil, wiederholbar, ohne Zufall. */
 export async function photoIngestRequestId(bytes: Uint8Array, scope: RecordPhotoScope): Promise<{ id: string; requestHash: string }> {
-  const requestHash = await canonicalRequestHash(bytes, scope.tenantId);
+  // Die Größenklasse steckt im Hash: dieselben Bytes in einer anderen Klasse sind eine andere Aufnahme.
+  const requestHash = await canonicalRequestHash(bytes, scope.tenantId, photoSizeProfile(scope));
   return { id: toIngestRequestId(`photo-${scope.ownerType}-${scope.role}-${requestHash}`), requestHash };
 }
 
@@ -63,6 +71,11 @@ export async function photoIngestRequestId(bytes: Uint8Array, scope: RecordPhoto
  *  Verknüpfung nicht auseinanderlaufen können. */
 export function photoSecurityClass(scope: RecordPhotoScope): 'public' | 'internal' | 'sensitive' {
   return scope.securityClass ?? 'internal';
+}
+
+/** BILDSPEICHER — die Größenklasse dieser Aufnahme (eine Regel für alle Belegfotos). */
+export function photoSizeProfile(scope: RecordPhotoScope): MediaSizeProfile {
+  return sizeProfileFor({ categoryId: scope.categoryId, role: scope.role, securityClass: photoSecurityClass(scope) });
 }
 
 /**
@@ -86,6 +99,7 @@ export async function ingestRecordPhotos(urls: readonly string[], scope: RecordP
       role: scope.role,
       securityClass: photoSecurityClass(scope),
       imageBytes: bytes,
+      sizeProfile: photoSizeProfile(scope),
     });
     out.push(r.mediaId);
   }

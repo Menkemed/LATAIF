@@ -6,6 +6,7 @@
 // require so the module can be imported in Node-side tests without pulling
 // Tauri into the graph. Tests pass in a deterministic `FakeMediaGateway`.
 // ════════════════════════════════════════════════════════════════════════════
+import type { MediaSizeProfile } from './size-profile.ts';
 
 /**
  * Rendition descriptor as returned by the Rust ingest core. Never carries
@@ -27,6 +28,9 @@ export interface PrepareInput {
   requestHash: string;
   imageBytes: Uint8Array;
   originalName?: string;
+  /** BILDSPEICHER — Größenklasse; fehlt sie, normalisiert Rust mit `standard` (100 KB / 20 KB).
+   *  MUSS dieselbe sein, mit der `requestHash` berechnet wurde, sonst lehnt Rust ab. */
+  sizeProfile?: MediaSizeProfile;
 }
 
 export interface PrepareResult {
@@ -132,6 +136,7 @@ export class TauriMediaGateway implements MediaCommandGateway {
       // as `Vec<u8>`. No base64 anywhere on the wire.
       imageBytes: Array.from(input.imageBytes),
       originalName: input.originalName,
+      sizeProfile: input.sizeProfile ?? null,
     });
   }
 

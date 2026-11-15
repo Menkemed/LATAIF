@@ -177,11 +177,50 @@ pub fn required_keys_from_db(db: &std::path::Path) -> Result<BTreeSet<String>, M
     }
 }
 
-/// Everything any generation row still points at — including superseded, in-flight and unlinked
-/// rows. Nothing in here may be deleted; nothing in here is required to exist.
-pub fn preserved_keys(conn: &Connection) -> Result<BTreeSet<String>, MediaError> {
+/// The generation rows the preserved set is built from: every row EXCEPT one that reached the
+/// terminal `deleted` state — unless a backup still pins exactly that generation.
+///
+/// BILDSPEICHER — before this, every row counted, whatever its status, so a superseded generation
+/// (an old, larger rendition replaced by a migration) could never be freed: the GC would have kept
+/// its file forever. `deleted` is reachable only through `superseded → gc_pending → deleted` (schema
+/// trigger), never for the CURRENT generation (`trg_mbg_current_status_lock`), and only through the
+/// owner-gated cleanup path. Rows are never removed; only their file becomes collectable. A file of a
+/// deleted generation still goes through the normal GC run: dry run → boot-time quarantine → explicit
+/// owner finalize, and reconcile moves it back if it became referenced again.
+const PRESERVED_GENERATIONS_SQL: &str = "SELECT g.storage_key FROM media_blob_generations g WHERE g.gen_status <> 'deleted'";
+const PRESERVED_PINNED_DELETED_SQL: &str = "SELECT g.storage_key FROM media_blob_generations g \
+     JOIN media_backup_generation_pins p ON p.tenant_id=g.tenant_id AND p.blob_id=g.blob_id AND p.generation_no=g.generation_no \
+     WHERE g.gen_status = 'deleted'";
+
+fn generations_have_status(conn: &Connection) -> Result<bool, MediaError> {
     let mut stmt = conn
-        .prepare("SELECT storage_key FROM media_blob_generations")
+        .prepare("PRAGMA table_info(media_blob_generations)")
+        .map_err(|e| MediaError::Io(format!("column probe: {e}")))?;
+    let names = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| MediaError::Io(format!("column probe: {e}")))?;
+    for n in names {
+        if n.map_err(|e| MediaError::Io(format!("column probe: {e}")))? == "gen_status" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Everything any generation row still points at — including superseded, in-flight and unlinked
+/// rows (but not `deleted` ones that no backup pins, see above). Nothing in here may be deleted;
+/// nothing in here is required to exist.
+pub fn preserved_keys(conn: &Connection) -> Result<BTreeSet<String>, MediaError> {
+    // A hand-built table without a status column (old fixtures) keeps the old, widest answer.
+    let sql = if !generations_have_status(conn)? {
+        "SELECT storage_key FROM media_blob_generations".to_string()
+    } else if table_exists(conn, "media_backup_generation_pins")? {
+        format!("{PRESERVED_GENERATIONS_SQL} UNION {PRESERVED_PINNED_DELETED_SQL}")
+    } else {
+        PRESERVED_GENERATIONS_SQL.to_string()
+    };
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| MediaError::Io(format!("prepare preserved: {e}")))?;
     let rows = stmt
         .query_map([], |r| r.get::<_, String>(0))

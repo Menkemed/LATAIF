@@ -12,7 +12,9 @@
 //! or user file paths, only content hashes, sizes and derived storage keys.
 
 use super::storage;
-use super::{create_thumbnail, normalize_stock_image, Limits, MediaDescriptor, MediaError};
+use super::{
+    create_thumbnail_profiled, normalize_stock_image_profiled, Limits, MediaDescriptor, MediaError, SizeProfile,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -232,12 +234,20 @@ fn is_valid_hash64(h: &str) -> bool {
 /// The canonical, Rust-computed request hash. Binds protocol version, scope, the
 /// operation, the SHA-256 of the *input* bytes and the normalization params.
 pub(crate) fn canonical_request_hash(scope: &str, input_bytes: &[u8]) -> String {
+    canonical_request_hash_profiled(scope, input_bytes, SizeProfile::Standard)
+}
+
+/// BILDSPEICHER — derselbe Hash, aber mit den Grenzen der Klasse. Für `Standard` ist er bitgleich
+/// mit dem bisherigen (`NORM_PARAMS`), damit offene Aufnahmen aus älteren Versionen gültig bleiben.
+pub(crate) fn canonical_request_hash_profiled(scope: &str, input_bytes: &[u8], profile: SizeProfile) -> String {
+    debug_assert_eq!(SizeProfile::Standard.norm_params(), NORM_PARAMS);
     let input_sha = storage::sha256_hex(input_bytes);
-    let material = format!("{PROTO_VERSION}|{scope}|stock_image|{input_sha}|{NORM_PARAMS}");
+    let norm = profile.norm_params();
+    let material = format!("{PROTO_VERSION}|{scope}|stock_image|{input_sha}|{norm}");
     storage::sha256_hex(material.as_bytes())
 }
 
-fn storage_key(scope: &str, hash: &str) -> String {
+pub(crate) fn storage_key(scope: &str, hash: &str) -> String {
     format!("{scope}/{}/{hash}.jpg", &hash[0..2])
 }
 
@@ -709,7 +719,21 @@ impl MediaIngestService {
         request_id: &str,
         request_hash: &str,
         input_bytes: &[u8],
+        original_name: Option<&str>,
+    ) -> Result<PrepareResult, IngestError> {
+        self.prepare_profiled(scope, request_id, request_hash, input_bytes, original_name, SizeProfile::Standard)
+    }
+
+    /// BILDSPEICHER — `prepare` mit der Größenklasse des Bildes. Die Klasse ist Teil des
+    /// kanonischen Anfrage-Hashes: dieselben Bytes in einer anderen Klasse sind eine andere Anfrage.
+    pub fn prepare_profiled(
+        &self,
+        scope: &str,
+        request_id: &str,
+        request_hash: &str,
+        input_bytes: &[u8],
         _original_name: Option<&str>,
+        profile: SizeProfile,
     ) -> Result<PrepareResult, IngestError> {
         Self::validate(scope, request_id, request_hash)?;
         // Refuse at the IPC boundary before any decode/hash/journal work.
@@ -718,7 +742,7 @@ impl MediaIngestService {
         }
         // Rust computes the canonical request hash and refuses a client value
         // that does not match the actual request content.
-        let canonical = canonical_request_hash(scope, input_bytes);
+        let canonical = canonical_request_hash_profiled(scope, input_bytes, profile);
         if request_hash != canonical {
             return Err(IngestError::RequestConflict);
         }
@@ -798,8 +822,8 @@ impl MediaIngestService {
         }
 
         // Normalize via the proven core, then stage both durable temp files.
-        let main = normalize_stock_image(input_bytes, &Limits::default())?;
-        let thumb = create_thumbnail(input_bytes, &Limits::default())?;
+        let main = normalize_stock_image_profiled(input_bytes, &Limits::default(), profile)?;
+        let thumb = create_thumbnail_profiled(input_bytes, &Limits::default(), profile)?;
         self.write_temp_durable(&canon_root, &main_key, &main.bytes)?;
         self.write_temp_durable(&canon_root, &thumb_key, &thumb.bytes)?;
 

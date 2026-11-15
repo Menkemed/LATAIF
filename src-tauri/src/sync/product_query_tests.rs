@@ -930,3 +930,23 @@ fn a_purchase_locks_only_the_purchase_price() {
     assert_eq!(p["price_editable"], true);
     assert_eq!(p["sale_price_editable"], true);
 }
+
+// BILDSPEICHER — nach einem Generationswechsel (Migration) bekommt PC2 GENAU die neue Fassung:
+// derselbe Medienschlüssel des Objekts, neue Datei, alte Datei nicht mehr freigegeben.
+#[test]
+fn after_a_generation_switch_only_the_new_rendition_is_served() {
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    for (blob, n) in [("b-main", "g"), ("b-thumb", "h")] {
+        conn.execute("INSERT INTO media_blob_generations VALUES ('t-1',?1,2,?2,?3,7,'jpg','available',NULL)",
+            rusqlite::params![blob, key(n), n.repeat(64)]).unwrap();
+        conn.execute("UPDATE media_blobs SET current_generation_no = 2 WHERE blob_id = ?1", [blob]).unwrap();
+        conn.execute("UPDATE media_blob_generations SET gen_status = 'superseded' WHERE blob_id = ?1 AND generation_no = 1", [blob]).unwrap();
+    }
+    let g = grant(&db, "t-1", "b-1", &key("g")).expect("the new main rendition");
+    assert_eq!((g.hash.as_str(), g.byte_size), ("g".repeat(64).as_str(), 7));
+    assert!(grant(&db, "t-1", "b-1", &key("h")).is_some(), "the new thumbnail");
+    assert!(grant(&db, "t-1", "b-1", &key("a")).is_none(), "the old main file is no longer offered");
+    assert!(grant(&db, "t-1", "b-1", &key("b")).is_none(), "the old thumbnail is no longer offered");
+    assert!(grant(&db, "t-1", "b-other", &key("g")).is_none(), "the branch rule still holds for the new file");
+}
