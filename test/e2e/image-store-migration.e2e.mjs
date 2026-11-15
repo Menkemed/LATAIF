@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════════════════════
 // BILDSPEICHER — Größenklassen für neue Uploads + Migration bestehender Bilder (Generationswechsel).
-// Run: node scripts/e2e-diag-runner.mjs <out> test/e2e/image-store-migration.e2e.mjs
+// Run: IM_SNAP=<snap-Ordner einer Sicherung> node scripts/e2e-diag-runner.mjs <out> test/e2e/image-store-migration.e2e.mjs
 //
 //   A  NEU      Uhr/Schmuck/Accessory über den PC2-Fernweg, Schmuck über Mobile → Hauptbild ≤ 60/30/30/30 KB, Vorschau ≤ 10 KB.
 //   B  KOPIE    der Sicherung vom 10.11.2026 (NUR lataif.db + Medien) in den isolierten Testordner; Test-Owner-Passwort in der KOPIE.
@@ -20,7 +20,7 @@
 // Die Testkopie wird am Ende immer gelöscht.
 // ════════════════════════════════════════════════════════════════════════════
 // ════════════════════════════════════════════════════════════════════════════
-import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
+import { assertE2eClientBinary, e2ePreflight, testSourceFromEnv } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids, killTestPid, pathOfPid } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
@@ -223,7 +223,10 @@ function insert(db, tabelle, werte) {
 // Server-DB der Produktion (die Test-Server-DB mit Test-Owner bleibt). In der KOPIE wird das Passwort des
 // Owners auf das Test-Passwort gesetzt (sonst wäre keine Anmeldung möglich); sonst wird nichts verändert.
 // ════════════════════════════════════════════════════════════════════════════
-const SNAP = process.env.IM_SNAP || 'E:/LATAIF/Backups/snap-2026-11-10T21-48-36_UTC+03-00_359249200';
+// Die Testkopie kommt NUR ausdrücklich aus IM_SNAP (ein `snap-…`-Ordner einer Sicherung) — kein Standardpfad.
+// Geprüft wird beim Start (`testSourceFromEnv`): ohne Angabe, bei einem lebenden Datenordner oder einer
+// unvollständigen Kopie bricht die Suite ab, bevor irgendetwas gestartet wird.
+let SNAP = '';
 const MEDIA = join(APP_DATA_DIR, 'media');
 const BACKUP_DIR = join(RUN, 'backups', 'snap-vor-migration');
 const sha256f = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
@@ -369,7 +372,7 @@ const MAIN_THUMB = `SELECT gm.byte_size AS main, gt.byte_size AS thumb FROM medi
 let primary = null, client = null;
 try {
   assertE2eClientBinary(CLIENT_APP);
-  if (!existsSync(join(SNAP, 'lataif.db')) || !existsSync(join(SNAP, 'tenant-1'))) throw new Error('Sicherungskopie nicht gefunden: ' + SNAP);
+  SNAP = testSourceFromEnv('IM_SNAP', ['lataif.db', 'tenant-1']);
   aufraeumen(); await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });

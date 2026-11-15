@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 // OWNER-WARTUNG — überholte Galerie-Bearbeitungen (TAG-WCH-004, CAR-OGJ-001): der echte Ausführungsweg auf
 // einer ISOLIERTEN Kopie der Sicherung vom 14.11.2026.
-// Run: node scripts/e2e-diag-runner.mjs <out> test/e2e/superseded-edit-plans.e2e.mjs
+// Run: SUP_SRC=<Sicherungsordner mit lataif.db + media/> node scripts/e2e-diag-runner.mjs <out> test/e2e/superseded-edit-plans.e2e.mjs
 //
 //   P1 KOPIE      lataif.db + kompletter Medienordner (inkl. .ingest-journal) der Sicherung in den Testordner;
 //                 Test-Passwort + ein Test-Benutzer „Sales“ NUR in der Kopie. Keine Schlüssel, kein Locator.
@@ -20,7 +20,7 @@
 // Produktion (E:\LATAIF\Data, Ports 3001/3443) wird nie berührt; die Sicherung auf F: wird nur GELESEN.
 // Testkopie und Testsicherungen werden am Ende gelöscht.
 // ════════════════════════════════════════════════════════════════════════════
-import { e2ePreflight } from './_e2e-preflight.mjs';
+import { e2ePreflight, testSourceFromEnv } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
 import { maus, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
@@ -39,7 +39,8 @@ const ONBOARD_PW = 'e2epass123';
 const OWNER_PW = 'sup-owner-' + Math.random().toString(36).slice(2);
 const T0 = Date.now();
 const schritt = (s) => console.log(`      [${Math.round((Date.now() - T0) / 1000)}s] ${s}`);
-const SRC = process.env.SUP_SRC || 'F:/LATAIF-Backups/2026-11-14_vor-v0.8.103';
+// Die Sicherung kommt NUR ausdrücklich aus SUP_SRC — kein Standardpfad (Prüfung beim Start, `testSourceFromEnv`).
+let SRC = '';
 const RUN = join(os.tmpdir(), 'lataif-superseded', 'run-' + Date.now());
 const REAL_APPDATA = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming');
 const APP_DATA_DIR = join(REAL_APPDATA, IDENT);
@@ -167,7 +168,7 @@ const text = (p, sel) => p.ev(`return document.querySelector(${S(sel)})?.textCon
 
 let primary = null;
 try {
-  if (!existsSync(join(SRC, 'lataif.db')) || !existsSync(join(SRC, 'media', '.ingest-journal'))) throw new Error('Sicherung nicht gefunden: ' + SRC);
+  SRC = testSourceFromEnv('SUP_SRC', ['lataif.db', join('media', '.ingest-journal')]);
   aufraeumen(); await waitTestImageGone('lataif.exe');
   for (const d of [RUN, join(RUN, 'tmp'), join(RUN, 'E'), join(RUN, 'F')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });

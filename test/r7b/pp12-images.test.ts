@@ -122,7 +122,9 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
   const rh = code(src('src/core/repairs/repair-house.ts'));
   // MEDIA-REPAIR — das Umrechnen UND die Aufnahme ins Medium laufen vor der Klammer; „behalten"
   // nennt jetzt die stabile Medienkennung statt der gespeicherten Daten-URL.
-  ok(/const images = await normalizeRecordImages\(form\.images \?\? \[\]\);\s*const mediaIds = await ingestRepairPhotos\(images\);\s*return amPrimary\(\(\) => \{/.test(rh)
+  // BILDSPEICHER (v0.8.104) — die Aufnahme bekommt zusätzlich die Artikelkategorie (nur die Größenklasse der Fotos);
+  // weiterhin: erst umrechnen, dann als Medien aufnehmen, DANN die Klammer.
+  ok(/const images = await normalizeRecordImages\(form\.images \?\? \[\]\);\s*const mediaIds = await ingestRepairPhotos\(images, undefined, undefined, form\.itemCategoryId\);\s*return amPrimary\(\(\) => \{/.test(rh)
     && /const neu = await normalizeRecordImages\(wunsch\.filter\(\(x\) => x\.startsWith\('data:'\)\)\);/.test(rh)
     && /galleryMediaIds = await resolveRepairPhotoSlots\(/.test(rh),
   'PRIMARY Reparatur anlegen/ändern — vor der Klammer; die Galerie sind Medien, keine Bytes');
@@ -149,7 +151,8 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
   // MEDIA-ORDER — der Entwurf des Sonderstücks geht in den Medienkern (aufnehmen VOR der Klammer,
   // verknüpfen INNERHALB); die Fotos NEUER ARTIKEL einer Auftragszeile gehen weiter ihren Weg.
   ok(/normalizeSpecImages\(l\.newProduct\)/.test(oh)
-    && /const \{ spec: customProductSpec, urls \} = ohneVorlagenbilder\(input\.customProductSpec\);\s*const referenceMediaIds = await ingestOrderPhotos\(urls\);\s*return runOnPrimary\(/.test(oh),
+    // BILDSPEICHER (v0.8.104) — mit der Kategorie des Sonderstücks (Größenklasse); weiterhin VOR der Klammer.
+    && /const \{ spec: customProductSpec, urls \} = ohneVorlagenbilder\(input\.customProductSpec\);\s*const referenceMediaIds = await ingestOrderPhotos\(urls, undefined, undefined, customProductSpec\?\.categoryId\);\s*return runOnPrimary\(/.test(oh),
   'PRIMARY Auftrag: neuer Artikel und Sonderstück-Entwurf');
   ok(/const ready = req\.newProduct \? \{ \.\.\.req, newProduct: await normalizeSpecImages\(req\.newProduct\) \} : req;\s*return runOnPrimary\(\(\) => updateOrderLineInHouse\(ready, branchId\)/.test(code(src('src/core/orders/order-lifecycle-house.ts'))),
     'PRIMARY Positionsdialog: neuer Artikel');

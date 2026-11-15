@@ -33,6 +33,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import type { AgentTransfer } from '@/core/models/types';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
+import { transferItemLabel } from '@/core/agents/transfer-item-label';
 import {
   TransferActionRejected, agentAutoCustomer, normalizeTransferBatch, normalizeTransferCreate, planTransferCreate, transferConvertBlocker,
   transferCorrectionReason, transferEditBlocker, transferRemovePlan,
@@ -94,11 +95,10 @@ export function createTransferInHouse(form: TransferCreateForm, branchId: string
   });
 }
 
-/** Ein Stück lesbar für eine Meldung: SKU, sonst Marke + Name. */
+/** Ein Stück lesbar für eine Meldung: SKU, sonst der zentrale Anzeigename, sonst die Kennung. */
 function stueckName(productId: string): string {
-  const p = query('SELECT sku, brand, name FROM products WHERE id = ?', [productId])[0];
-  if (!p) return productId;
-  return String(p.sku || [p.brand, p.name].filter(Boolean).join(' ') || productId);
+  const p = query('SELECT sku, brand, name, category_id, attributes FROM products WHERE id = ?', [productId])[0];
+  return transferItemLabel(p, productId);
 }
 
 /**

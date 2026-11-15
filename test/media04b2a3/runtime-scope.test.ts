@@ -78,9 +78,42 @@ function evidence(over: Partial<RuntimeScopeEvidence> = {}): RuntimeScopeEvidenc
 
   // A4 §1/§3 — every internal mobile mutation wrapper builds the server-derived scope expectation and
   // calls the *_fenced core (which couples the fence INSIDE its own IMMEDIATE tx), not a pre-SELECT.
-  for (const w of ['mobile_upload_claim', 'mobile_upload_prepare_image', 'mobile_upload_renew', 'mobile_upload_release', 'mobile_upload_mark_quarantined', 'mobile_upload_mark_ready']) {
-    const body = lib.slice(lib.indexOf(`fn ${w}(`), lib.indexOf(`fn ${w}(`) + 1200);
-    ok(/mobile_scope_expectation\(install_id,/.test(body) && /_fenced\(/.test(body), `${w} builds the scope expectation and calls the fenced core`);
+  // Geprüft über den GANZEN Funktionskörper (bis zur schließenden Klammer der Top-Level-Funktion) statt eines festen
+  // Zeichenfensters — und strenger als vorher: jede Hülle ruft GENAU ihren Fencing-Kern auf und übergibt ihm die
+  // zuvor gebaute Scope-Erwartung (`&scope`) als Fence-Argument.
+  const WRAPPER_CORE: Record<string, string> = {
+    mobile_upload_claim: 'claim_next_job_fenced',
+    mobile_upload_prepare_image: 'claimed_image_for_prepare_fenced',
+    mobile_upload_renew: 'renew_claim_fenced',
+    mobile_upload_release: 'mark_retryable_fenced',
+    mobile_upload_mark_quarantined: 'mark_quarantined_claimed_fenced',
+    mobile_upload_mark_ready: 'mark_ready_fenced',
+  };
+  const fnBody = (src: string, name: string): string => {
+    const t = src.replace(/\r\n/g, '\n');
+    const s = t.indexOf(`fn ${name}(`);
+    if (s < 0) return '';
+    const e = t.indexOf('\n}\n', s);
+    return e < 0 ? '' : t.slice(s, e + 2);
+  };
+  const fencedWithScope = (body: string, core: string): boolean => {
+    const exp = body.match(/let (\w+) = (?:[\w:]+::)?mobile_scope_expectation\(install_id,/);
+    const iExp = exp ? body.indexOf(exp[0]) : -1;
+    const iCall = body.indexOf(`${core}(`);
+    const passesScope = !!exp && new RegExp(`${core}\\(\\s*&mut conn,\\s*&${exp[1]}\\b`).test(body);
+    const oneFunction = body.length > 0 && !/\n\s*(?:pub\s+)?(?:async\s+)?fn \w+\(/.test(body.slice(3));
+    return oneFunction && !!exp && iCall > iExp && passesScope;
+  };
+  for (const [w, core] of Object.entries(WRAPPER_CORE)) {
+    ok(fencedWithScope(fnBody(lib, w), core), `${w} builds the scope expectation and passes it to ${core} (whole body)`);
+  }
+  // Gegenproben: die Prüfung schlägt an, wenn der Fencing-Aufruf fehlt oder nicht die Scope-Erwartung bekommt.
+  {
+    const prep = fnBody(lib, 'mobile_upload_prepare_image');
+    ok(!fencedWithScope(prep.replace(/claimed_image_for_prepare_fenced\(/g, 'claimed_image_for_prepare_unfenced('), 'claimed_image_for_prepare_fenced'),
+      'Gegenprobe: ohne Fencing-Aufruf schlägt die Prüfung an');
+    ok(!fencedWithScope(prep.replace(/(claimed_image_for_prepare_fenced\(\s*&mut conn,\s*)&scope\b/g, '$1&other'), 'claimed_image_for_prepare_fenced'),
+      'Gegenprobe: ohne die Scope-Erwartung als Fence-Argument schlägt die Prüfung an');
   }
   // A4 — the fence is coupled inside the mutation's own IMMEDIATE transaction (the real protection is
   // in the core, not the wrapper); the rebind uses the same IMMEDIATE write contract.

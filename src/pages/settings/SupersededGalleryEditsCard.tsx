@@ -10,17 +10,16 @@ import { useMemo, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import { getDatabase } from '@/core/db/database';
-import { supersededEditPlansStatus, type SupersededDb, type SupersededVerdict } from '@/core/media/superseded-edit-plans';
+import type { SupersededVerdict } from '@/core/media/superseded-edit-plans';
+import { supersededEditPlansStatusOnPrimary } from '@/core/media/superseded-edit-plans-status';
 import { runSupersededEditPlansOnPrimary, type SupersededRunResult } from '@/core/media/superseded-edit-plans-wiring';
 
 const CREATED: Record<string, string> = { 'TAG-WCH-004': '25 Aug 2026', 'CAR-OGJ-001': '3 Oct 2026' };
 
 export function SupersededGalleryEditsCard({ reason }: { reason: string }) {
   const [refresh, setRefresh] = useState(0);
-  const status = useMemo(() => {
-    try { return supersededEditPlansStatus(getDatabase() as unknown as SupersededDb); } catch { return null; }
-  }, [refresh]);
+  // Der Leseweg liegt im Kern (nur Primary, nur lesend) — die Seite fasst keine Datenbank an.
+  const status = useMemo(() => supersededEditPlansStatusOnPrimary(), [refresh]);
   const [check, setCheck] = useState<SupersededVerdict[] | null>(null);
   const [backupRef, setBackupRef] = useState('');
   const [result, setResult] = useState<SupersededRunResult | null>(null);

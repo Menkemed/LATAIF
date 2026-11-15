@@ -261,3 +261,26 @@ export function assertE2eClientBinary(appPath) {
   }
   return { verified: REQUIRED_CLIENT_MARKERS.map((m) => m.name), sizeBytes: statSync(appPath).size };
 }
+
+/**
+ * TEST-QUELLE (Release-Gate v0.8.104) — eine Sicherungskopie als Testdatenquelle kommt NUR ausdrücklich aus der
+ * Umgebung, nie aus einem fest eingetragenen Pfad: ohne Angabe bricht die Suite ab, bevor irgendetwas startet.
+ * Ein lebender Datenordner (mit Datenort-Kennung oder Zeiger) ist nie eine Testquelle — er wird abgewiesen, statt
+ * gelesen. Die Quelle wird ausschließlich gelesen.
+ */
+export function testSourceFromEnv(varName, requiredEntries, env = process.env) {
+  const raw = String(env[varName] ?? '').trim();
+  if (!raw) {
+    throw new E2eIdentityError(`${varName} fehlt — die Testkopie muss ausdrücklich angegeben werden (kein Standardpfad, kein Rückfall).`);
+  }
+  const dir = resolvePath(raw);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new E2eIdentityError(`${varName} zeigt auf keinen Ordner: ${dir}`);
+  for (const marker of ['.lataif-data-root.json', 'data-location.json']) {
+    if (existsSync(join(dir, marker))) {
+      throw new E2eIdentityError(`${varName} ist ein LEBENDER Datenordner (${marker}) — keine Testquelle. Nur eine Sicherungskopie angeben.`);
+    }
+  }
+  const missing = requiredEntries.filter((e) => !existsSync(join(dir, e)));
+  if (missing.length > 0) throw new E2eIdentityError(`${varName} ist keine vollständige Sicherungskopie — fehlt: ${missing.join(', ')}`);
+  return dir;
+}
