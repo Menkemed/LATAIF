@@ -16,9 +16,10 @@ import { canonicalRequestHash } from '../../src/core/media/product-media-cutover
 import { findProductsNeedingEmbedding } from '../../src/core/media/embedding-reconcile.ts';
 import { assertMigrationPreconditions, type MigrationDb } from '../../src/core/media/image-store-migration.ts';
 import {
-  SUPERSEDED_EDIT_PLAN_CASES, EDIT_PLAN_SUPERSEDED, inspectSupersededEditPlan, closeSupersededEditPlan,
+  SUPERSEDED_EDIT_PLAN_CASES, EDIT_PLAN_SUPERSEDED, inspectSupersededEditPlan, closeSupersededEditPlan, supersededEditPlansStatus,
   type SupersededEditPlanCase, type SupersededDeps, type SupersededDb,
 } from '../../src/core/media/superseded-edit-plans.ts';
+import { runSupersededEditPlans, type SupersededEnv, type SupersededRunResult } from '../../src/core/media/superseded-edit-plans-wiring.ts';
 import type {
   AbortInput, AbortResult, CommitInput, CommitResult, MediaBytes, MediaCommandGateway, PrepareInput, PrepareResult,
   ReadVerifiedInput, RecoveryOutcome,
@@ -289,6 +290,77 @@ async function main(): Promise<void> {
     const pending = d2({ db: { run: W2.db.run.bind(W2.db), exec: (sql: string, p?: unknown) => (/FROM media_blob_generations WHERE storage_key/.test(sql) ? [{ columns: ['n'], values: [[1]] }] : W2.db.exec(sql, p)) } as SupersededDb });
     ok((await inspectSupersededEditPlan(pending, W2.cases[0].jobId) as { code?: string }).code === 'SUPERSEDED_PENDING_MEDIA', 'Darstellung des neuen Bildes ist gespeicherte Generation → abgewiesen');
     ok(JSON.stringify(q(W2.db, `SELECT * FROM media_ingest_jobs ORDER BY job_id`)) === snap, 'keine Zeile geändert');
+  }
+
+  // ── §8 Verdrahtung (Einstieg der Owner-Karte): Owner im Mutationspfad, Primary, Pflichtangaben, Beweis ──
+  {
+    const W3 = await world(SQL);
+    let role: string | null = 'owner';
+    let roleReads = 0;
+    let saves = 0;
+    let client = false;
+    const env = (over: Partial<SupersededEnv> = {}): SupersededEnv => ({
+      runExclusive: (fn) => fn({ db: W3.db, saveDurably: async () => { saves++; } }, W3.coord),
+      journalPresent: async () => false,
+      session: () => { roleReads++; return { userId: 'user-owner', role }; },
+      isClientMode: () => client,
+      now: () => '2026-11-16T09:00:00.000Z',
+      cases: W3.cases,
+      ...over,
+    });
+    const jobsSnap3 = () => JSON.stringify(q(W3.db, `SELECT * FROM media_ingest_jobs ORDER BY job_id`));
+    const before3 = untouchedDigest(W3.db);
+    const snap3 = jobsSnap3();
+    ok(supersededEditPlansStatus(W3.db as SupersededDb, W3.cases).cardVisible === true, 'Karte sichtbar, solange die Jobs offen sind');
+    ok(supersededEditPlansStatus(W3.db as SupersededDb).cardVisible === false && supersededEditPlansStatus(W3.db as SupersededDb).cases.every((c) => c.jobState === 'missing'),
+      'Installation ohne diese Jobs (Produktionsliste): Karte erscheint nie');
+
+    const insp = await runSupersededEditPlans(env(), { mode: 'inspect' });
+    const fps: Record<string, string> = {};
+    for (const v of insp.inspected ?? []) if (v.status === 'closable') fps[v.jobId] = v.fingerprint;
+    ok(Object.keys(fps).length === 2 && insp.saved === false, 'Prüfen über die Verdrahtung: beide abbrechbar, nichts gespeichert');
+    const note = { reason: 'superseded phone edits', backupRef: '2026-11-16_vor-galerie-wartung' };
+
+    client = true;
+    ok((await runSupersededEditPlans(env(), { mode: 'close', fingerprints: fps, ...note })).refused?.code === 'SUPERSEDED_PRIMARY_ONLY', 'PC2/Oberfläche: abgewiesen');
+    client = false;
+    role = 'manager';
+    ok((await runSupersededEditPlans(env(), { mode: 'close', fingerprints: fps, ...note })).refused?.code === 'SUPERSEDED_NOT_OWNER', 'kein Owner: abgewiesen');
+    role = 'owner';
+    ok((await runSupersededEditPlans(env(), { mode: 'close', fingerprints: fps, reason: ' ', backupRef: note.backupRef })).refused?.code === 'SUPERSEDED_NOTE_REQUIRED', 'ohne Grund: abgewiesen');
+    ok((await runSupersededEditPlans(env(), { mode: 'close', fingerprints: fps, reason: note.reason, backupRef: 'x' })).refused?.code === 'SUPERSEDED_NOTE_REQUIRED', 'ohne Sicherungsnamen: abgewiesen');
+    // Owner beim Start, aber die Rolle wechselt, bevor geschrieben wird → die Prüfung im Mutationspfad greift.
+    roleReads = 0;
+    const flip = env({ session: () => { roleReads++; return { userId: 'user-owner', role: roleReads === 1 ? 'owner' : 'sales' }; } });
+    const rFlip = await runSupersededEditPlans(flip, { mode: 'close', fingerprints: fps, ...note });
+    ok(rFlip.closed?.every((x) => x.status === 'refused' && x.code === 'SUPERSEDED_NOT_OWNER') && rFlip.saved === false, 'Rolle unmittelbar vor der Änderung gelesen: kein Owner → nichts geschrieben');
+    ok(rFlip.proof?.unchanged === true && rFlip.proof.auditAdded === 0, '… Beweis: keine Tabelle geändert, keine Audit-Zeile');
+    // Daten zwischen Prüfung und Abbruch verändert → atomar verweigert
+    W3.db.run(`UPDATE media_ingest_jobs SET attempt_count = attempt_count + 1 WHERE job_id = ?`, [W3.cases[1].jobId]);
+    const rStale = await runSupersededEditPlans(env(), { mode: 'close', fingerprints: fps, ...note });
+    const byId = (r: SupersededRunResult, id: string) => r.closed?.find((x) => x.jobId === id);
+    ok(byId(rStale, W3.cases[1].jobId)?.status === 'refused' && (byId(rStale, W3.cases[1].jobId) as { code?: string }).code === 'SUPERSEDED_FINGERPRINT_CHANGED', 'veränderter Job: verweigert');
+    ok(byId(rStale, W3.cases[0].jobId)?.status === 'closed', '… der unveränderte andere Job wird abgebrochen (jeder Job einzeln atomar)');
+    W3.db.run(`UPDATE media_ingest_jobs SET attempt_count = attempt_count - 1 WHERE job_id = ?`, [W3.cases[1].jobId]);
+    ok(rStale.proof?.unchanged === true && rStale.proof.auditAdded === 1 && rStale.saved === true, '… Beweis: Artikel/Medien/Changelog unverändert, eine Audit-Zeile, einmal gespeichert');
+    // erneut prüfen + abbrechen
+    const insp2 = await runSupersededEditPlans(env(), { mode: 'inspect' });
+    const fps2: Record<string, string> = {};
+    for (const v of insp2.inspected ?? []) if (v.status === 'closable') fps2[v.jobId] = v.fingerprint;
+    ok(insp2.inspected?.find((v) => v.jobId === W3.cases[0].jobId)?.status === 'already_closed' && Object.keys(fps2).join() === W3.cases[1].jobId, 'erneute Prüfung: A schon abgebrochen, B wieder abbrechbar');
+    saves = 0;
+    const rOk = await runSupersededEditPlans(env(), { mode: 'close', fingerprints: { ...fps, ...fps2 }, ...note });
+    ok(byId(rOk, W3.cases[0].jobId)?.status === 'already_closed' && byId(rOk, W3.cases[1].jobId)?.status === 'closed' && saves === 1, 'Abbruch: B abgebrochen, A sicher wiederholt (already_closed), einmal gespeichert');
+    ok(rOk.proof?.unchanged === true && untouchedDigest(W3.db) === before3, 'Beweis: Artikelpreise, Bilder, Zuordnungen, Generationen, Sync-Changelog unverändert');
+    const aud = q(W3.db, `SELECT new_value, changed_by FROM audit_log WHERE module = 'Media'`);
+    ok(aud.length === 2 && aud.every((a: any) => JSON.parse(a.new_value).backup === note.backupRef && JSON.parse(a.new_value).reason === note.reason && a.changed_by === 'user-owner'), 'Audit: Owner, Grund und Sicherungsname protokolliert');
+    ok(rOk.control?.cases.every((c) => c.closedByMaintenance && c.embeddingCandidate && !c.hasEmbedding) && rOk.control.migrationBlockedBy === null, 'Nachkontrolle: beide wieder Embedding-Kandidaten, Migration frei');
+    ok(supersededEditPlansStatus(W3.db as SupersededDb, W3.cases).cardVisible === true, 'Karte bleibt, bis das Embedding da ist (Kontrolle nach dem Neustart)');
+    W3.db.run(`UPDATE products SET image_embedding = '[1]', image_description = 'x' WHERE id IN ('pA','pB')`);
+    ok(supersededEditPlansStatus(W3.db as SupersededDb, W3.cases).cardVisible === false, 'danach verschwindet die Karte für immer');
+    const rAgain = await runSupersededEditPlans(env(), { mode: 'close', fingerprints: { ...fps, ...fps2 }, ...note });
+    ok(rAgain.closed?.every((x) => x.status === 'already_closed') && rAgain.proof?.auditAdded === 0, 'Wiederholungsaufruf: nichts mehr zu tun, keine Audit-Zeile');
+    ok(jobsSnap3() !== snap3, 'Testwelt: (Kontrolle) es wurde tatsächlich abgebrochen');
   }
 
   console.log(`\nSUPERSEDED-EDIT-PLANS: ${PASS} passed, ${FAIL} failed`);

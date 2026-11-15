@@ -259,6 +259,8 @@ export async function inspectSupersededEditPlan(deps: SupersededDeps, jobId: str
  */
 export async function closeSupersededEditPlan(
   deps: SupersededDeps, jobId: string, expectedFingerprint: string, actor: SupersededActor,
+  /** Owner-Angaben aus der Bestätigung (Grund, Name der geprüften Sicherung) — werden mitprotokolliert. */
+  note?: { reason?: string; backupRef?: string },
 ): Promise<SupersededCloseResult> {
   if (canonicalRole(actor.role ?? undefined) !== 'ADMIN') {
     return { status: 'refused', jobId, code: 'SUPERSEDED_NOT_OWNER', detail: 'only the owner may close a superseded edit plan' };
@@ -281,7 +283,8 @@ export async function closeSupersededEditPlan(
   const job = deps.inspect(c.tenantId, c.ingestRequestId)!.job;
   const now = deps.now ? deps.now() : new Date().toISOString();
   const auditId = `audit-media-maint-superseded:${c.jobId}`;
-  const detail = JSON.stringify({ reason: 'superseded', supersededBy: c.supersededByIngestRequestId, sku: c.sku, checkedFingerprint: fp });
+  const ownerNote = { ownerReason: note?.reason ?? null, backupRef: note?.backupRef ?? null };
+  const detail = JSON.stringify({ reason: 'superseded', supersededBy: c.supersededByIngestRequestId, sku: c.sku, checkedFingerprint: fp, ...ownerNote });
 
   const outermost = enterTransaction();
   if (outermost) deps.db.run('BEGIN IMMEDIATE');
@@ -301,7 +304,7 @@ export async function closeSupersededEditPlan(
        VALUES (?, ?, 'Media', 'media_ingest_jobs', ?, 'STATUS_CHANGE', 'state', ?, ?, ?, ?)`,
       [auditId, c.branchId, c.jobId,
         JSON.stringify({ state: 'accepted', updated_at: job.updated_at }),
-        JSON.stringify({ state: 'failed', error_code: EDIT_PLAN_SUPERSEDED, sku: c.sku, product_id: c.productId, superseded_by: c.supersededByIngestRequestId }),
+        JSON.stringify({ state: 'failed', error_code: EDIT_PLAN_SUPERSEDED, sku: c.sku, product_id: c.productId, superseded_by: c.supersededByIngestRequestId, reason: ownerNote.ownerReason, backup: ownerNote.backupRef }),
         actor.userId, now],
     );
     if (leaveNestedTransaction() && outermost) deps.db.run('COMMIT');
@@ -315,4 +318,40 @@ export async function closeSupersededEditPlan(
     throw e;
   }
   return { status: 'closed', jobId: c.jobId, auditId, closedAt: now, evidence: recheck.evidence };
+}
+
+// ── Nur lesend: Zustand für die einmalige Owner-Karte und die Nachkontrolle ─────────────────────
+
+export interface SupersededCaseStatus {
+  sku: string;
+  productId: string;
+  jobId: string;
+  /** `missing`, wenn es den Job in dieser Datenbank nicht gibt (andere Installation). */
+  jobState: string;
+  /** Von DIESER Wartung abgebrochen (`failed` + MEDIA_EDIT_PLAN_SUPERSEDED). */
+  closedByMaintenance: boolean;
+  hasEmbedding: boolean;
+  hasDescription: boolean;
+}
+
+/**
+ * Für die Karte in „Data Repairs": sichtbar NUR, solange einer der zwei Jobs noch `accepted` ist oder
+ * nach dem Abbruch das Embedding eines der zwei Artikel noch fehlt. Danach — und auf jeder Installation
+ * ohne diese Jobs — erscheint nichts. Liest drei kleine Zeilen, schreibt nie.
+ */
+export function supersededEditPlansStatus(db: SupersededDb, cases: readonly SupersededEditPlanCase[] = SUPERSEDED_EDIT_PLAN_CASES): {
+  cases: SupersededCaseStatus[];
+  cardVisible: boolean;
+} {
+  const out: SupersededCaseStatus[] = cases.map((c) => {
+    const j = rows(db, 'SELECT state, error_code FROM media_ingest_jobs WHERE tenant_id = ? AND job_id = ?', [c.tenantId, c.jobId])[0];
+    const p = rows(db, `SELECT (image_embedding IS NOT NULL AND image_embedding <> '') AS emb, (image_description IS NOT NULL AND image_description <> '') AS des FROM products WHERE id = ?`, [c.productId])[0];
+    const jobState = j ? String(j.state) : 'missing';
+    return {
+      sku: c.sku, productId: c.productId, jobId: c.jobId, jobState,
+      closedByMaintenance: jobState === 'failed' && s(j?.error_code) === EDIT_PLAN_SUPERSEDED,
+      hasEmbedding: Number(p?.emb ?? 0) === 1, hasDescription: Number(p?.des ?? 0) === 1,
+    };
+  });
+  return { cases: out, cardVisible: out.some((x) => x.jobState === 'accepted' || (x.closedByMaintenance && !x.hasEmbedding)) };
 }

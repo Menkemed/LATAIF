@@ -9,7 +9,9 @@
 // mit einem Fehler beantwortet — der Abbruch braucht Rust nur für die Journal-Liste.
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import initSqlJs from 'sql.js';
 import { MediaDbCoordinator } from '../../src/core/media/coordinator.ts';
@@ -44,6 +46,11 @@ function digest(db: any): Record<string, string> {
     out[t] = h(JSON.stringify(q(db, `SELECT * FROM ${t} ORDER BY rowid`)));
   }
   return out;
+}
+const VERGLEICH = join(here, '..', '..', 'scripts', 'maint', 'galerie-wartung-vergleich.mjs');
+function vergleich(vorher: string, nachher: string): { code: number; out: any } {
+  try { return { code: 0, out: JSON.parse(execFileSync(process.execPath, [VERGLEICH, '--vorher', vorher, '--nachher', nachher], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) }; }
+  catch (e: any) { let out: any = null; try { out = JSON.parse(String(e.stdout || e.stderr)); } catch { out = { raw: String(e.stdout || e.stderr) }; } return { code: e.status ?? 1, out }; }
 }
 const noRust = new Proxy({}, { get: () => async () => { throw new Error('NO_RUST_CALL_EXPECTED'); } }) as unknown as MediaCommandGateway;
 const OWNER = { userId: 'user-owner', role: 'owner' };
@@ -125,6 +132,19 @@ async function main(): Promise<void> {
     let mig1 = '';
     try { assertMigrationPreconditions(db as MigrationDb); } catch (e) { mig1 = (e as Error).message; }
     ok(mig1 === '', 'Bildmigration: keine Blockade mehr');
+
+    // Nachweis-Skript für die Produktion: Sicherung (vorher) gegen den Stand nach dem Abbruch (temporäre Datei).
+    const tmp = mkdtempSync(join(tmpdir(), 'lataif-sup-copy-'));
+    try {
+      const nach = join(tmp, 'nachher.db');
+      writeFileSync(nach, Buffer.from(db.export()));
+      const vgl = vergleich(path, nach);
+      ok(vgl.code === 0 && vgl.out.ok && vgl.out.audit?.wartung === 2 && Object.values(vgl.out.jobs ?? {}).every((x) => x === 'accepted → failed'), `Vergleichsskript: nur die zwei Jobs + 2 Audit-Zeilen (${JSON.stringify(vgl.out).slice(0, 160)})`);
+      db.run(`UPDATE products SET purchase_price = purchase_price + 1 WHERE id = ?`, [pids[0]]);
+      writeFileSync(nach, Buffer.from(db.export()));
+      const vgl2 = vergleich(path, nach);
+      ok(vgl2.code === 2 && vgl2.out.ok === false && vgl2.out.fehler.some((f: string) => f.includes('purchase_price')), 'Vergleichsskript erkennt eine geänderte Preisspalte');
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
     db.close();
   }
   console.log(`\nSUPERSEDED-EDIT-PLANS COPY: ${PASS} passed, ${FAIL} failed`);

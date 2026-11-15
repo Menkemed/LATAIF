@@ -20,6 +20,7 @@ import { goldConditionRestoreCandidates, restoreGoldConditionOnPrimary } from '@
 import { cardFeeRepairPreview, repairCardFeeBookingsOnPrimary } from '@/core/finance/card-fee-repair';
 import { useProductStore } from '@/stores/productStore';
 import { useExpenseStore } from '@/stores/expenseStore';
+import { SupersededGalleryEditsCard } from './SupersededGalleryEditsCard';
 
 export function DataRepairsTab() {
   const [refresh, setRefresh] = useState(0);
@@ -110,6 +111,9 @@ export function DataRepairsTab() {
           </div>
         )}
       </Card>
+
+      {/* OWNER-WARTUNG — erscheint nur, solange die zwei überholten Galerie-Bearbeitungen offen sind. */}
+      <SupersededGalleryEditsCard reason={reason} />
 
       <Card>
         <span className="text-overline">BULK METAL LOTS CLOSED BY THE START-UP STEP</span>
