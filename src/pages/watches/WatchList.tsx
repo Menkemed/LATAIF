@@ -85,11 +85,15 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
     mediaScope = { branchId: b || undefined, tenantId: sessionTenantId(b || undefined) };
   } catch { /* no scope → legacy-only export */ }
 
+  // Die Artikeldetails werden mit ALLEN bekannten Kategorie-Definitionen ausgelegt (auch deaktivierte) — wie die App
+  // einen bestehenden Artikel liest; ohne Schema die aktive Auswahl.
+  const schema = useProductStore.getState().categorySchema;
   const buffer = await buildCollectionWorkbookBuffer(items, {
     lotAgg,
     categoryName: cat,
     resolveImage: resolvePrimaryImageForExport,
     scope: mediaScope,
+    categories: schema.length > 0 ? schema : categories,
   });
   await exportFile(
     `LATAIF_Collection_${today}.xlsx`,

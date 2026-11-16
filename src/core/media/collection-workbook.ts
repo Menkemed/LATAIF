@@ -9,13 +9,21 @@
 // Image embedding is fail-isolated per row: a product whose image can't be
 // resolved/decoded (missing / pending / corrupt) keeps its row and simply gets
 // no picture — a single bad image never aborts the workbook.
+//
+// COLLECTIONS-EXPORT — die Artikeldetails der Kategorien als eigene Spalten, gruppiert:
+//   Grunddaten · Artikeldetails · Einkauf und Herkunft · Preise · Bestand und Lager · Weitere Angaben.
+// Die Detailspalten kommen AUSSCHLIESSLICH aus den Kategorie-Definitionen (keine erfundenen Felder):
+// in Schema-Reihenfolge, gleiche Bezeichnung = eine Spalte, nur Spalten mit mindestens einem Wert.
+// Ein Wert erscheint nur, wenn die eigene Kategorie des Artikels das Feld kennt; sonst bleibt die Zelle
+// leer. Zahlen bleiben Excel-Zahlen (Einheit im Kopf). Nur lesend.
 // ════════════════════════════════════════════════════════════════════════════
 
 import ExcelJS from 'exceljs';
-import type { Product } from '@/core/models/types';
+import type { Category, CategoryAttribute, Product } from '@/core/models/types';
 import { pieceCount } from '@/core/lots/stock-metrics';
 import type { LotAggregate } from '@/core/lots/lot-queries';
 import type { ExportImage, ExportMediaScope } from '@/core/media/product-image-export-core';
+import { attributesForDisplay, stonesSummary } from '@/core/products/stones';
 
 export interface CollectionWorkbookDeps {
   /** Lot aggregates keyed by product id (getStockAggregates result). */
@@ -26,6 +34,132 @@ export interface CollectionWorkbookDeps {
   resolveImage: (product: { id: string; images?: string[] }, scope: ExportMediaScope) => Promise<ExportImage | null>;
   /** Authorised media scope for the resolver. */
   scope: ExportMediaScope;
+  /** Kategorie-Definitionen in Schema-Reihenfolge (auch deaktivierte) — Quelle der Detailspalten. Ohne: keine Detailspalten. */
+  categories?: readonly Category[];
+}
+
+type BaseKey =
+  | 'image' | 'sku' | 'brand' | 'name' | 'category' | 'cond'
+  | 'supplier' | 'psource' | 'pdate' | 'paid'
+  | 'pp' | 'ppRange' | 'stockVal' | 'spp' | 'min' | 'max' | 'margin'
+  | 'qty' | 'lots' | 'status' | 'storage' | 'days'
+  | 'tax' | 'source' | 'notes';
+
+interface BaseColumn { header: string; key: BaseKey; width: number; numFmt?: string }
+
+const MONEY = '#,##0.000';
+const COUNT = '#,##0';
+
+/** Die 25 bisherigen Spalten, in Gruppen. „Artikeldetails" (dynamisch) stehen zwischen Grunddaten und Einkauf. */
+const GRUNDDATEN: BaseColumn[] = [
+  { header: 'Image',     key: 'image',    width: 12 },
+  { header: 'SKU',       key: 'sku',      width: 14 },
+  { header: 'Brand',     key: 'brand',    width: 16 },
+  { header: 'Name',      key: 'name',     width: 26 },
+  { header: 'Category',  key: 'category', width: 14 },
+  { header: 'Condition', key: 'cond',     width: 12 },
+];
+const EINKAUF: BaseColumn[] = [
+  { header: 'Supplier',        key: 'supplier', width: 16 },
+  { header: 'Purchase Source', key: 'psource',  width: 16 },
+  { header: 'Purchase Date',   key: 'pdate',    width: 14 },
+  { header: 'Paid From',       key: 'paid',     width: 10 },
+];
+const PREISE: BaseColumn[] = [
+  { header: 'Purchase Price (BHD)',     key: 'pp',       width: 16, numFmt: MONEY },
+  { header: 'Cost Range (BHD)',         key: 'ppRange',  width: 18 },
+  { header: 'Stock Value (BHD)',        key: 'stockVal', width: 16, numFmt: MONEY },
+  { header: 'Planned Sale Price (BHD)', key: 'spp',      width: 18, numFmt: MONEY },
+  { header: 'Min Sale (BHD)',           key: 'min',      width: 14, numFmt: MONEY },
+  { header: 'Max Sale (BHD)',           key: 'max',      width: 14, numFmt: MONEY },
+  { header: 'Expected Margin (BHD)',    key: 'margin',   width: 16, numFmt: MONEY },
+];
+const BESTAND: BaseColumn[] = [
+  { header: 'Quantity',         key: 'qty',     width: 9,  numFmt: COUNT },
+  { header: 'Lots',             key: 'lots',    width: 8,  numFmt: COUNT },
+  { header: 'Stock Status',     key: 'status',  width: 14 },
+  { header: 'Storage Location', key: 'storage', width: 16 },
+  { header: 'Days in Stock',    key: 'days',    width: 10 },
+];
+const WEITERE: BaseColumn[] = [
+  { header: 'Tax Scheme',  key: 'tax',    width: 14 },
+  { header: 'Source Type', key: 'source', width: 12 },
+  { header: 'Notes',       key: 'notes',  width: 26 },
+];
+
+/** Die bisherigen 25 Kopfzeilen (ohne Detailspalten), in der neuen Reihenfolge. */
+export const COLLECTION_BASE_HEADERS: readonly string[] = [...GRUNDDATEN, ...EINKAUF, ...PREISE, ...BESTAND, ...WEITERE].map((c) => c.header);
+
+export interface DetailColumn {
+  /** ExcelJS-Spaltenschlüssel (`attr:<n>`). */
+  key: string;
+  header: string;
+  type: CategoryAttribute['type'];
+  /** Je Kategorie: welcher Attribut-Schlüssel dieser Kategorie in diese Spalte gehört. */
+  byCategory: Map<string, string>;
+}
+
+const norm = (s: string): string => s.trim().replace(/\s+/g, ' ').toLowerCase();
+const headerOf = (a: CategoryAttribute): string => (a.unit ? `${a.label.trim()} (${a.unit})` : a.label.trim());
+/** Bezeichnungen der Grundspalten ohne „(BHD)" — ein gleichnamiges Merkmal bekommt keine zweite Spalte. */
+const BASE_LABELS = new Set(COLLECTION_BASE_HEADERS.map((h) => norm(h.replace(/\s*\(BHD\)\s*$/, ''))));
+
+const leer = (v: unknown): boolean =>
+  v === undefined || v === null || (typeof v === 'string' && v.trim() === '') || (Array.isArray(v) && v.length === 0);
+
+/** Der Zellwert eines Merkmals: Zahl bleibt Zahl, Steine als Kurzform, Ja/Nein, Mehrfachauswahl mit Komma. Leer → ''. */
+export function detailCellValue(type: CategoryAttribute['type'], value: unknown): string | number {
+  if (leer(value)) return '';
+  if (type === 'stones') return stonesSummary(value) || '';
+  if (type === 'boolean') return value === true || value === 'true' ? 'Yes' : value === false || value === 'false' ? 'No' : String(value);
+  if (type === 'number') {
+    const n = typeof value === 'number' ? value : Number(String(value).trim());
+    return Number.isFinite(n) ? n : String(value);
+  }
+  if (Array.isArray(value)) return value.map((x) => String(x)).filter(Boolean).join(', ');
+  return String(value).trim();
+}
+
+function attributesOf(p: Product): Record<string, unknown> {
+  const raw = (p as { attributes?: unknown }).attributes;
+  let a: unknown = raw;
+  if (typeof raw === 'string') { try { a = JSON.parse(raw); } catch { a = {}; } }
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return {};
+  // Anzeige-Werte (z. B. Diamond Weight aus den Steinzeilen) — wie Karte, Merkmalliste und Druck.
+  return attributesForDisplay(p.categoryId, a as Record<string, unknown>) as Record<string, unknown>;
+}
+
+/**
+ * Die Detailspalten für genau diese Artikel: aus den Definitionen ihrer Kategorien, in Schema-Reihenfolge,
+ * gleiche Bezeichnung (inkl. Einheit) = eine Spalte, Grundspalten-Namen ausgenommen, und nur Spalten, in denen
+ * mindestens ein exportierter Artikel einen Wert hat.
+ */
+export function collectionDetailColumns(items: readonly Product[], categories: readonly Category[] | undefined): DetailColumn[] {
+  if (!categories || categories.length === 0) return [];
+  const present = new Set(items.map((p) => p.categoryId));
+  const cols: DetailColumn[] = [];
+  const byHeader = new Map<string, DetailColumn>();
+  for (const cat of categories) {
+    if (!present.has(cat.id)) continue;
+    for (const a of cat.attributes ?? []) {
+      if (!a || !a.key || !a.label) continue;
+      const header = headerOf(a);
+      const id = norm(header);
+      if (BASE_LABELS.has(norm(a.label))) continue;
+      let col = byHeader.get(id);
+      if (!col) {
+        col = { key: `attr:${cols.length}`, header, type: a.type, byCategory: new Map() };
+        byHeader.set(id, col);
+        cols.push(col);
+      }
+      if (!col.byCategory.has(cat.id)) col.byCategory.set(cat.id, a.key);
+    }
+  }
+  const attrs = new Map(items.map((p) => [p.id, attributesOf(p)]));
+  return cols.filter((c) => items.some((p) => {
+    const k = c.byCategory.get(p.categoryId);
+    return k !== undefined && detailCellValue(c.type, attrs.get(p.id)?.[k]) !== '';
+  }));
 }
 
 /** Build the Collection workbook and return its .xlsx bytes. Never throws for a
@@ -41,32 +175,14 @@ export async function buildCollectionWorkbookBuffer(
   wb.created = new Date();
   const ws = wb.addWorksheet('Collection');
 
+  const details = collectionDetailColumns(items, deps.categories);
+  const asCol = (c: BaseColumn): Partial<ExcelJS.Column> => ({ header: c.header, key: c.key, width: c.width, ...(c.numFmt ? { style: { numFmt: c.numFmt } } : {}) });
+  const detailCols: Array<Partial<ExcelJS.Column>> = details.map((d) => ({
+    header: d.header, key: d.key, width: Math.min(30, Math.max(12, d.header.length + 2)),
+    ...(d.type === 'number' ? { style: { numFmt: '#,##0.###' } } : {}),
+  }));
   ws.columns = [
-    { header: 'Image',                    key: 'image',    width: 12 },
-    { header: 'SKU',                      key: 'sku',      width: 14 },
-    { header: 'Brand',                    key: 'brand',    width: 16 },
-    { header: 'Name',                     key: 'name',     width: 26 },
-    { header: 'Category',                 key: 'category', width: 14 },
-    { header: 'Quantity',                 key: 'qty',      width: 9,  style: { numFmt: '#,##0' } },
-    { header: 'Condition',                key: 'cond',     width: 12 },
-    { header: 'Purchase Price (BHD)',     key: 'pp',       width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Cost Range (BHD)',         key: 'ppRange',  width: 18 },
-    { header: 'Stock Value (BHD)',        key: 'stockVal', width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Lots',                     key: 'lots',     width: 8,  style: { numFmt: '#,##0' } },
-    { header: 'Planned Sale Price (BHD)', key: 'spp',      width: 18, style: { numFmt: '#,##0.000' } },
-    { header: 'Min Sale (BHD)',           key: 'min',      width: 14, style: { numFmt: '#,##0.000' } },
-    { header: 'Max Sale (BHD)',           key: 'max',      width: 14, style: { numFmt: '#,##0.000' } },
-    { header: 'Expected Margin (BHD)',    key: 'margin',   width: 16, style: { numFmt: '#,##0.000' } },
-    { header: 'Tax Scheme',               key: 'tax',      width: 14 },
-    { header: 'Stock Status',             key: 'status',   width: 14 },
-    { header: 'Source Type',              key: 'source',   width: 12 },
-    { header: 'Storage Location',         key: 'storage',  width: 16 },
-    { header: 'Supplier',                 key: 'supplier', width: 16 },
-    { header: 'Purchase Source',          key: 'psource',  width: 16 },
-    { header: 'Paid From',                key: 'paid',     width: 10 },
-    { header: 'Purchase Date',            key: 'pdate',    width: 14 },
-    { header: 'Days in Stock',            key: 'days',     width: 10 },
-    { header: 'Notes',                    key: 'notes',    width: 26 },
+    ...GRUNDDATEN.map(asCol), ...detailCols, ...EINKAUF.map(asCol), ...PREISE.map(asCol), ...BESTAND.map(asCol), ...WEITERE.map(asCol),
   ];
 
   // Header-Row Styling.
@@ -78,37 +194,50 @@ export async function buildCollectionWorkbookBuffer(
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F7FA' } };
     cell.border = { bottom: { style: 'thin', color: { argb: 'FFC6A36D' } } };
   });
+  // Gruppengrenzen: eine feine Linie links am ersten Kopf jeder Gruppe (Details, Einkauf, Preise, Bestand, Weitere).
+  const gruppenStart = [details[0]?.key, EINKAUF[0].key, PREISE[0].key, BESTAND[0].key, WEITERE[0].key].filter(Boolean) as string[];
+  for (const k of gruppenStart) {
+    const cell = header.getCell(k);
+    cell.border = { ...cell.border, left: { style: 'thin', color: { argb: 'FFC6A36D' } } };
+  }
 
   // Data-Rows + Image-Embedding.
   for (let i = 0; i < items.length; i++) {
     const p = items[i];
     const a = lotAgg.get(p.id);
     const fmt3 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
+    const attrs = details.length ? attributesOf(p) : {};
+    const detailValues: Record<string, string | number> = {};
+    for (const d of details) {
+      const k = d.byCategory.get(p.categoryId);
+      detailValues[d.key] = k === undefined ? '' : detailCellValue(d.type, attrs[k]);
+    }
     const row = ws.addRow({
       image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
       sku:      p.sku || '',
       brand:    p.brand,
       name:     p.name,
       category: categoryName(p.categoryId),
-      qty:      a ? a.totalQty : pieceCount(p.quantity),
       cond:     p.condition || '',
+      ...detailValues,
+      supplier: p.supplierName || '',
+      psource:  p.purchaseSource || '',
+      pdate:    p.purchaseDate || '',
+      paid:     p.paidFrom || '',
       pp:       a ? a.weightedAvg : p.purchasePrice,
       ppRange:  a && a.lotCount > 1 ? `${fmt3(a.minCost)}–${fmt3(a.maxCost)}` : '',
       stockVal: a ? a.totalValue : p.purchasePrice * pieceCount(p.quantity),
-      lots:     a ? a.lotCount : 1,
       spp:      p.plannedSalePrice ?? '',
       min:      p.minSalePrice ?? '',
       max:      p.maxSalePrice ?? '',
       margin:   p.expectedMargin ?? '',
-      tax:      p.taxScheme === 'MARGIN' ? 'Margin Scheme' : p.taxScheme === 'VAT_10' ? 'VAT 10%' : 'Zero',
+      qty:      a ? a.totalQty : pieceCount(p.quantity),
+      lots:     a ? a.lotCount : 1,
       status:   p.stockStatus,
-      source:   p.sourceType,
       storage:  p.storageLocation || '',
-      supplier: p.supplierName || '',
-      psource:  p.purchaseSource || '',
-      paid:     p.paidFrom || '',
-      pdate:    p.purchaseDate || '',
       days:     p.daysInStock ?? '',
+      tax:      p.taxScheme === 'MARGIN' ? 'Margin Scheme' : p.taxScheme === 'VAT_10' ? 'VAT 10%' : 'Zero',
+      source:   p.sourceType,
       notes:    p.notes || '',
     });
     row.height = 60; // ~80 px — passt zu 75x75 Bild.
