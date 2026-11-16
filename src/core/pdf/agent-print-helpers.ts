@@ -10,7 +10,7 @@ import {
   type ItemListRow,
 } from '@/core/pdf/itemListPdf';
 import { productDisplayName } from '../products/display-name.ts';
-import { approvalStatusLabel, filterApprovalTransfers } from '@/core/agents/approval-rows';
+import { approvalRowMoney, approvalStatusLabel, filterApprovalTransfers } from '@/core/agents/approval-rows';
 
 /** Baut eine kompakte "Steel · 40mm · Black Dial · Pre-Owned"-Zeile aus
  *  allen ausgefuellten Kategorie-Attributen + Condition (ohne SKU, weil SKU
@@ -57,25 +57,20 @@ export function buildAgentPrintGroup({ agent, transfers, invoices, products, cat
       : undefined;
     const itemLabel = product ? productDisplayName(product) : '(product not found)';
     const specsLine = buildSpecsLine(product, categories);
-    const amount = linkedInvoice
-      ? linkedInvoice.grossAmount
-      : ((t.settlementAmount ?? t.actualSalePrice ?? t.agentPrice) || 0);
-    const paid = linkedInvoice
-      ? (linkedInvoice.paidAmount || 0)
-      : (t.settlementStatus === 'paid'
-        ? (t.settlementAmount ?? amount)
-        : (t.settlementStatus === 'partial' ? (t.settlementPaidAmount || 0) : 0));
-    const outstanding = Math.max(0, amount - paid);
+    // Dieselbe Geldregel wie Approval-Excel und Approval-Seite: Bezahlt/Offen nur bei verkauften Stücken. Früher
+    // wurde hier für JEDEN Transfer eine Forderung gebildet (ohne Verkauf = Our Price) — Stücke beim Kunden oder
+    // zurückgegebene standen dadurch mit ihrem Our Price als „Outstanding" im Druck.
+    const money = approvalRowMoney(t, linkedInvoice);
 
     return {
       date: (t.transferredAt || t.createdAt || '').split('T')[0],
       itemLabel,
       specsLine,
       refOrSerial,
-      ourPrice: t.agentPrice || 0,
-      saleOrPayout: t.actualSalePrice ?? undefined,
-      paid,
-      outstanding,
+      ourPrice: money.ourPrice,
+      saleOrPayout: money.salePrice ?? undefined,
+      paid: money.paid ?? undefined,
+      outstanding: money.outstanding ?? undefined,
       returnDate: t.returnBy ? t.returnBy.split('T')[0] : undefined,
       status: statusLabel(t, linkedInvoice),
     };
@@ -83,11 +78,13 @@ export function buildAgentPrintGroup({ agent, transfers, invoices, products, cat
 
   // Summary
   const totalOurPrice = rows.reduce((s, r) => s + (r.ourPrice || 0), 0);
+  const totalPaid = rows.reduce((s, r) => s + (r.paid || 0), 0);
   const totalOutstanding = rows.reduce((s, r) => s + (r.outstanding || 0), 0);
   const summaryParts = [
     `${rows.length} item${rows.length === 1 ? '' : 's'}`,
     `Total Our Price: ${fmt3(totalOurPrice)} BHD`,
   ];
+  if (totalPaid > 0) summaryParts.push(`Paid: ${fmt3(totalPaid)} BHD`);
   if (totalOutstanding > 0) summaryParts.push(`Outstanding: ${fmt3(totalOutstanding)} BHD`);
 
   const contactBits = [agent.company, agent.phone, agent.email].filter(Boolean) as string[];

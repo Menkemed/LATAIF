@@ -73,30 +73,60 @@ function filterLabel(f: ItemListFilter): string {
   return 'Returned Items';
 }
 
+/**
+ * A4 hochkant: 190 mm bedruckbare Breite (Ränder 10 mm). Feste Spaltenbreiten, damit nichts über den Rand läuft;
+ * „Item" bekommt den Rest und bricht um. Beträge 10 px Monospace passen bis „999,999.999" in 21 mm.
+ */
+const APPROVAL_COLS: Array<{ h: string; w?: string; right?: boolean }> = [
+  { h: '#', w: '6mm' }, { h: 'Date', w: '16mm' }, { h: 'Item' }, { h: 'Ref / Serial', w: '24mm' },
+  { h: 'Our Price', w: '21mm', right: true }, { h: 'Status', w: '19mm' }, { h: 'Paid', w: '21mm', right: true },
+  { h: 'Outstanding', w: '21mm', right: true }, { h: 'Return By', w: '16mm' },
+];
+
 function renderApprovalTable(rows: ItemListRow[]): string {
   if (rows.length === 0) {
     return `<p style="font-size:11px;color:#888;font-style:italic;padding:8px 0">No items match the selected filter.</p>`;
   }
-  const cellBase = 'padding:6px 8px;font-size:11px;border-bottom:1px solid #eee;vertical-align:top';
-  const head = 'padding:6px 8px;font-size:9px;color:#888;letter-spacing:0.06em;text-transform:uppercase;text-align:left;border-bottom:1px solid #ccc;background:#fafafa';
-  const headerCols = ['#', 'Date', 'Item', 'Ref / Serial', 'Our Price', 'Status', 'Paid', 'Outstanding', 'Return By'];
-  let html = `<table style="width:100%;border-collapse:collapse;margin-top:8px;font-family:'Helvetica Neue',Arial,sans-serif">`;
-  html += `<thead><tr>${headerCols.map(h => `<th style="${head}${(h==='Our Price'||h==='Paid'||h==='Outstanding')?';text-align:right':''}">${escapeHtml(h)}</th>`).join('')}</tr></thead>`;
+  const cellBase = 'padding:5px 3px;font-size:11px;border-bottom:1px solid #eee;vertical-align:top';
+  const num = 'font-family:monospace;font-size:10px;text-align:right;white-space:nowrap;padding-right:7px';
+  const head = 'padding:6px 3px;font-size:8.5px;color:#888;letter-spacing:0.04em;text-transform:uppercase;text-align:left;border-bottom:1px solid #ccc;background:#fafafa;vertical-align:bottom';
+  // Bezahlt/Offen gibt es nur bei verkauften Stücken — sonst „—" statt einer erfundenen 0.
+  const money = (v: number | undefined, color: string) =>
+    v === undefined ? `<span style="color:#bbb">—</span>` : `<span style="color:${color}">${fmtBhd(v)}</span>`;
+  let html = `<table class="items" style="width:100%;table-layout:fixed;border-collapse:collapse;margin-top:8px;font-family:'Helvetica Neue',Arial,sans-serif">`;
+  html += `<colgroup>${APPROVAL_COLS.map(c => `<col${c.w ? ` style="width:${c.w}"` : ''}>`).join('')}</colgroup>`;
+  html += `<thead><tr>${APPROVAL_COLS.map(c => `<th style="${head}${c.right ? ';text-align:right' : ''}">${escapeHtml(c.h)}</th>`).join('')}</tr></thead>`;
   html += `<tbody>`;
+  // Zahl und Einheit bleiben zusammen („15.4 g", „41 mm", „0.50 ct").
+  const keepUnits = (s: string) => escapeHtml(s).replace(/(\d) (?=(g|mm|ct)\b)/g, '$1&nbsp;');
   rows.forEach((r, i) => {
-    const itemCell = `<div style="color:#1a1a1a">${escapeHtml(r.itemLabel || '—')}</div>${r.specsLine ? `<div style="color:#888;font-size:10px;margin-top:2px;line-height:1.3">${escapeHtml(r.specsLine)}</div>` : ''}`;
+    const itemCell = `<div style="color:#1a1a1a">${keepUnits(r.itemLabel || '—')}</div>${r.specsLine ? `<div style="color:#888;font-size:10px;margin-top:2px;line-height:1.3">${keepUnits(r.specsLine)}</div>` : ''}`;
+    // SKU, Referenz, Seriennummer je eine Zeile — nie mitten in der SKU umbrechen.
+    const refCell = r.refOrSerial ? r.refOrSerial.split(' · ').map(x => `<div>${escapeHtml(x)}</div>`).join('') : '—';
     html += `<tr>
-      <td style="${cellBase};color:#999;width:24px">${i + 1}</td>
-      <td style="${cellBase};color:#555;white-space:nowrap">${escapeHtml(r.date || '—')}</td>
-      <td style="${cellBase}">${itemCell}</td>
-      <td style="${cellBase};color:#555;font-family:monospace;font-size:10px">${escapeHtml(r.refOrSerial || '—')}</td>
-      <td style="${cellBase};color:#1a1a1a;font-family:monospace;text-align:right;white-space:nowrap">${fmtBhd(r.ourPrice)}</td>
-      <td style="${cellBase};color:#1a1a1a">${escapeHtml(r.status || '—')}</td>
-      <td style="${cellBase};color:${(r.paid || 0) > 0 ? '#5C8550' : '#999'};font-family:monospace;text-align:right;white-space:nowrap">${fmtBhd(r.paid)}</td>
-      <td style="${cellBase};color:${(r.outstanding || 0) > 0 ? '#AA6E6E' : '#999'};font-family:monospace;text-align:right;white-space:nowrap">${fmtBhd(r.outstanding)}</td>
-      <td style="${cellBase};color:#555;white-space:nowrap">${escapeHtml(r.returnDate || '—')}</td>
+      <td style="${cellBase};color:#999">${i + 1}</td>
+      <td style="${cellBase};color:#555;font-size:10px;white-space:nowrap">${escapeHtml(r.date || '—')}</td>
+      <td style="${cellBase};overflow-wrap:anywhere">${itemCell}</td>
+      <td style="${cellBase};color:#555;font-family:monospace;font-size:9.5px;overflow-wrap:anywhere">${refCell}</td>
+      <td style="${cellBase};${num};color:#1a1a1a">${fmtBhd(r.ourPrice)}</td>
+      <td style="${cellBase};color:#1a1a1a;font-size:10px">${escapeHtml(r.status || '—')}</td>
+      <td style="${cellBase};${num}">${money(r.paid, (r.paid || 0) > 0 ? '#5C8550' : '#999')}</td>
+      <td style="${cellBase};${num}">${money(r.outstanding, (r.outstanding || 0) > 0 ? '#AA6E6E' : '#999')}</td>
+      <td style="${cellBase};color:#555;font-size:10px;white-space:nowrap">${escapeHtml(r.returnDate || '—')}</td>
     </tr>`;
   });
+  // Summenzeile unter den Betragsspalten.
+  const sum = (f: (r: ItemListRow) => number | undefined) => rows.reduce((s, r) => s + (f(r) || 0), 0);
+  const anyMoney = rows.some(r => r.paid !== undefined);
+  const tot = 'padding:6px 3px;font-size:11px;font-weight:600;border-top:1px solid #ccc;background:#fafafa';
+  html += `<tr class="total">
+      <td colspan="4" style="${tot}">Total (${rows.length} item${rows.length === 1 ? '' : 's'})</td>
+      <td style="${tot};${num}">${fmtBhd(sum(r => r.ourPrice))}</td>
+      <td style="${tot}"></td>
+      <td style="${tot};${num}">${anyMoney ? fmtBhd(sum(r => r.paid)) : '—'}</td>
+      <td style="${tot};${num}">${anyMoney ? fmtBhd(sum(r => r.outstanding)) : '—'}</td>
+      <td style="${tot}"></td>
+    </tr>`;
   html += `</tbody></table>`;
   return html;
 }
@@ -140,13 +170,15 @@ export function generateItemListHtml(opts: ItemListPdfOptions): string {
     groupsHtml = `<p style="font-size:12px;color:#888;text-align:center;padding:40px 0;font-style:italic">No matching items.</p>`;
   } else {
     for (const g of opts.groups) {
-      groupsHtml += `<div style="margin-bottom:24px;page-break-inside:avoid">
-        <div style="border-bottom:1px solid #ddd;padding-bottom:6px;margin-bottom:6px">
+      // Kein „ganze Gruppe zusammenhalten" mehr: eine lange Gruppe schob die nächste sonst auf eine neue Seite und
+      // ließ die alte halb leer. Zusammen bleiben Überschrift + erste Zeilen (group-head) und Zeilen selbst (tr).
+      groupsHtml += `<div class="group" style="margin-bottom:24px">
+        <div class="group-head" style="border-bottom:1px solid #ddd;padding-bottom:6px;margin-bottom:6px">
           <div style="font-size:14px;font-weight:600;color:#1a1a1a">${escapeHtml(g.heading)}</div>
           ${g.contact ? `<div style="font-size:10px;color:#777;margin-top:2px">${escapeHtml(g.contact)}</div>` : ''}
         </div>
         ${opts.kind === 'approval' ? renderApprovalTable(g.rows) : renderConsignmentTable(g.rows)}
-        ${g.summary ? `<div style="font-size:10px;color:#666;margin-top:6px;padding-top:6px;border-top:1px dashed #ddd;text-align:right">${escapeHtml(g.summary)}</div>` : ''}
+        ${g.summary ? `<div class="group-summary" style="font-size:10px;color:#666;margin-top:6px;padding-top:6px;border-top:1px dashed #ddd;text-align:right">${escapeHtml(g.summary)}</div>` : ''}
       </div>`;
     }
   }
@@ -166,11 +198,16 @@ export function generateItemListHtml(opts: ItemListPdfOptions): string {
   .header-right { text-align: right; font-size: 11px; color: #555; }
   .header-right .branch { color: #1a1a1a; font-weight: 500; margin-bottom: 2px; }
   .footer { text-align: center; margin-top: 32px; padding-top: 12px; border-top: 1px solid #ddd; font-size: 9px; color: #999; }
+  /* Ausdrücklich A4 hochkant mit normalen Druckrändern; die Ränder macht die Seite, nicht der Body. */
+  @page { size: A4 portrait; margin: 12mm 10mm 14mm 10mm; }
   @media print {
-    body { padding: 16px 24px; }
+    body { padding: 0; max-width: none; }
     table { page-break-inside: auto; }
-    tr { page-break-inside: avoid; }
-    .header { page-break-after: avoid; }
+    thead { display: table-header-group; }   /* Tabellenkopf auf jeder Folgeseite */
+    tr { page-break-inside: avoid; break-inside: avoid; }
+    .header, .group-head { page-break-after: avoid; break-after: avoid; }
+    .group-summary { page-break-inside: avoid; break-inside: avoid; page-break-before: avoid; break-before: avoid; }
+    img { max-width: 100%; height: auto; }
   }
 </style>
 </head>
