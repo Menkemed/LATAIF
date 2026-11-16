@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Printer, Search, UserCheck } from 'lucide-react';
+import { FileSpreadsheet, Printer, Search, UserCheck } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -19,6 +19,7 @@ import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
 import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
+import { exportApprovalsToExcel } from './approval-excel';
 import { productSearchText } from '@/core/utils/product-format';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useAgentStore } from '@/stores/agentStore';
@@ -91,6 +92,8 @@ export function AgentList() {
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});
   const [agentFehler, setAgentFehler] = useState('');
   const [showPrintAll, setShowPrintAll] = useState(false);
+  const [showExcelAll, setShowExcelAll] = useState(false);
+  const [excelBusy, setExcelBusy] = useState(false);
 
   const staffFilter = searchParams.get('staff') || '';
 
@@ -211,6 +214,11 @@ export function AgentList() {
           {tab === 'agents' && (
             <Button variant="ghost" onClick={() => setShowPrintAll(true)}>
               <Printer size={14} /> Print All
+            </Button>
+          )}
+          {tab === 'agents' && (
+            <Button variant="ghost" disabled={excelBusy} onClick={() => setShowExcelAll(true)}>
+              <FileSpreadsheet size={14} /> {excelBusy ? 'Exporting…' : 'Export Excel'}
             </Button>
           )}
           <Button variant="primary" onClick={() => { w.clear(); setShowNewTransfer(true); }}>New Transfer</Button>
@@ -334,6 +342,21 @@ export function AgentList() {
             products,
             categories,
           });
+        }}
+      />
+
+      <PrintItemsFilterModal
+        open={showExcelAll}
+        onClose={() => setShowExcelAll(false)}
+        kind="approval"
+        scope="all"
+        action="excel"
+        contextLabel={`${agents.length} agent${agents.length === 1 ? '' : 's'}`}
+        onConfirm={(filter: ItemListFilter) => {
+          setExcelBusy(true);
+          exportApprovalsToExcel({ filter, scope: 'aggregate', agents, transfers, invoices, products, categories })
+            .catch((e) => { console.error('[Approval-Excel]', e); alert('Excel export failed: ' + (e instanceof Error ? e.message : String(e))); })
+            .finally(() => setExcelBusy(false));
         }}
       />
 

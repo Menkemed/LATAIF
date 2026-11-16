@@ -4,7 +4,7 @@
 // Transfers-Tab in AgentList — durch Zustand-Store automatisch synchron).
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Edit3, History as HistoryIcon, Mail, Phone, Printer } from 'lucide-react';
+import { ArrowLeft, Edit3, FileSpreadsheet, History as HistoryIcon, Mail, Phone, Printer } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -17,6 +17,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
+import { exportApprovalsToExcel } from './approval-excel';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 
 
@@ -30,6 +31,8 @@ export function AgentDetail() {
   const { invoices, loadInvoices } = useInvoiceStore();
   const [showHistory, setShowHistory] = useState(false);
   const [showPrint, setShowPrint] = useState(false);
+  const [showExcel, setShowExcel] = useState(false);
+  const [excelBusy, setExcelBusy] = useState(false);
 
   useEffect(() => {
     loadAgents(); loadTransfers(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices();
@@ -122,6 +125,9 @@ export function AgentDetail() {
             <Button variant="ghost" onClick={() => setShowPrint(true)}>
               <Printer size={14} /> Print Items
             </Button>
+            <Button variant="ghost" disabled={excelBusy} onClick={() => setShowExcel(true)}>
+              <FileSpreadsheet size={14} /> {excelBusy ? 'Exporting…' : 'Export Excel'}
+            </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>
               <HistoryIcon size={14} /> History
             </Button>
@@ -205,6 +211,21 @@ export function AgentDetail() {
             products,
             categories,
           });
+        }}
+      />
+
+      <PrintItemsFilterModal
+        open={showExcel}
+        onClose={() => setShowExcel(false)}
+        kind="approval"
+        scope="single"
+        action="excel"
+        contextLabel={agent.name}
+        onConfirm={(filter: ItemListFilter) => {
+          setExcelBusy(true);
+          exportApprovalsToExcel({ filter, scope: 'single', agents: [agent], transfers: myTransfers, invoices, products, categories })
+            .catch((e) => { console.error('[Approval-Excel]', e); alert('Excel export failed: ' + (e instanceof Error ? e.message : String(e))); })
+            .finally(() => setExcelBusy(false));
         }}
       />
     </div>

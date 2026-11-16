@@ -6,7 +6,7 @@
 // Default: 'all'. Bei Confirm ruft onConfirm(filter) auf — der Caller
 // baut die Groups und ruft printItemListPdf().
 import { useEffect, useState } from 'react';
-import { Printer } from 'lucide-react';
+import { FileSpreadsheet, Printer } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
@@ -20,6 +20,8 @@ interface Props {
   /** Untertitel-Detail (z.B. Personen-Name bei single oder "all 12 consignors"). */
   contextLabel?: string;
   defaultFilter?: ItemListFilter;
+  /** 'excel' = dieselbe Auswahl, aber als Excel-Datei statt Druck. */
+  action?: 'print' | 'excel';
 }
 
 const OPTIONS: { value: ItemListFilter; label: string; description: string }[] = [
@@ -30,7 +32,7 @@ const OPTIONS: { value: ItemListFilter; label: string; description: string }[] =
 ];
 
 export function PrintItemsFilterModal({
-  open, onClose, onConfirm, kind, scope, contextLabel, defaultFilter = 'all',
+  open, onClose, onConfirm, kind, scope, contextLabel, defaultFilter = 'all', action = 'print',
 }: Props) {
   const [filter, setFilter] = useState<ItemListFilter>(defaultFilter);
 
@@ -39,10 +41,13 @@ export function PrintItemsFilterModal({
     if (open) setFilter(defaultFilter);
   }, [open, defaultFilter]);
 
-  const title = scope === 'single' ? 'Print Items' : (kind === 'approval' ? 'Print All Approvals' : 'Print All Consignors');
+  const excel = action === 'excel';
+  const title = excel
+    ? (scope === 'single' ? 'Export Items to Excel' : (kind === 'approval' ? 'Export All Approvals to Excel' : 'Export All Consignors to Excel'))
+    : (scope === 'single' ? 'Print Items' : (kind === 'approval' ? 'Print All Approvals' : 'Print All Consignors'));
   const subtitle = scope === 'single'
-    ? `Choose which items to include in the printed list${contextLabel ? ` for ${contextLabel}` : ''}.`
-    : `Choose which items to include — one section per ${kind === 'approval' ? 'agent' : 'consignor'}${contextLabel ? ` (${contextLabel})` : ''}.`;
+    ? `Choose which items to include in the ${excel ? 'Excel file' : 'printed list'}${contextLabel ? ` for ${contextLabel}` : ''}.`
+    : `Choose which items to include — one ${excel ? 'sheet' : 'section'} per ${kind === 'approval' ? 'agent' : 'consignor'}${contextLabel ? ` (${contextLabel})` : ''}.`;
 
   return (
     <Modal open={open} onClose={onClose} title={title} width={460}>
@@ -89,7 +94,7 @@ export function PrintItemsFilterModal({
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={() => { onConfirm(filter); onClose(); }}>
-            <Printer size={14} /> Print
+            {excel ? <><FileSpreadsheet size={14} /> Export Excel</> : <><Printer size={14} /> Print</>}
           </Button>
         </div>
       </div>

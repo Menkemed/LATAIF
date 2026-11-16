@@ -10,6 +10,7 @@ import {
   type ItemListRow,
 } from '@/core/pdf/itemListPdf';
 import { productDisplayName } from '../products/display-name.ts';
+import { approvalStatusLabel, filterApprovalTransfers } from '@/core/agents/approval-rows';
 
 /** Baut eine kompakte "Steel · 40mm · Black Dial · Pre-Owned"-Zeile aus
  *  allen ausgefuellten Kategorie-Attributen + Condition (ohne SKU, weil SKU
@@ -29,27 +30,9 @@ function fmt3(v: number | null | undefined): string {
   return (v ?? 0).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
-export function filterApprovalTransfers(transfers: AgentTransfer[], filter: ItemListFilter): AgentTransfer[] {
-  switch (filter) {
-    case 'sold':     return transfers.filter(t => t.status === 'sold' || t.status === 'settled');
-    case 'open':     return transfers.filter(t => t.status === 'transferred');
-    case 'returned': return transfers.filter(t => t.status === 'returned');
-    default:         return transfers.slice();
-  }
-}
-
-function statusLabel(t: AgentTransfer, invoice?: Invoice): string {
-  if (t.status === 'returned') return 'Returned';
-  if (t.status === 'transferred') return 'On Approval';
-  if (t.invoiceId && invoice) {
-    const paid = invoice.paidAmount || 0;
-    const gross = invoice.grossAmount || 0;
-    if (gross > 0 && paid >= gross - 0.005) return 'Settled';
-    if (paid > 0.005) return 'Partially Paid';
-    return 'Unpaid';
-  }
-  return t.status.charAt(0).toUpperCase() + t.status.slice(1);
-}
+// Filter und Statusname sind mit dem Approval-Excel geteilt (approval-rows) — Druck und Excel zeigen dieselben Zeilen.
+export { filterApprovalTransfers };
+const statusLabel = approvalStatusLabel;
 
 export interface BuildAgentGroupInput {
   agent: Agent;
