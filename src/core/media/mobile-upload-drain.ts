@@ -19,6 +19,7 @@ import type { PrepareResult } from './gateway';
 import type { MediaSizeProfile } from './size-profile.ts';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
+import { maintenanceGateActive } from '../bridge/maintenance-gate.ts';
 import { SKU_TAKEN } from '../products/sku-unique.ts';
 import { normalizeStoneAttributes } from '../products/stones.ts';
 import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
@@ -969,7 +970,8 @@ export class MobileUploadDrainWorker {
 
   /** Run one drain pass, single-flighted. Skips silently when paused or unauthenticated. */
   async tick(): Promise<DrainOutcome[]> {
-    if (this.paused) return [{ code: 'idle' }];
+    // WARTUNGSMODUS: solange eine Owner-Wartung schreibt, wird kein Handy-Auftrag verarbeitet (er wartet).
+    if (this.paused || maintenanceGateActive()) return [{ code: 'idle' }];
     // R1 §2: read FRESH evidence; block if the scope is unavailable OR the binding revision moved
     // away from the one this worker was minted for (a rebind fences the stale worker).
     const s = await freshScope(this.deps);
@@ -984,6 +986,11 @@ export class MobileUploadDrainWorker {
 // Module-scoped current worker, keyed by (epoch, scope) — a scope/epoch change replaces it so the
 // old one is dropped and never processes the new scope's jobs.
 let currentWorker: { key: string; worker: MobileUploadDrainWorker } | null = null;
+
+/** WARTUNGSMODUS — auf einen gerade laufenden Drain-Durchgang warten (neue starten im Wartungsmodus nicht). */
+export async function waitForMobileDrainIdle(): Promise<void> {
+  await currentWorker?.worker.waitForIdle();
+}
 
 /** Get-or-create the worker for the given epoch + deps. A different epoch or scope key yields a
  *  fresh worker (the previous one is abandoned). Returns null when unauthenticated. */

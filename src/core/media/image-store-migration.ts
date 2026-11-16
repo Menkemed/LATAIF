@@ -21,6 +21,16 @@
 //     Bilder, gemischt genutzte Blobs, nicht-JPEG/verschlüsselt.
 //   • Teilfehler (fehlende Datei, Hashabweichung, Konflikt) werden je Bild protokolliert; der Lauf
 //     geht weiter, der Blob bleibt auf seiner bisherigen Generation.
+//   • PAKETE (Phase 4, 16.11.2026): der Lauf arbeitet in kleinen Paketen. Jedes Paket läuft im EINEN
+//     exklusiven Schreibplatz des Primary (`deps.exclusive` = Schreib-Warteschlange + Medien-Sperre +
+//     DB-Lease) und endet mit einem durablen Speichern. Damit gibt es nie eine zweite offene Transaktion
+//     neben der Umstellung (früher: Fernauftrag mit offenem BEGIN wartete auf die Medien-Sperre, die
+//     Migration rief ein zweites BEGIN), und ein Leser von außen sieht nur gespeicherte Stände (kein
+//     Bildschlüssel, den `/api/media` auf der Platte noch nicht kennt). Zwischen den Paketen kommen
+//     wartende Schreib- und Lesevorgänge in ihrer Reihenfolge dran.
+//   • Abbruch nur zwischen zwei Bildern; das angefangene Paket wird gespeichert — es bleibt keine
+//     veröffentlichte Datei ohne Zeile zurück. Ein harter Absturz mitten im Paket lässt höchstens die
+//     Dateien dieses Pakets ohne Zeile; die Wiederaufnahme erzeugt sie bitgleich und übernimmt sie.
 //
 // Kein G5, keine Sync-Änderung: Medienzeilen erzeugen keinen sync_changelog-Eintrag.
 // ════════════════════════════════════════════════════════════════════════════
@@ -89,16 +99,41 @@ export interface MigrationJournalEntry {
 export interface MigrationDeps {
   db: MigrationDb;
   recompress(a: RecompressArgs): Promise<RecompressOutcome>;
-  /** Die DB dauerhaft speichern (Primary: `lease.saveDurably`). */
+  /** Die DB dauerhaft speichern (Primary: `lease.saveDurably` des laufenden Pakets). */
   saveDurably(): Promise<void>;
   /** Protokoll AUSSERHALB der Datenbank (nur Kennungen und Zahlen — keine Namen, keine Inhalte). */
   journal(entry: MigrationJournalEntry): void | Promise<void>;
   now?(): string;
+  /**
+   * Ein Paket im exklusiven Schreibplatz ausführen (Primary: Schreib-Warteschlange → Medien-Sperre → DB-Lease).
+   * Ohne Angabe läuft alles direkt (Tests). Wirft `fn`, wird das Paket trotzdem freigegeben.
+   */
+  exclusive?<T>(fn: () => Promise<T>): Promise<T>;
+  /** Ist gerade eine (fremde) Transaktion offen? Dann wird NICHT umgestellt, sondern sauber angehalten. */
+  transactionActive?(): boolean;
+  /** Fortschritt nach jedem Bild (für die Anzeige; nur Zahlen). */
+  progress?(p: MigrationProgress): void;
+  /** Zu Beginn jedes Pakets im exklusiven Platz: Freigabe noch gültig? (z. B. Owner-Rolle). Wirft → Abbruch. */
+  assertAllowed?(): void;
+}
+
+export interface MigrationProgress {
+  runId: string;
+  mode: 'dry-run' | 'apply';
+  /** Bilder über ihrer Grenze, die dieser Lauf bearbeiten wird. */
+  total: number;
+  done: number;
+  switched: number;
+  /** Im Probelauf: als umstellbar vorhergesagt. */
+  planned: number;
+  skipped: number;
+  failed: number;
+  running: boolean;
 }
 
 export interface MigrationOptions {
   mode: 'dry-run' | 'apply';
-  /** Nach wie vielen Umstellungen gespeichert wird (Standard 25; immer auch am Ende). */
+  /** Paketgröße: so viele Bilder je exklusivem Platz, danach wird gespeichert (Standard 10; immer auch am Ende). */
   saveEvery?: number;
   /** Höchstens so viele Blobs bearbeiten (Tests, Stichproben). */
   maxBlobs?: number;
@@ -139,6 +174,12 @@ export interface MigrationReport {
   switched: number;
   failed: number;
   stoppedEarly: boolean;
+  /** Warum vorzeitig angehalten wurde (`MIGRATION_STOP_REQUESTED`, `MIGRATION_TRANSACTION_BUSY`, …). */
+  stopCode?: string;
+  /** Bilder über ihrer Grenze, die dieser Lauf bearbeiten sollte (Planung). */
+  total: number;
+  /** Planung je Fassung: Hauptbilder und Vorschauen getrennt (keine Doppelzählung). */
+  plannedByRendition: { main: number; thumbnail: number };
   /** Summen über die umgestellten (bzw. im Probelauf umstellbaren) Blobs. */
   bytesBefore: number;
   bytesAfter: number;
@@ -314,9 +355,17 @@ export function planImageStoreMigration(db: MigrationDb): { plans: BlobPlan[]; s
 
 // ── Umstellen (eine Transaktion je Blob) ────────────────────────────────────
 
-/** Generation n+1 anlegen, Zeiger umstellen, n → superseded. Wirft bei jedem Widerspruch (Rollback). */
-export function switchBlobGeneration(db: MigrationDb, p: BlobPlan, r: RecompressOutcome, now: string): number {
-  db.run('BEGIN');
+/**
+ * Generation n+1 anlegen, Zeiger umstellen, n → superseded. Wirft bei jedem Widerspruch (Rollback).
+ * Ist schon eine Transaktion offen (fremder Schreiber), wird NICHT geschachtelt: `MIGRATION_TRANSACTION_BUSY`,
+ * ohne irgendeine Zeile zu berühren — ein zweites BEGIN wäre ein Fehler, ein Mitschreiben in die fremde
+ * Transaktion hinge die Umstellung an deren Schicksal.
+ */
+export function switchBlobGeneration(db: MigrationDb, p: BlobPlan, r: RecompressOutcome, now: string, transactionActive?: () => boolean): number {
+  if (transactionActive?.()) throw new ImageMigrationError('MIGRATION_TRANSACTION_BUSY');
+  // Auch ohne Kontext-Wissen: scheitert BEGIN, ist eine Transaktion offen — dann NICHT zurückrollen (das wäre
+  // die fremde), sondern unverändert melden.
+  try { db.run('BEGIN'); } catch (e) { throw new ImageMigrationError('MIGRATION_TRANSACTION_BUSY', String((e as Error)?.message ?? e)); }
   try {
     const cur = rows(db, `SELECT current_generation_no AS gen FROM media_blobs WHERE tenant_id = ? AND blob_id = ? AND blob_status = 'present'`, [p.tenantId, p.blobId])[0];
     if (!cur || Number(cur.gen) !== p.currentGeneration) throw new ImageMigrationError('MIGRATION_BLOB_CHANGED');
@@ -357,35 +406,54 @@ function codeOf(e: unknown): string {
   return hit ? hit[0] : 'MIGRATION_UNKNOWN_ERROR';
 }
 
+/** Ein Bild ist im exklusiven Platz bearbeitet: wie ging es aus? `busy` = fremde Transaktion offen, nichts getan. */
+type BlobOutcome = 'switched' | 'planned' | 'skipped' | 'failed' | 'busy';
+
 /** Der Lauf (Probelauf oder echt). Liefert den Bericht; das Protokoll geht an `deps.journal`. */
 export async function runImageStoreMigration(deps: MigrationDeps, opts: MigrationOptions): Promise<MigrationReport> {
   const now = deps.now ?? (() => new Date().toISOString());
   const runId = `img-mig-${now().replace(/[^0-9]/g, '').slice(0, 14)}-${Math.random().toString(36).slice(2, 8)}`;
   const report: MigrationReport = {
     mode: opts.mode, runId, startedAt: now(), finishedAt: '', considered: 0, skipped: {}, eligible: 0, switched: 0,
-    failed: 0, stoppedEarly: false, bytesBefore: 0, bytesAfter: 0, byClass: {}, errors: [],
+    failed: 0, stoppedEarly: false, total: 0, plannedByRendition: { main: 0, thumbnail: 0 },
+    bytesBefore: 0, bytesAfter: 0, byClass: {}, errors: [],
   };
-  if (opts.mode === 'apply') assertMigrationPreconditions(deps.db);
-  await deps.journal({ at: now(), runId, event: 'start', reason: opts.mode });
+  const exclusive = deps.exclusive ? <T>(fn: () => Promise<T>) => deps.exclusive!(fn) : <T>(fn: () => Promise<T>) => fn();
+  const prog: MigrationProgress = { runId, mode: opts.mode, total: 0, done: 0, switched: 0, planned: 0, skipped: 0, failed: 0, running: true };
+  const emit = () => { try { deps.progress?.({ ...prog }); } catch { /* Anzeige darf den Lauf nie stören */ } };
 
-  const { plans: all, skipped } = planImageStoreMigration(deps.db);
-  const plans = all.filter((p) => !opts.onlyBlobIds || opts.onlyBlobIds.has(p.blobId)).slice(0, opts.maxBlobs ?? Infinity);
-  report.considered = all.length + skipped.length;
-  for (const s of skipped) report.skipped[s.reason] = (report.skipped[s.reason] ?? 0) + 1;
+  // Planung im exklusiven Platz: derselbe Stand, auf den die Pakete danach schreiben.
+  const { plans } = await exclusive(async () => {
+    deps.assertAllowed?.();
+    if (opts.mode === 'apply') assertMigrationPreconditions(deps.db);
+    const { plans: all, skipped } = planImageStoreMigration(deps.db);
+    report.considered = all.length + skipped.length;
+    for (const s of skipped) report.skipped[s.reason] = (report.skipped[s.reason] ?? 0) + 1;
+    return { plans: all.filter((p) => !opts.onlyBlobIds || opts.onlyBlobIds.has(p.blobId)).slice(0, opts.maxBlobs ?? Infinity) };
+  });
+  report.total = prog.total = plans.length;
+  for (const p of plans) report.plannedByRendition[p.rendition]++;
+  await deps.journal({ at: now(), runId, event: 'start', reason: `${opts.mode} total=${plans.length}` });
+  emit();
 
-  const saveEvery = Math.max(1, opts.saveEvery ?? 25);
+  const batchSize = Math.max(1, opts.saveEvery ?? 10);
   const producedKeys = new Set<string>();
   const keyTaken = (k: string) => producedKeys.has(k) || rows(deps.db, 'SELECT 1 AS x FROM media_blob_generations WHERE storage_key = ?', [k]).length > 0;
-  let unsaved = 0;
   const tally = (p: BlobPlan, after: number) => {
     const k: UsageClass | 'thumbnail' = p.rendition === 'thumbnail' ? 'thumbnail' : p.usageClass;
     const t = (report.byClass[k] ??= { n: 0, before: 0, after: 0 });
     t.n++; t.before += p.currentBytes; t.after += after;
     report.bytesBefore += p.currentBytes; report.bytesAfter += after;
   };
+  const fail = async (p: BlobPlan, code: string): Promise<BlobOutcome> => {
+    report.failed++; prog.failed++; report.errors.push({ blobId: p.blobId, rendition: p.rendition, code });
+    await deps.journal({ at: now(), runId, event: 'failed', blobId: p.blobId, rendition: p.rendition, reason: code });
+    return 'failed';
+  };
 
-  for (const p of plans) {
-    if (opts.shouldStop?.()) { report.stoppedEarly = true; await deps.journal({ at: now(), runId, event: 'stopped' }); break; }
+  async function one(p: BlobPlan): Promise<BlobOutcome> {
+    // Vor dem Veröffentlichen: ist eine fremde Transaktion offen, entsteht nicht einmal eine Datei.
+    if (opts.mode === 'apply' && deps.transactionActive?.()) return 'busy';
     const threshold = Math.floor(p.currentBytes * (1 - MIGRATION_MIN_SAVING));
     const args = (sourceHash: string): RecompressArgs => ({
       tenantScope: p.tenantId, sourceHash, sourceExtension: 'jpg', rendition: p.rendition, maxBytes: p.targetBytes,
@@ -401,46 +469,137 @@ export async function runImageStoreMigration(deps: MigrationDeps, opts: Migratio
         r = await deps.recompress(args(p.fallbackSourceHash));
       }
     } catch (e) {
-      report.failed++; report.errors.push({ blobId: p.blobId, rendition: p.rendition, code: codeOf(e) });
-      await deps.journal({ at: now(), runId, event: 'failed', blobId: p.blobId, rendition: p.rendition, reason: codeOf(e) });
-      continue;
+      return fail(p, codeOf(e));
     }
     if (r.byte_size > p.targetBytes || r.byte_size >= threshold) {
-      report.skipped.saving_below_10pct = (report.skipped.saving_below_10pct ?? 0) + 1;
+      report.skipped.saving_below_10pct = (report.skipped.saving_below_10pct ?? 0) + 1; prog.skipped++;
       await deps.journal({ at: now(), runId, event: 'skipped', blobId: p.blobId, rendition: p.rendition, reason: 'saving_below_10pct', fromBytes: p.currentBytes, toBytes: r.byte_size });
-      continue;
+      return 'skipped';
     }
     if (keyTaken(r.storage_key)) {
-      report.skipped.duplicate_content = (report.skipped.duplicate_content ?? 0) + 1;
+      report.skipped.duplicate_content = (report.skipped.duplicate_content ?? 0) + 1; prog.skipped++;
       await deps.journal({ at: now(), runId, event: 'skipped', blobId: p.blobId, rendition: p.rendition, reason: 'duplicate_content' });
-      continue;
+      return 'skipped';
     }
     producedKeys.add(r.storage_key);
     report.eligible++;
     if (opts.mode === 'dry-run') {
-      tally(p, r.byte_size);
+      tally(p, r.byte_size); prog.planned++;
       await deps.journal({ at: now(), runId, event: 'planned', blobId: p.blobId, rendition: p.rendition, fromBytes: p.currentBytes, toBytes: r.byte_size });
-      continue;
+      return 'planned';
     }
-    if (!r.published) {
-      report.failed++; report.errors.push({ blobId: p.blobId, rendition: p.rendition, code: 'MIGRATION_NOT_PUBLISHED' });
-      continue;
-    }
+    if (!r.published) return fail(p, 'MIGRATION_NOT_PUBLISHED');
     try {
-      const next = switchBlobGeneration(deps.db, p, r, now());
-      report.switched++; tally(p, r.byte_size); unsaved++;
+      const next = switchBlobGeneration(deps.db, p, r, now(), deps.transactionActive ? () => deps.transactionActive!() : undefined);
+      report.switched++; prog.switched++; tally(p, r.byte_size);
       await deps.journal({ at: now(), runId, event: 'switched', blobId: p.blobId, rendition: p.rendition, fromGeneration: p.currentGeneration, toGeneration: next, fromBytes: p.currentBytes, toBytes: r.byte_size });
+      return 'switched';
     } catch (e) {
-      report.failed++; report.errors.push({ blobId: p.blobId, rendition: p.rendition, code: codeOf(e) });
-      await deps.journal({ at: now(), runId, event: 'failed', blobId: p.blobId, rendition: p.rendition, reason: codeOf(e) });
-      continue;
+      // Fremde Transaktion: die veröffentlichte Datei bleibt bitgleich wiederverwendbar; nicht als Fehler zählen.
+      if (codeOf(e) === 'MIGRATION_TRANSACTION_BUSY') return 'busy';
+      return fail(p, codeOf(e));
     }
-    if (unsaved >= saveEvery) { await deps.saveDurably(); unsaved = 0; }
   }
-  if (opts.mode === 'apply' && unsaved > 0) await deps.saveDurably();
+
+  let i = 0;
+  try {
+    while (i < plans.length) {
+      if (opts.shouldStop?.()) { report.stopCode = 'MIGRATION_STOP_REQUESTED'; break; }
+      const stop = await exclusive(async (): Promise<string | null> => {
+        let unsaved = 0;
+        try {
+          deps.assertAllowed?.();
+          for (let n = 0; n < batchSize && i < plans.length; n++) {
+            if (n > 0 && opts.shouldStop?.()) return 'MIGRATION_STOP_REQUESTED';
+            const out = await one(plans[i]);
+            if (out === 'busy') return 'MIGRATION_TRANSACTION_BUSY';
+            i++; prog.done++;
+            if (out === 'switched') unsaved++;
+            emit();
+          }
+          return null;
+        } finally {
+          // Jedes Paket endet gespeichert — auch bei Abbruch oder Fehler mitten im Paket.
+          if (opts.mode === 'apply' && unsaved > 0) await deps.saveDurably();
+        }
+      });
+      if (stop) { report.stopCode = stop; break; }
+    }
+  } finally {
+    report.stoppedEarly = i < plans.length;
+    prog.running = false; emit();
+  }
+  if (report.stoppedEarly) await deps.journal({ at: now(), runId, event: 'stopped', reason: report.stopCode ?? 'MIGRATION_STOPPED' });
   report.finishedAt = now();
-  await deps.journal({ at: now(), runId, event: 'done', reason: `switched=${report.switched} failed=${report.failed}` });
+  await deps.journal({ at: now(), runId, event: 'done', reason: `switched=${report.switched} failed=${report.failed} done=${i}/${plans.length}` });
   return report;
+}
+
+// ── Bestandsübersicht (rein lesend) ─────────────────────────────────────────
+
+export interface ImageStoreInventory {
+  /** Alle vorhandenen Blobs (`blob_status = 'present'`) — jede Datei genau einmal gezählt. */
+  blobsPresent: number;
+  /** Nach Fassung: Hauptbild eines Medienobjekts, Vorschau, andere Variante, ohne lebendes Objekt. */
+  byRendition: { main: number; thumbnail: number; otherVariant: number; noObject: number };
+  /** Davon sichtbar (mindestens eine aktive Verknüpfung) bzw. nur noch historisch (Bild entfernt). */
+  linked: { main: number; thumbnail: number; otherVariant: number };
+  notLinked: { main: number; thumbnail: number; otherVariant: number; noObject: number };
+  /** Entscheidung der Planung für die sichtbaren Blobs, je Fassung. */
+  decision: {
+    main: { planned: number } & Partial<Record<SkipReason, number>>;
+    thumbnail: { planned: number } & Partial<Record<SkipReason, number>>;
+    otherVariant: Partial<Record<SkipReason, number>>;
+  };
+  /** Prüfsumme: linked + notLinked = blobsPresent; geplant + übersprungen = linked. */
+  balanced: boolean;
+}
+
+/** Jeder vorhandene Blob genau einmal: Fassung, sichtbar ja/nein, Entscheidung der Planung. */
+export function inventoryImageStore(db: MigrationDb): ImageStoreInventory {
+  const present = rows(db, `SELECT tenant_id, blob_id FROM media_blobs WHERE blob_status = 'present'`).map((r) => `${r.tenant_id}|${r.blob_id}`);
+  const masterOf = new Map<string, boolean>();   // blob → hat ein lebendes Objekt verknüpfte Nutzung?
+  const variantOf = new Map<string, { thumb: boolean; linked: boolean }>();
+  const linkedMedia = new Set(rows(db, `SELECT DISTINCT tenant_id || '|' || media_id AS k FROM media_links WHERE deleted_at IS NULL`).map((r) => String(r.k)));
+  for (const o of rows(db, `SELECT tenant_id, media_id, master_blob_id FROM media_objects WHERE deleted_at IS NULL`)) {
+    const k = `${o.tenant_id}|${o.master_blob_id}`;
+    masterOf.set(k, (masterOf.get(k) ?? false) || linkedMedia.has(`${o.tenant_id}|${o.media_id}`));
+  }
+  for (const v of rows(db, `SELECT v.tenant_id, v.blob_id, v.variant_type, v.media_id FROM media_variants v
+      JOIN media_objects o ON o.tenant_id = v.tenant_id AND o.media_id = v.media_id AND o.deleted_at IS NULL WHERE v.deleted_at IS NULL`)) {
+    const k = `${v.tenant_id}|${v.blob_id}`;
+    const prev = variantOf.get(k) ?? { thumb: true, linked: false };
+    variantOf.set(k, { thumb: prev.thumb && v.variant_type === 'thumbnail', linked: prev.linked || linkedMedia.has(`${v.tenant_id}|${v.media_id}`) });
+  }
+  const { plans, skipped } = planImageStoreMigration(db);
+  const decided = new Map<string, string>();
+  for (const p of plans) decided.set(`${p.tenantId}|${p.blobId}`, 'planned');
+  for (const s of skipped) decided.set(`${s.tenantId}|${s.blobId}`, s.reason);
+
+  const inv: ImageStoreInventory = {
+    blobsPresent: present.length,
+    byRendition: { main: 0, thumbnail: 0, otherVariant: 0, noObject: 0 },
+    linked: { main: 0, thumbnail: 0, otherVariant: 0 },
+    notLinked: { main: 0, thumbnail: 0, otherVariant: 0, noObject: 0 },
+    decision: { main: { planned: 0 }, thumbnail: { planned: 0 }, otherVariant: {} },
+    balanced: false,
+  };
+  for (const k of present) {
+    // Ein Blob, der Hauptbild UND Variante ist, zählt als Hauptbild (die Planung überspringt ihn als gemischt).
+    const kind: 'main' | 'thumbnail' | 'otherVariant' | 'noObject' = masterOf.has(k) ? 'main' : variantOf.has(k) ? (variantOf.get(k)!.thumb ? 'thumbnail' : 'otherVariant') : 'noObject';
+    inv.byRendition[kind]++;
+    const linked = kind === 'main' ? masterOf.get(k)! || (variantOf.get(k)?.linked ?? false) : kind === 'noObject' ? false : variantOf.get(k)!.linked;
+    if (kind === 'noObject' || !linked) { inv.notLinked[kind]++; continue; }
+    inv.linked[kind]++;
+    const d = decided.get(k) ?? 'unlinked_usage';
+    const bucket = inv.decision[kind] as Record<string, number>;
+    bucket[d] = (bucket[d] ?? 0) + 1;
+  }
+  const sum = (o: Record<string, number>) => Object.values(o).reduce((a, b) => a + b, 0);
+  inv.balanced = sum(inv.linked) + sum(inv.notLinked) === inv.blobsPresent
+    && sum(inv.decision.main) === inv.linked.main && sum(inv.decision.thumbnail) === inv.linked.thumbnail
+    && sum(inv.decision.otherVariant as Record<string, number>) === inv.linked.otherVariant;
+  return inv;
 }
 
 // ── Prüfung danach ───────────────────────────────────────────────────────────

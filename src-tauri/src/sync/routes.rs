@@ -91,6 +91,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/command", post(command_execute))
         // Nur fragen, was aus einer Kennung wurde: fuehrt nichts aus, sieht nur die eigenen Vorgaenge.
         .route("/command/status", post(command_status))
+        // WARTUNGSMODUS — reine Schreibrouten (Sync-Push, Inventur-Check, Handy-Upload, Ablage, Dokument)
+        // werden waehrend einer Owner-Wartung mit 503 abgewiesen. Innen liegend: die Anmeldung laeuft zuerst.
+        .route_layer(middleware::from_fn(crate::maintenance::gate))
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
@@ -283,6 +286,12 @@ async fn command_execute(
     // Warteschlange gerät; `submit` prüft sie ein zweites Mal (der Renderer ein drittes Mal).
     if !crate::bridge::REMOTE_OPS.contains(&req.op.as_str()) {
         return error_response(crate::bridge::BridgeError::OpNotAllowed);
+    }
+
+    // WARTUNGSMODUS — ein verändernder Auftrag erreicht den Renderer gar nicht erst (503, nicht ausgeführt).
+    // Lesen und die Probe bleiben erlaubt. Der Renderer prüft dasselbe ein zweites Mal.
+    if crate::maintenance::is_active() && crate::maintenance::op_is_mutation(&req.op) {
+        return crate::maintenance::refusal();
     }
 
     // Wer fragt, gehört in die Nutzlast — nicht, weil der Renderer es glauben soll, sondern damit

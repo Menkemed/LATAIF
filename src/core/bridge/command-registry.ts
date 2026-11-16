@@ -15,6 +15,7 @@ import { DURABILITY_DEGRADED, DurabilityError, requireDurableOrFail } from './du
 import { TRANSACTION_UNHEALTHY, TransactionUnhealthyError, assertTransactionHealthy } from '../db/transaction-health';
 import { CommandNotEvaluated, CommandRejected } from './mutation-engine';
 import { paymentOpForPayload, permissionForOp, requiredPermissionLabel, roleMayRunOp } from './command-permissions';
+import { maintenanceGateActive, maintenanceRefusal } from './maintenance-gate';
 
 /** Was ein Auftrag zurückgeben darf. */
 export type CommandResult = { readonly [k: string]: unknown };
@@ -252,6 +253,12 @@ export async function executeCommand(op: string, payload: unknown, actor?: Comma
   if (spec.kind === 'mutation' && !isUsableActor(actor)) {
     console.error('[bridge] refusing a mutation without an authenticated identity:', op);
     return { kind: 'infrastructure_error', code: 'BRIDGE_IDENTITY_MISSING' };
+  }
+  // WARTUNGSMODUS (Owner-Wartung, z. B. Bildmigration) — der zweite Riegel nach Rust: kein Handler, keine
+  // Transaktion, kein Nachweis. Lesen bleibt erlaubt.
+  if (spec.kind === 'mutation' && maintenanceGateActive()) {
+    console.warn('[bridge] refusing a mutation during owner maintenance:', op);
+    return maintenanceRefusal();
   }
   // CENTRAL-C4 — und darf dieser Absender das ueberhaupt? Geprueft wird VOR dem Handler: ein
   // Nein hier ist wie ein unbekannter Name — kein `runRemoteCommand`, kein Domaenenaufruf,

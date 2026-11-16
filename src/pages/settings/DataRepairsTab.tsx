@@ -21,6 +21,7 @@ import { cardFeeRepairPreview, repairCardFeeBookingsOnPrimary } from '@/core/fin
 import { useProductStore } from '@/stores/productStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { SupersededGalleryEditsCard } from './SupersededGalleryEditsCard';
+import { ImageStoreMigrationCard } from './ImageStoreMigrationCard';
 
 export function DataRepairsTab() {
   const [refresh, setRefresh] = useState(0);
@@ -114,6 +115,9 @@ export function DataRepairsTab() {
 
       {/* OWNER-WARTUNG — erscheint nur, solange die zwei überholten Galerie-Bearbeitungen offen sind. */}
       <SupersededGalleryEditsCard reason={reason} />
+
+      {/* OWNER-WARTUNG — Bildspeicher verkleinern (nur auf ausdrücklichen Klick, mit Probelauf und Rückfrage). */}
+      <ImageStoreMigrationCard reason={reason} />
 
       <Card>
         <span className="text-overline">BULK METAL LOTS CLOSED BY THE START-UP STEP</span>

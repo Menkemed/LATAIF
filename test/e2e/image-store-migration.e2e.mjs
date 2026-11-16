@@ -3,15 +3,18 @@
 // Run: IM_SNAP=<snap-Ordner einer Sicherung> node scripts/e2e-diag-runner.mjs <out> test/e2e/image-store-migration.e2e.mjs
 //
 //   A  NEU      Uhr/Schmuck/Accessory über den PC2-Fernweg, Schmuck über Mobile → Hauptbild ≤ 60/30/30/30 KB, Vorschau ≤ 10 KB.
-//   B  KOPIE    der Sicherung vom 10.11.2026 (NUR lataif.db + Medien) in den isolierten Testordner; Test-Owner-Passwort in der KOPIE.
+//   B  KOPIE    einer geprüften Vollsicherung (NUR lataif.db + Medien) in den isolierten Testordner; Test-Owner-Passwort in der KOPIE.
 //   C  SICHERUNG echter Snapshot-Host, VOR der Migration.
-//   D  S1 warm  Primary + PC2 laden alle Karten (alte Fassungen im RAM-Cache).
-//   E  PROBELAUF voll: Vorhersage, keine Zeile geändert.
-//   F  LAUF 1    kooperativer Abbruch nach 40; Karten an Primary und PC2 zeigen keine alte Fassung.
-//   G  LAUF 2    harter Absturz (eigene PID) mitten im Lauf; danach ist jede aktuelle Generation lesbar.
-//   H  LAUF 3    Wiederaufnahme bis zum Ende; 4. Lauf idempotent; IDs/Zuordnungen/Artikelzeilen/Changelog/Audit unverändert.
-//   I  ERGEBNIS  Größen je Klasse, Integrität, DB-Größe, Medienordner.
-//   J  PC2       products.get nennt die neuen Schlüssel, /api/media liefert die neue Datei, die alte nicht mehr; Karten aktuell.
+//   D  BESTAND  Primary + PC2 laden alle Karten; Bestandsübersicht und Plan über den VOLLEN Bestand (keine Stichprobe).
+//   E2 OFFEN    offene Edit-Pläne der Kopie blockieren den Lauf (fail-closed, Wartungsmodus danach aus); dann in der KOPIE beendet.
+//   E  KARTE    Owner-Karte (Maus): Zählen, Probelauf über ALLE Bilder (Vorhersage je Bild im Protokoll), keine Zeile geändert.
+//   F  LAUF 1    Start über die Karte (App-Rückfrage, Maus); WÄHREND des Laufs: PC2-Auftrag, Ablage und Handy-Upload → 503
+//                MAINTENANCE_ACTIVE, Lesen geht; „Stop" → Paket gespeichert, keine Waise, Wartungsmodus aus.
+//   G  LAUF 2    harter Absturz (eigene PID) mitten im Lauf; danach jede aktuelle Generation lesbar, Wartungsmodus weg.
+//   H  LAUF 3    Wiederaufnahme über die Karte bis zum Ende; Waisen aus dem Absturz übernommen; 4. Lauf idempotent;
+//                IDs/Zuordnungen/Artikelzeilen/Changelog/Audit unverändert; Probelauf = Ergebnis (jedes Bild, Byte für Byte).
+//   I  ERGEBNIS  Größen je Klasse (alle ≤ Grenze), Integrität, aktuelle Bilddaten vorher/nachher, Platte, superseded.
+//   J  PC2       für JEDEN Artikel der v0.8.101-Leseweg: products.get → mediaKeys → /api/media = aktuelle Datei; Karten aktuell.
 //   K  GC        nur Probelauf: keine Waise, superseded bleibt geschützt; NICHTS wird gelöscht.
 //   L  RESTORE   echter Restore-Host aus der Sicherung von C → Stand vor der Migration, App startet, Karten = Originale.
 //
@@ -22,6 +25,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight, testSourceFromEnv } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids, killTestPid, pathOfPid } from './_e2e-process.mjs';
+import { maus, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
 import { join, relative } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, readFileSync, copyFileSync, cpSync } from 'node:fs';
@@ -56,7 +60,8 @@ const ok = (c, m) => { if (c) { PASS++; console.log('  ✓ ' + m); } else { FAIL
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const aufraeumen = () => { killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe'); };
-const WACHHUND = setTimeout(() => { console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.'); aufraeumen(); process.exit(1); }, 90 * 60 * 1000);
+// Voller Bestand: zwei Probeläufe + Lauf über ~900 Bilder dauern im Testbuild deutlich länger als die frühere Stichprobe.
+const WACHHUND = setTimeout(() => { console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.'); aufraeumen(); process.exit(1); }, 170 * 60 * 1000);
 
 const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 const clientEnv = () => ({
@@ -265,10 +270,14 @@ function klassen() {
   for (const o of Object.values(out)) { o.mb = +o.mb.toFixed(2); o.maxKB = KB(o.max); delete o.max; }
   return out;
 }
-/** Aktuelle Hauptbild-Hashes (verknüpfte Artikel) und alle superseded-Hashes. */
+/** Aktuelle Hauptbild- UND Vorschau-Hashes (verknüpfte Artikel; die Karten zeigen seit v0.8.104 die Vorschau) und alle superseded-Hashes. */
 function hashMengen() {
-  const cur = new Set(dbQ(BIZ_DB, `${CUR} JOIN media_objects o ON o.master_blob_id = b.blob_id AND o.deleted_at IS NULL
-      JOIN media_links l ON l.media_id = o.media_id AND l.deleted_at IS NULL AND l.entity_type = 'product'`).map((r) => r.h));
+  const cur = new Set([
+    ...dbQ(BIZ_DB, `${CUR} JOIN media_objects o ON o.master_blob_id = b.blob_id AND o.deleted_at IS NULL
+      JOIN media_links l ON l.media_id = o.media_id AND l.deleted_at IS NULL AND l.entity_type = 'product'`).map((r) => r.h),
+    ...dbQ(BIZ_DB, `${CUR} JOIN media_variants v ON v.blob_id = b.blob_id AND v.deleted_at IS NULL AND v.variant_type = 'thumbnail'
+      JOIN media_links l ON l.media_id = v.media_id AND l.deleted_at IS NULL AND l.entity_type = 'product'`).map((r) => r.h),
+  ]);
   const alt = new Set(dbQ(BIZ_DB, `SELECT stored_blob_hash AS h FROM media_blob_generations WHERE gen_status = 'superseded'`).map((r) => r.h));
   return { cur, alt };
 }
@@ -294,7 +303,7 @@ async function mig(c, expr) {
   const expression = `(async () => { const m = window.__lataifImageMigration; if (!m) return { kein: true }; return await ${expr}; })()`;
   const t0 = Date.now();
   const tick = setInterval(() => {
-    c.ev('return window.__lataifImageMigrationProgress || null;')
+    c.ev('return window.__lataifImageMigration?.state()?.progress || null;')
       .then((p) => schritt(`  Migration läuft ${Math.round((Date.now() - t0) / 1000)} s: ${S(p)}`)).catch(() => null);
   }, 60000);
   let r;
@@ -312,7 +321,7 @@ async function primaryStarten() {
     await p.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
   }
   await waitFor(p, SHELL, 120000);
-  await p.ev('window.confirm = () => true; return 1;');
+  // Die App-Rückfrage (ConfirmHost) bleibt ECHT: die Karte wird mit der Maus bestätigt.
   await p.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
   const end = Date.now() + 60000; let oben = false;
   while (Date.now() < end) { try { if ((await fetch(`http://127.0.0.1:${PORT}/api/health`)).ok) { oben = true; break; } } catch { /* noch nicht */ } await sleep(500); }
@@ -368,6 +377,50 @@ const MAIN_THUMB = `SELECT gm.byte_size AS main, gt.byte_size AS thumb FROM medi
   JOIN media_blobs bt ON bt.tenant_id = v.tenant_id AND bt.blob_id = v.blob_id
   JOIN media_blob_generations gt ON gt.tenant_id = bt.tenant_id AND gt.blob_id = bt.blob_id AND gt.generation_no = bt.current_generation_no
  WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL`;
+
+const BNAME = '2026-11-16_e2e-vor-bildmigration';
+const SICHERUNG = join(process.cwd(), 'scripts', 'maint', 'manuelle-sicherung.mjs');
+/** Das Vollsicherungs-Skript des Runbooks (sichern / pruefen / zurueckspielen), JSON-Ausgabe. */
+function sicherungsSkript(...a) {
+  try { return { code: 0, out: JSON.parse(execFileSync(process.execPath, [SICHERUNG, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })) }; }
+  catch (e) { let out = null; try { out = JSON.parse(String(e.stdout || e.stderr)); } catch { out = { raw: String(e.stdout || e.stderr).slice(0, 300) }; } return { code: e.status ?? 1, out }; }
+}
+/** Fingerabdruck eines ganzen Ordners (Pfade + Inhalte). */
+function baum(dir) {
+  const hh = createHash('sha256');
+  const rec = (d, rel) => { for (const n of readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    const p = join(d, n.name); if (n.isDirectory()) rec(p, rel + '/' + n.name); else { hh.update(rel + '/' + n.name); hh.update(readFileSync(p)); } } };
+  rec(dir, '');
+  return hh.digest('hex').slice(0, 16);
+}
+/** Aktuelle Generationen nur der VERKNÜPFTEN Bilder (Haupt + Vorschau): Datei da, Größe und SHA-256 stimmen. */
+function integritaetVerknuepft() {
+  const rows = dbQ(BIZ_DB, `${CUR} WHERE b.blob_id IN (
+      SELECT o.master_blob_id FROM media_objects o JOIN media_links l ON l.media_id = o.media_id AND l.deleted_at IS NULL WHERE o.deleted_at IS NULL
+      UNION SELECT v.blob_id FROM media_variants v JOIN media_objects o ON o.media_id = v.media_id AND o.deleted_at IS NULL
+        JOIN media_links l ON l.media_id = v.media_id AND l.deleted_at IS NULL WHERE v.deleted_at IS NULL)`);
+  let missing = 0, bad = 0;
+  for (const r of rows) { const p = join(MEDIA, String(r.k)); if (!existsSync(p)) { missing++; continue; } if (statSync(p).size !== Number(r.s) || sha256f(p) !== r.h) bad++; }
+  return { n: rows.length, missing, bad };
+}
+async function zuDataRepairs(p) { await geh(p, '/dashboard'); await sleep(600); await geh(p, '/settings?tab=repairs'); await sleep(1500); }
+const text = (p, sel) => p.ev(`return document.querySelector(${S(sel)})?.textContent ?? null;`);
+/** Die Wartungsprotokolle im Test-Datenordner (maintenance-logs/*.jsonl), Zeile für Zeile. */
+function logEintraege() {
+  const dir = join(APP_DATA_DIR, 'maintenance-logs');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort().map((f) => ({ name: f.replace(/\.jsonl$/, ''),
+    zeilen: readFileSync(join(dir, f), 'utf8').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return {}; } }) }));
+}
+/** Bilddateien im Medienordner, die KEINE Generation (gespeicherte DB auf der Platte) nennt. */
+function waisen() {
+  const ref = new Set(dbQ(BIZ_DB, 'SELECT storage_key AS k FROM media_blob_generations').map((r) => String(r.k).split('\\').join('/')));
+  const out = [];
+  const w = (d) => { for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name);
+    if (e.isDirectory()) { if (!e.name.startsWith('.')) w(p); } else if (/\.(jpg|jpeg|png|webp)$/i.test(e.name)) { const rel = relative(MEDIA, p).split('\\').join('/'); if (!ref.has(rel)) out.push(rel); } } };
+  if (existsSync(MEDIA)) w(MEDIA);
+  return out;
+}
 
 let primary = null, client = null;
 try {
@@ -461,6 +514,13 @@ try {
   // ── C · ECHTE SICHERUNG VOR DER MIGRATION (Snapshot-Host) ─────────────────────────────────────────
   const bout = seedx('backup', APP_DATA_DIR, BACKUP_DIR, new Date().toISOString());
   ok(/^BACKUP_OK/.test(bout), `C Sicherung vor der Migration (${bout})`);
+  // Die VOLLSICHERUNG des Runbooks (der offizielle Rückweg): ganzer Datenordner 1:1, bei geschlossener Test-App.
+  mkdirSync(join(RUN, 'voll'), { recursive: true });   // das Skript legt nie einen Zielordner an
+  const voll = sicherungsSkript('sichern', '--quelle', APP_DATA_DIR, '--ziel', join(RUN, 'voll'), '--name', BNAME, '--ruhe-sekunden', '1', '--nur-pfad', APP);
+  if (!voll.out?.ok) console.log('      VOLLSICHERUNG ' + S(voll).slice(0, 400));
+  const vollPruef = sicherungsSkript('pruefen', '--sicherung', join(RUN, 'voll', BNAME)).out;
+  const vollBaum = existsSync(join(RUN, 'voll', BNAME, 'Data')) ? baum(join(RUN, 'voll', BNAME, 'Data')) : '';
+  ok(voll.code === 0 && voll.out?.ok && vollPruef?.ok && vollPruef.anzahlAbweichungen === 0, `C Vollsicherung (manuelle-sicherung.mjs) vor der Migration: ${voll.out?.dateien} Dateien, geprüft`);
 
   // ── D · PRIMARY + PC2 auf der Kopie; Karten einmal laden (S1-Cache warm mit den ALTEN Bildern) ─────
   primary = await primaryStarten();
@@ -469,22 +529,19 @@ try {
   for (const c of [primary, client]) { await c.send('Network.enable', { maxPostDataSize: 65536 }); await c.dialogeAnnehmen(); }
   const warmP = await kartenPruefen(primary, 'D Primary vorher');
   const warmC = await kartenPruefen(client, 'D PC2 vorher');
-  ok(warmP.n > 50 && warmP.veraltet === 0 && warmC.n > 50, `D Karten vorher geladen (Primary ${warmP.n}, PC2 ${warmC.n})`);
-  // Feste Stichprobe über die ECHTE Planungsfunktion (nur lesend): je Klasse einige Blobs über ihrer Grenze. Der volle Bestand
-  // wird außerhalb der App gemessen (derselbe Encoder im Release-Build; die Bitgleichheit prüft J).
+  ok(warmP.n > 50 && warmP.veraltet === 0 && warmC.n > 50 && warmP.aktuell >= warmP.n * 0.9 && warmC.aktuell >= warmC.n * 0.9,
+    `D Karten vorher geladen und als aktuelle Fassung erkannt (Primary ${warmP.aktuell}/${warmP.n}, PC2 ${warmC.aktuell}/${warmC.n})`);
+  // VOLLER Bestand über die ECHTE Planungsfunktion (nur lesend) — keine Stichprobe mehr.
   const eng = await import(new URL('../../src/core/media/image-store-migration.ts', import.meta.url).href);
-  const ro = new DatabaseSync(BIZ_DB, { readOnly: true });
-  const adapter = { exec(sql, params = []) { const rows = ro.prepare(sql).all(...params); if (!rows.length) return []; const cols = Object.keys(rows[0]); return [{ columns: cols, values: rows.map((r) => cols.map((c) => r[c])) }]; }, run() { throw new Error('read-only'); } };
-  const planAll = eng.planImageStoreMigration(adapter); ro.close();
-  const QUOTE = { watch: 20, jewelry: 20, accessory: 12, repair: 10, other: 4, thumbnail: 20 };
-  const sample = []; const per = {};
-  for (const p of planAll.plans) { const k = p.rendition === 'thumbnail' ? 'thumbnail' : p.usageClass; if ((per[k] ?? 0) < (QUOTE[k] ?? 0)) { per[k] = (per[k] ?? 0) + 1; sample.push(p); } }
-  const IDS = S(sample.map((p) => p.blobId));
-  MESS.stichprobe = { plaene: planAll.plans.length, uebersprungen: planAll.skipped.length, gewaehlt: per };
-  ok(sample.length >= 60 && per.watch && per.jewelry && per.accessory && per.thumbnail, `D Stichprobe ${S(per)} aus ${planAll.plans.length} Plänen`);
+  const leser = () => { const ro = new DatabaseSync(BIZ_DB, { readOnly: true }); return { ro, a: { exec(sql, params = []) { const rows = ro.prepare(sql).all(...params); if (!rows.length) return []; const cols = Object.keys(rows[0]); return [{ columns: cols, values: rows.map((r) => cols.map((c) => r[c])) }]; }, run() { throw new Error('read-only'); } } }; };
+  let L0 = leser(); const planAll = eng.planImageStoreMigration(L0.a); const invAll = eng.inventoryImageStore(L0.a); L0.ro.close();
+  MESS.bestand = invAll;
+  MESS.plan = { plaene: planAll.plans.length, haupt: planAll.plans.filter((p) => p.rendition === 'main').length, vorschau: planAll.plans.filter((p) => p.rendition === 'thumbnail').length, uebersprungen: planAll.skipped.length };
+  console.log('      BESTAND ' + S(MESS.bestand) + ' PLAN ' + S(MESS.plan));
+  ok(invAll.balanced && planAll.plans.length > 500, `D Bestand stimmt in sich (${invAll.blobsPresent} Dateien), Plan über den vollen Bestand: ${planAll.plans.length}`);
   const probe = {};
   for (const [k, uc] of [['uhr', 'watch'], ['schmuck', 'jewelry'], ['accessory', 'accessory']]) {
-    for (const p of sample.filter((x) => x.rendition === 'main' && x.usageClass === uc)) {
+    for (const p of planAll.plans.filter((x) => x.rendition === 'main' && x.usageClass === uc)) {
       const r = dbQ(BIZ_DB, `SELECT l.entity_id AS id, g.storage_key AS k FROM media_links l JOIN media_objects o ON o.media_id = l.media_id AND o.deleted_at IS NULL
         JOIN media_blobs b ON b.blob_id = o.master_blob_id JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
        WHERE l.deleted_at IS NULL AND l.entity_type = 'product' AND o.master_blob_id = ? LIMIT 1`, [p.blobId])[0];
@@ -492,27 +549,22 @@ try {
     }
   }
   ok(Object.keys(probe).length === 3 && Object.values(probe).every((p) => p.keys.includes(p.altKey)), 'D PC2 (products.get) nennt vorher die alten Schlüssel');
-
-  // ── E · PROBELAUF (Stichprobe) ──────────────────────────────────────────────────────────────────
   const dig0 = await mig(primary, 'm.digest()');
   const gens0 = dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations')[0]?.n;
-  let t = Date.now();
-  const dry = await mig(primary, `m.run({ mode: 'dry-run', onlyBlobIds: ${IDS} })`);
-  MESS.probelauf = { eligible: dry.report.eligible, skipped: dry.report.skipped, failed: dry.report.failed, vorherKB: KB(dry.report.bytesBefore), nachherKB: KB(dry.report.bytesAfter), sek: Math.round((Date.now() - t) / 1000), sekJeBlob: +((Date.now() - t) / 1000 / sample.length).toFixed(1) };
-  console.log('      PROBELAUF ' + S(MESS.probelauf));
-  ok(dry.report.eligible >= sample.length * 0.8 && dry.report.switched === 0, `E Probelauf: ${dry.report.eligible}/${sample.length} umstellbar, ${KB(dry.report.bytesBefore)} KB → ${KB(dry.report.bytesAfter)} KB`);
-  ok(S(await mig(primary, 'm.digest()')) === S(dig0) && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations')[0]?.n === gens0, 'E Probelauf ändert keine Zeile');
-  ok(dry.journal.every((e) => !/name|brand|customer|@/.test(S(e))), 'E Protokoll ohne Namen/Kunden (nur Kennungen und Zahlen)');
+  const waisenVorher = waisen().length;
+  MESS.waisenVorher = waisenVorher;
+  const aktuellVorher =dbQ(BIZ_DB, `SELECT COUNT(*) AS n, SUM(g.byte_size) AS b FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no WHERE b.blob_status = 'present'`)[0];
 
   // ── E2 · VORBEDINGUNG: offene Aufnahmen/Edit-Pläne blockieren jedes Schreiben (fail-closed) ─────────
   let digF = dig0;
   const offen = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_ingest_jobs WHERE state NOT IN ('ready','failed','quarantined','expired')")[0]?.n ?? 0;
   MESS.offeneJobs = offen;
   if (offen > 0) {
-    const nein = await mig(primary, `m.run({ mode: 'apply', onlyBlobIds: ${IDS} })`).then((r) => 'LIEF: ' + S(r?.report?.switched)).catch((e) => String(e?.message ?? e));
-    ok(/open media ingest job/.test(nein) && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations')[0]?.n === gens0,
-      `E2 ${offen} offene Edit-Pläne in der Kopie → Lauf abgewiesen, nichts geschrieben`);
-    // Nur in der TESTKOPIE: die alten Pläne enden (entspricht der späteren Owner-Bereinigung); App dafür sauber geschlossen.
+    const nein = await mig(primary, `m.run({ mode: 'apply', reason: 'e2e', backupRef: ${S(BNAME)} })`).then((r) => r?.report ? 'LIEF: ' + S(r.report.switched) : S(r?.refused ?? r)).catch((e) => String(e?.message ?? e));
+    const nachher = await primary.ev(`return await window.__TAURI_INTERNALS__.invoke('maintenance_mode_status');`);
+    ok(/open media ingest job/.test(nein) && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations')[0]?.n === gens0 && nachher?.active === false,
+      `E2 ${offen} offene Edit-Pläne in der Kopie → Lauf abgewiesen, nichts geschrieben, Wartungsmodus wieder aus (${nein.slice(0, 80)})`);
+    // Nur in der TESTKOPIE: die alten Pläne enden (entspricht der Owner-Wartung vom 16.11.); App dafür sauber geschlossen.
     pid = startedPids().find((p) => p && pathOfPid(p)?.toLowerCase() === APP.toLowerCase());
     primary.close(); primary = null;
     await closeTestWindow(pid, APP); await waitTestImageGone('lataif.exe');
@@ -525,21 +577,78 @@ try {
     ok(warm2.n > 50 && warm2.veraltet === 0, `E2 Primary nach Neustart: Karten mit den alten Fassungen geladen (${warm2.n})`);
   }
 
-  // ── F · LAUF 1: kooperativer Abbruch nach 25 Umstellungen ─────────────────────────────────────────
+  // ── E · OWNER-KARTE: Zählen + Probelauf über ALLE Bilder (Maus) ─────────────────────────────────
+  await zuDataRepairs(primary);
+  await waitFor(primary, '[data-imgmig-card]', 30000);
+  ok(String(await maus(primary, '[data-imgmig-start]')).startsWith('GESPERRT'), 'E „Start" gesperrt ohne Probelauf/Grund/Sicherungsname');
+  ok(await maus(primary, '[data-imgmig-count]') === 'OK', 'E „Count images" geklickt');
+  await waitFor(primary, '[data-imgmig-inventory]', 120000);
+  const invKarte = await primary.ev(`const e=document.querySelector('[data-imgmig-inventory]'); return { total: Number(e.dataset.total), balanced: e.dataset.balanced };`);
+  ok(invKarte.total === invAll.blobsPresent && invKarte.balanced === 'true', `E Karte zählt ${invKarte.total} Dateien, Summen stimmen`);
+  let t = Date.now();
+  ok(await maus(primary, '[data-imgmig-dry]') === 'OK', 'E Probelauf gestartet (Maus)');
+  await waitFor(primary, '[data-imgmig-dryresult]', 45 * 60 * 1000);
+  const dryKarte = await primary.ev(`const e=document.querySelector('[data-imgmig-dryresult]'); return { eligible: Number(e.dataset.eligible), total: Number(e.dataset.total), failed: Number(e.dataset.failed), text: e.textContent };`);
+  const dryLog = logEintraege().find((l) => l.name.endsWith('-dry') && l.zeilen.some((z) => z.event === 'report'));
+  const vorhersage = new Map((dryLog?.zeilen ?? []).filter((z) => z.event === 'planned').map((z) => [z.blobId, z.toBytes]));
+  const dryRep = dryLog?.zeilen.find((z) => z.event === 'report')?.report;
+  MESS.probelauf = { eligible: dryKarte.eligible, total: dryKarte.total, failed: dryKarte.failed, vorherMB: +(dryRep?.bytesBefore / 1e6).toFixed(2), nachherMB: +(dryRep?.bytesAfter / 1e6).toFixed(2), sek: Math.round((Date.now() - t) / 1000), skipped: dryRep?.skipped, byClass: dryRep?.byClass };
+  console.log('      PROBELAUF ' + S(MESS.probelauf));
+  ok(dryKarte.total === planAll.plans.length && dryKarte.eligible === vorhersage.size && dryKarte.eligible > 0, `E Probelauf über alle ${dryKarte.total} Bilder: ${dryKarte.eligible} umstellbar, Vorhersage je Bild im Protokoll (${vorhersage.size})`);
+  ok(S(await mig(primary, 'm.digest()')) === S(digF) && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations')[0]?.n === gens0 && waisen().length === waisenVorher, 'E Probelauf ändert keine Zeile und legt keine Datei an');
+  ok((dryLog?.zeilen ?? []).every((z) => !/brand|customer|@|password/i.test(S(z))), 'E Protokoll ohne Namen/Kunden (nur Kennungen und Zahlen)');
+
+  copyFileSync(BIZ_DB, join(RUN, 'vorher-migration.db'));   // Stand direkt vor dem ersten echten Lauf (für den Nachweis in H)
+
+  // ── F · LAUF 1 über die Karte; Wartungsmodus prüfen; „Stop" ───────────────────────────────────────
+  ok(await tippe(primary, '[data-repair-reason]', 'Bildspeicher e2e') === 'OK', 'F Grund getippt');
+  ok(await tippe(primary, '[data-imgmig-backup]', BNAME) === 'OK', 'F Sicherungsname getippt');
+  ok(await maus(primary, '[data-imgmig-start]') === 'OK', 'F „Start image migration" geklickt (Maus)');
+  await waitFor(primary, '[data-app-confirm]', 15000);
+  const frage = await text(primary, '[data-app-confirm]');
+  ok(frage?.includes(String(dryKarte.eligible)) && frage?.includes(BNAME) && /second computer/i.test(frage ?? ''), 'F App-Rückfrage nennt Anzahl, Sicherung und den Wartungsmodus');
+  ok(await maus(primary, '[data-app-confirm-ok]') === 'OK', 'F Rückfrage bestätigt (Maus)');
   t = Date.now();
-  const r1 = await mig(primary, `m.run({ mode: 'apply', stopAfter: 25, saveEvery: 10, onlyBlobIds: ${IDS} })`);
-  ok(r1.report.stoppedEarly && r1.report.switched === 25, `F Abbruch nach ${r1.report.switched} Umstellungen (${Math.round((Date.now() - t) / 1000)} s)`);
+  await warteAuf(async () => Number(await primary.ev('return window.__lataifImageMigration.state().progress?.switched ?? 0;')) >= 40, 30 * 60 * 1000);
+  {
+    const stat = await primary.ev(`return await window.__TAURI_INTERNALS__.invoke('maintenance_mode_status');`);
+    const st = await api('/api/staging/media', { mime: 'image/jpeg', dataBase64: await grossesFoto(primary, 300) }, TOKEN);
+    const cmd = await befehl('products.update', { id: probe.uhr.id, patch: { notes: 'e2e wartung' } }, TOKEN);
+    const mob = await fetch(`http://127.0.0.1:${PORT}/api/mobile/upload`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ protocol_version: 1, upload_event_id: 'im-wart-' + Date.now(), entity_id: 'im-wart-' + Date.now(), mode: 'collection', metadata: { brand: 'IM', name: 'IM Wartung' }, images: [] }) });
+    const mobJ = await mob.json().catch(() => ({}));
+    const lesen = await befehl('products.get', { id: probe.uhr.id }, TOKEN);
+    MESS.wartung = { status: stat, ablage: [st.status, st.j?.error], auftrag: [cmd.status, cmd.j?.error, cmd.j?.outcome], handy: [mob.status, mobJ?.error, mob.headers.get('retry-after')], lesen: lesen.status };
+    console.log('      WARTUNGSMODUS ' + S(MESS.wartung));
+    ok(stat?.active === true, 'F während des Laufs: Wartungsmodus aktiv');
+    ok(st.status === 503 && st.j?.error === 'MAINTENANCE_ACTIVE', `F PC2-Ablage (Foto) abgewiesen: ${st.status}`);
+    ok(cmd.status === 503 && cmd.j?.error === 'MAINTENANCE_ACTIVE' && cmd.j?.outcome === 'not_executed', `F PC2-Auftrag abgewiesen, nicht ausgeführt: ${cmd.status}`);
+    ok(mob.status === 503 && mobJ?.error === 'MAINTENANCE_ACTIVE' && mob.headers.get('retry-after') === '120', `F Handy-Upload abgewiesen (503 = das Handy versucht es später erneut): ${mob.status}`);
+    ok(lesen.status === 200 && lesen.j?.ok, 'F Lesen (products.get) geht während des Laufs');
+  }
+  ok(await maus(primary, '[data-imgmig-stop]') === 'OK', 'F „Stop" geklickt (Maus)');
+  await waitFor(primary, '[data-imgmig-result][data-stopped="true"]', 120000);
+  const r1 = await primary.ev(`const e=document.querySelector('[data-imgmig-result]'); return { switched: Number(e.dataset.switched), failed: Number(e.dataset.failed), text: e.textContent };`);
+  ok(r1.switched >= 40 && r1.failed === 0, `F angehalten nach ${r1.switched} Umstellungen (${Math.round((Date.now() - t) / 1000)} s)`);
+  const stat1 = await primary.ev(`return await window.__TAURI_INTERNALS__.invoke('maintenance_mode_status');`);
+  const cmd1 = await befehl('products.update', { id: 'gibt-es-nicht-' + Date.now(), patch: { notes: 'x' } }, TOKEN);
+  ok(stat1?.active === false && cmd1.status !== 503 && cmd1.j?.error !== 'MAINTENANCE_ACTIVE', `F nach dem Halt: Wartungsmodus aus, PC2-Aufträge werden wieder angenommen (${cmd1.status} ${cmd1.j?.error ?? ''})`);
+  ok(waisen().length === waisenVorher, `F nach „Stop": keine neue Datei ohne Generation (${waisen().length - waisenVorher})`);
+  ok(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations WHERE generation_no > 1')[0]?.n === r1.switched, 'F alles Umgestellte steht auf der Platte (gespeichert)');
   ok(S(await mig(primary, 'm.digest()')) === S(digF), 'F Objekte/Links/Varianten/Artikelzeilen/Changelog/Audit unverändert');
+  const runLog = logEintraege().find((l) => !l.name.endsWith('-dry') && l.zeilen.some((z) => z.event === 'owner'));
+  ok(runLog && runLog.zeilen.find((z) => z.event === 'owner')?.backup === BNAME && runLog.zeilen.filter((z) => z.event === 'switched').length === r1.switched,
+    `F Protokolldatei maintenance-logs/${runLog?.name}.jsonl: Owner, Sicherung, ${r1.switched} Umstellungen`);
   await sleep(1500);
   const zwischenP = await kartenPruefen(primary, 'F Primary nach Teil-Migration');
   const zwischenC = await kartenPruefen(client, 'F PC2 nach Teil-Migration');
   ok(zwischenP.veraltet === 0 && zwischenC.veraltet === 0 && zwischenP.aktuell === warmP.aktuell && zwischenC.aktuell === warmC.aktuell,
-    `F S1: alle Karten zeigen die aktuelle Fassung, keine die alte (Primary ${zwischenP.aktuell}/${zwischenP.n}, PC2 ${zwischenC.aktuell}/${zwischenC.n}; ${zwischenP.n - warmP.aktuell} Altbestand-Daten-URLs ohne Mediengeneration)`);
+    `F alle Karten zeigen die aktuelle Fassung, keine die alte (Primary ${zwischenP.aktuell}/${zwischenP.n}, PC2 ${zwischenC.aktuell}/${zwischenC.n})`);
 
   // ── G · LAUF 2: HARTER ABSTURZ mitten im Lauf (Prozess beendet), Neustart, Integrität ───────────────
-  await primary.ev(`window.__imRun = window.__lataifImageMigration.run({ mode: 'apply', saveEvery: 10, onlyBlobIds: ${IDS} }); return 1;`);
-  await warteAuf(async () => Number(await primary.ev('return window.__lataifImageMigrationProgress?.switched ?? 0;')) >= 15, 900000);
-  const vorKill = Number(await primary.ev('return window.__lataifImageMigrationProgress?.switched ?? 0;'));
+  await primary.ev(`window.__imRun = window.__lataifImageMigration.run({ mode: 'apply', reason: 'e2e absturz', backupRef: ${S(BNAME)} }); return 1;`);
+  await warteAuf(async () => Number(await primary.ev('return window.__lataifImageMigration.state().progress?.switched ?? 0;')) >= 15, 900000);
+  const vorKill = Number(await primary.ev('return window.__lataifImageMigration.state().progress?.switched ?? 0;'));
   pid = startedPids().find((p) => p && pathOfPid(p)?.toLowerCase() === APP.toLowerCase()) ?? startedPids()[0];
   killTestPid(pid, APP);
   primary.close(); primary = null;
@@ -547,56 +656,90 @@ try {
   ok(true, `G Primary mitten im Lauf hart beendet (nach ${vorKill} Umstellungen dieses Laufs)`);
   const intKill = integritaet();
   ok(intKill.bad === 0 && intKill.missing <= intVorher.missing, `G nach dem Absturz: jede aktuelle Generation ist lesbar (fehlend ${intKill.missing} wie vorher ${intVorher.missing}, falsch ${intKill.bad})`);
+  const waisenKill = { length: waisen().length - waisenVorher };
   const nachKillGen2 = dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations WHERE generation_no > 1')[0]?.n;
+  ok(waisenKill.length <= 10, `G höchstens ein Paket (10) Dateien ohne gespeicherte Generation (${waisenKill.length})`);
   primary = await primaryStarten();
   TOKEN = await serverToken();
+  const stat2 = await primary.ev(`return await window.__TAURI_INTERNALS__.invoke('maintenance_mode_status');`);
+  ok(stat2?.active === false, 'G nach dem Neustart: kein Wartungsmodus mehr (nur im Speicher)');
 
-  // ── H · LAUF 3: Wiederaufnahme bis zum Ende ───────────────────────────────────────────────────────
+  // ── H · LAUF 3: Wiederaufnahme über die Karte bis zum Ende ─────────────────────────────────────────
   const dig3 = await mig(primary, 'm.digest()');
+  await zuDataRepairs(primary);
+  await waitFor(primary, '[data-imgmig-card]', 30000);
+  ok(await maus(primary, '[data-imgmig-dry]') === 'OK', 'H Probelauf vor der Wiederaufnahme (Maus)');
+  await waitFor(primary, '[data-imgmig-dryresult]', 45 * 60 * 1000);
+  const rest = await primary.ev(`const e=document.querySelector('[data-imgmig-dryresult]'); return { total: Number(e.dataset.total), eligible: Number(e.dataset.eligible) };`);
+  ok(rest.total === planAll.plans.length - nachKillGen2,`H Probelauf: es bleiben ${rest.total} Bilder (vorher ${dryKarte.total}, schon umgestellt ${nachKillGen2})`);
+  ok(await tippe(primary, '[data-repair-reason]', 'Bildspeicher e2e Fortsetzung') === 'OK' && await tippe(primary, '[data-imgmig-backup]', BNAME) === 'OK', 'H Grund + Sicherung getippt');
+  ok(await maus(primary, '[data-imgmig-start]') === 'OK', 'H Start (Maus)');
+  await waitFor(primary, '[data-app-confirm]', 15000);
+  ok(await maus(primary, '[data-app-confirm-ok]') === 'OK', 'H Rückfrage bestätigt');
   t = Date.now();
-  const r3 = await mig(primary, `m.run({ mode: 'apply', saveEvery: 10, onlyBlobIds: ${IDS} })`);
-  MESS.lauf3 = { gespeichertVorAbsturz: nachKillGen2, switched: r3.report.switched, failed: r3.report.failed, sek: Math.round((Date.now() - t) / 1000), skipped: r3.report.skipped, errors: r3.report.errors.map((e) => e.code) };
+  await waitFor(primary, '[data-imgmig-result][data-stopped="false"]', 45 * 60 * 1000);
+  const r3 = await primary.ev(`const e=document.querySelector('[data-imgmig-result]'); return { switched: Number(e.dataset.switched), failed: Number(e.dataset.failed) };`);
+  MESS.lauf3 = { gespeichertVorAbsturz: nachKillGen2, waisenNachAbsturz: waisenKill.length, switched: r3.switched, failed: r3.failed, sek: Math.round((Date.now() - t) / 1000) };
   console.log('      LAUF 3 ' + S(MESS.lauf3));
-  ok(!r3.report.stoppedEarly && r3.report.eligible === r3.report.switched && r3.report.failed === 0, `H Wiederaufnahme: Rest umgestellt (${r3.report.switched}), Fehler ${r3.report.failed}`);
-  const r4 = await mig(primary, `m.run({ mode: 'apply', onlyBlobIds: ${IDS} })`);
-  ok(r4.report.switched === 0 && r4.report.eligible === 0, 'H vierter Lauf: nichts mehr zu tun (idempotent)');
+  ok(r3.failed === 0 && r3.switched === rest.eligible, `H Wiederaufnahme: Rest umgestellt (${r3.switched} = Vorhersage ${rest.eligible}), Fehler ${r3.failed}`);
+  ok(waisen().length === waisenVorher, `H die Dateien aus dem Absturz wurden übernommen: keine neue Datei ohne Generation (${waisen().length - waisenVorher})`);
+  const r4 = await mig(primary, `m.run({ mode: 'apply', reason: 'e2e idempotent', backupRef: ${S(BNAME)} })`);
+  ok(r4.report?.switched === 0 && r4.report?.eligible === 0 && r4.report?.failed === 0, `H vierter Lauf: nichts mehr zu tun (idempotent; ${r4.report?.total} Bilder bleiben über der Grenze, weil < 10 % Ersparnis)`);
   ok(S(await mig(primary, 'm.digest()')) === S(dig3), 'H Objekte/Links/Varianten/Artikelzeilen (pHash, Embedding)/Changelog/Audit unverändert');
-  ok(['media_objects', 'media_links_active', 'media_variants', 'media_blobs', 'links_sig', 'objects_sig', 'variants_sig', 'products', 'products_media_sig'].every((k) => dig3[k] === dig0[k]),
-    'H über alle Läufe und den Absturz hinweg: Medien-IDs und Zuordnungen identisch');
+  ok(['media_objects', 'media_links_active', 'media_variants', 'media_blobs', 'links_sig', 'objects_sig', 'variants_sig', 'products', 'products_media_sig', 'sync_changelog', 'audit_log'].every((k) => dig3[k] === dig0[k]),
+    'H über alle Läufe und den Absturz hinweg: Medien-IDs, Zuordnungen, Artikel, Changelog und Audit identisch');
+  // Probelauf = Ergebnis: jedes vorhergesagte Bild steht jetzt mit GENAU der vorhergesagten Größe da.
+  const jetzt = new Map(dbQ(BIZ_DB, `SELECT b.blob_id AS id, b.current_generation_no AS gen, g.byte_size AS s FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no`).map((r) => [r.id, r]));
+  const abweichend = [...vorhersage].filter(([id, bytes]) => jetzt.get(id)?.gen !== 2 || Number(jetzt.get(id)?.s) !== Number(bytes));
+  const umgestellt = dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_blob_generations WHERE generation_no > 1')[0]?.n;
+  ok(abweichend.length === 0 && umgestellt === vorhersage.size, `H Probelauf = Ergebnis: ${vorhersage.size} vorhergesagt, ${umgestellt} umgestellt, ${abweichend.length} abweichend`);
+  {
+    // Derselbe Nachweis wie nach der produktiven Migration (Runbook D): nur Generationen und Zeiger geändert.
+    const { vergleiche } = await import(new URL('../../scripts/maint/bildmigration-vergleich.mjs', import.meta.url).href);
+    const v = vergleiche(join(RUN, 'vorher-migration.db'), BIZ_DB);
+    MESS.nachweis = { ok: v.ok, umgestellt: v.umgestellt, aktuellMB: [+(v.aktuelleBilddatenBytes.vorher / 1e6).toFixed(2), +(v.aktuelleBilddatenBytes.nachher / 1e6).toFixed(2)], supersededMB: +(v.supersededBytes / 1e6).toFixed(2), fehler: v.fehler };
+    ok(v.ok && v.umgestellt === umgestellt, `H Nachweis-Skript (bildmigration-vergleich): ok, ${v.umgestellt} umgestellt, ${S(v.fehler)}`);
+  }
   await sleep(2000);
 
-  // ── I · ERGEBNIS: Größen der Stichprobe, Integrität, Speicher ───────────────────────────────────────
-  const stand = sample.map((p) => ({ p, c: dbQ(BIZ_DB, `SELECT b.current_generation_no AS gen, g.byte_size AS s FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no WHERE b.blob_id = ?`, [p.blobId])[0] }));
-  const um = stand.filter((x) => x.c.gen > 1);
-  const zuGross = um.filter((x) => x.c.s > x.p.targetBytes);
-  const jeKlasse = {};
-  for (const x of um) { const k = x.p.rendition === 'thumbnail' ? 'vorschau' : x.p.usageClass; const o = (jeKlasse[k] ??= { n: 0, vorherKB: 0, nachherKB: 0, maxKB: 0 }); o.n++; o.vorherKB += x.p.currentBytes / 1000; o.nachherKB += x.c.s / 1000; o.maxKB = Math.max(o.maxKB, x.c.s / 1000); }
-  for (const o of Object.values(jeKlasse)) { o.vorherKB = Math.round(o.vorherKB); o.nachherKB = Math.round(o.nachherKB); o.maxKB = +o.maxKB.toFixed(1); }
-  MESS.nachher = { medien: ordnerGroesse(MEDIA), dbMB: +(statSync(BIZ_DB).size / 1e6).toFixed(1), integritaet: integritaet(), stichprobe: { umgestellt: um.length, nicht: stand.length - um.length, jeKlasse },
-    generationen: dbQ(BIZ_DB, 'SELECT gen_status AS s, COUNT(*) AS n, ROUND(SUM(byte_size)/1e6,2) AS mb FROM media_blob_generations GROUP BY 1'), ausweis: klassen().ausweis };
+  // ── I · ERGEBNIS: Größen je Klasse, Integrität, Speicher ─────────────────────────────────────────────
+  const plaeneById = new Map(planAll.plans.map((p) => [p.blobId, p]));
+  const zuGross = [...plaeneById.values()].filter((p) => Number(jetzt.get(p.blobId)?.s) > p.targetBytes && jetzt.get(p.blobId)?.gen > 1);
+  const aktuellNachher = dbQ(BIZ_DB, `SELECT COUNT(*) AS n, SUM(g.byte_size) AS b FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no WHERE b.blob_status = 'present'`)[0];
+  MESS.nachher = { medien: ordnerGroesse(MEDIA), dbMB: +(statSync(BIZ_DB).size / 1e6).toFixed(1), integritaet: integritaet(), klassen: klassen(),
+    aktuelleBilddatenMB: { vorher: +(aktuellVorher.b / 1e6).toFixed(2), nachher: +(aktuellNachher.b / 1e6).toFixed(2) },
+    generationen: dbQ(BIZ_DB, 'SELECT gen_status AS s, COUNT(*) AS n, ROUND(SUM(byte_size)/1e6,2) AS mb FROM media_blob_generations GROUP BY 1') };
   console.log('      NACHHER ' + S(MESS.nachher));
   ok(MESS.nachher.integritaet.bad === 0 && MESS.nachher.integritaet.missing === intVorher.missing, `I Integrität: jede aktuelle Generation stimmt (fehlend wie vorher: ${intVorher.missing})`);
-  ok(zuGross.length === 0 && um.length === dry.report.eligible, `I Stichprobe: ${um.length} umgestellt = Vorhersage ${dry.report.eligible}, keine über ihrer Grenze (${S(jeKlasse)})`);
-  ok((MESS.nachher.ausweis?.gen2 ?? 0) === 0, 'I Ausweis unverändert (Generation 1)');
+  ok(zuGross.length === 0, `I kein umgestelltes Bild über seiner Grenze (${zuGross.length})`);
+  const kl = MESS.nachher.klassen;
+  ok((kl.uhr?.ueber60 ?? 0) === 0 && (kl.schmuck?.ueber30 ?? 0) <= (MESS.vorher.klassen.schmuck?.ueber30 ?? 0) && (kl.vorschau?.ueber10 ?? 0) <= (MESS.vorher.klassen.vorschau?.ueber10 ?? 0), `I Klassen nach der Migration: ${S({ uhr: kl.uhr, schmuck: kl.schmuck, accessory: kl.accessory, reparatur: kl.reparatur, vorschau: kl.vorschau })}`);
+  ok((kl.ausweis?.gen2 ?? 0) === 0, 'I Ausweis unverändert (Generation 1)');
   ok(MESS.nachher.dbMB - MESS.vorher.dbMB < 1.0, `I Datenbank wächst kaum (${MESS.vorher.dbMB} → ${MESS.nachher.dbMB} MB)`);
+  ok(MESS.nachher.medien.mb >= MESS.vorher.medien.mb, `I Platte: alte Fassungen bleiben, der Medienordner wächst (${MESS.vorher.medien.mb} → ${MESS.nachher.medien.mb} MB)`);
 
-  // ── J · PC2 + Primary zeigen dieselbe aktuelle Generation ─────────────────────────────────────────
-  for (const [k, p] of Object.entries(probe)) {
-    const d = await befehl('products.get', { id: p.id }, TOKEN);
-    const keys = d.j?.value?.mediaKeys ?? [];
-    const curKey = dbQ(BIZ_DB, `SELECT g.storage_key AS k FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no WHERE b.blob_id = ?`, [p.blobId])[0]?.k;
-    const neuR = await fetch(`http://127.0.0.1:${PORT}/api/media?key=${encodeURIComponent(curKey)}`, { headers: { Authorization: 'Bearer ' + TOKEN } });
-    const neuB = Buffer.from(await neuR.arrayBuffer());
-    const altR = await fetch(`http://127.0.0.1:${PORT}/api/media?key=${encodeURIComponent(p.altKey)}`, { headers: { Authorization: 'Bearer ' + TOKEN } });
-    ok(keys.includes(curKey) && !keys.includes(p.altKey) && curKey !== p.altKey, `J ${k}: PC2 nennt den NEUEN Schlüssel, nicht mehr den alten`);
-    ok(neuR.status === 200 && createHash('sha256').update(neuB).digest('hex') === sha256f(join(MEDIA, curKey)), `J ${k}: /api/media liefert die neue Datei (${neuB.length} B)`);
-    ok(altR.status !== 200, `J ${k}: die alte Fassung wird nicht mehr ausgeliefert (${altR.status})`);
-    ok(existsSync(join(MEDIA, p.altKey)), `J ${k}: die alte Datei liegt noch (keine Löschung)`);
-    // Nachbau-Abgleich (nur wenn vorhanden): derselbe Encoder außerhalb der App muss bitgleich rechnen.
-    if (process.env.IM_RECODE && existsSync(process.env.IM_RECODE)) {
-      const out = join(RUN, `recode-${k}.jpg`);
-      execFileSync(process.env.IM_RECODE, [join(SNAP, p.altKey), out, '1600', '320', String(p.ziel)], { encoding: 'utf8' });
-      ok(sha256f(out) === sha256f(join(MEDIA, curKey)), `J ${k}: Nachbau-Encoder rechnet bitgleich mit dem App-Code`);
+  // ── J · PC2 (Leseweg v0.8.101) für JEDEN Artikel + Karten an Primary und PC2 ───────────────────────────
+  {
+    const ids = dbQ(BIZ_DB, `SELECT DISTINCT entity_id AS id FROM media_links WHERE entity_type = 'product' AND deleted_at IS NULL ORDER BY entity_id`).map((r) => r.id);
+    let schluessel = 0, ok200 = 0, falsch = 0, fehltSoll = 0;
+    for (const id of ids) {
+      const d = await befehl('products.get', { id }, TOKEN);
+      const keys = d.j?.value?.mediaKeys ?? [];
+      const soll = dbQ(BIZ_DB, `${CUR} JOIN media_objects o ON o.master_blob_id = b.blob_id AND o.deleted_at IS NULL JOIN media_links l ON l.media_id = o.media_id AND l.deleted_at IS NULL AND l.entity_type = 'product' WHERE l.entity_id = ?`, [id]).map((r) => r.k);
+      if (soll.some((k) => !keys.includes(k))) fehltSoll++;
+      for (const k of keys) {
+        schluessel++;
+        const res = await fetch(`http://127.0.0.1:${PORT}/api/media?key=${encodeURIComponent(k)}`, { headers: { Authorization: 'Bearer ' + TOKEN } });
+        const b = Buffer.from(await res.arrayBuffer());
+        if (res.status === 200 && existsSync(join(MEDIA, k)) && createHash('sha256').update(b).digest('hex') === sha256f(join(MEDIA, k))) ok200++; else falsch++;
+      }
+    }
+    MESS.pc2Leseweg = { artikel: ids.length, schluessel, ok200, falsch, fehltSoll };
+    console.log('      PC2-LESEWEG ' + S(MESS.pc2Leseweg));
+    ok(ids.length > 300 && falsch === 0 && fehltSoll === 0 && ok200 === schluessel, `J v0.8.101-Leseweg für alle ${ids.length} Artikel: ${ok200}/${schluessel} Bildschlüssel liefern die aktuelle Datei, keiner fehlt`);
+    for (const [k, p] of Object.entries(probe)) {
+      const altR = await fetch(`http://127.0.0.1:${PORT}/api/media?key=${encodeURIComponent(p.altKey)}`, { headers: { Authorization: 'Bearer ' + TOKEN } });
+      ok(altR.status !== 200 && existsSync(join(MEDIA, p.altKey)), `J ${k}: die alte Fassung wird nicht mehr ausgeliefert (${altR.status}), die Datei liegt noch`);
     }
   }
   client = await pc2Anmelden(client).catch(async () => { try { client?.close(); } catch { /* zu */ } return pc2Anmelden(await attachOnly(CLIENT_CDP)); });
@@ -605,7 +748,7 @@ try {
   const endeP = await kartenPruefen(primary, 'J Primary nachher');
   const endeC = await kartenPruefen(client, 'J PC2 nachher');
   ok(endeP.veraltet === 0 && endeC.veraltet === 0 && endeP.aktuell === warmP.aktuell && endeC.aktuell === warmC.aktuell,
-    `J S1/S2: alle geladenen Karten zeigen die aktuelle Generation (Primary ${endeP.aktuell}/${endeP.n}, PC2 ${endeC.aktuell}/${endeC.n})`);
+    `J alle geladenen Karten zeigen die aktuelle Generation (Primary ${endeP.aktuell}/${endeP.n}, PC2 ${endeC.aktuell}/${endeC.n})`);
 
   // ── K · MEDIEN-GC (nur Probelauf): die alten Fassungen sind geschützt, nichts wird gelöscht ───────────
   const gc = await primary.ev(`try { return await window.__TAURI_INTERNALS__.invoke('scan_unused_media', ${S({ email: OWNER_EMAIL, password: OWNER_PW })}); } catch (e) { return { err: String(e) }; }`);
@@ -626,13 +769,29 @@ try {
   const rout = seedx('restore', APP_DATA_DIR, BACKUP_DIR);
   ok(/^RESTORE_OK/.test(rout), `L Wiederherstellung (${rout})`);
   const maxGen = dbQ(BIZ_DB, 'SELECT MAX(generation_no) AS m FROM media_blob_generations')[0]?.m;
-  const intRest = integritaet();
-  ok(maxGen === 1 && intRest.bad === 0 && intRest.missing === intVorher.missing && intRest.n === intVorher.n, `L Stand vor der Migration zurück: nur Generation 1, alle Dateien stimmen (${S(intRest)})`);
+  const intRest = integritaetVerknuepft();
+  MESS.appRestore = { alle: integritaet(), verknuepft: intRest };
+  // Die App-Sicherung nimmt (wie immer) nur die verknüpften Bilder mit — historische Dateien entfernter Fotos nicht.
+  ok(maxGen === 1 && intRest.bad === 0 && intRest.missing === 0, `L App-Sicherung: Stand vor der Migration zurück, nur Generation 1, jedes verknüpfte Bild stimmt (${S(MESS.appRestore)})`);
   primary = await primaryStarten();
   const dr = await mig(primary, 'm.digest()');
   ok(['media_objects', 'media_links_active', 'media_variants', 'links_sig', 'products_media_sig'].every((k) => dr[k] === dig0[k]), 'L App startet auf dem wiederhergestellten Stand, Zuordnungen wie vorher');
   const rp = await kartenPruefen(primary, 'L Primary nach Wiederherstellung');
   ok(rp.n > 50 && rp.veraltet === 0 && rp.aktuell === warmP.aktuell, `L Karten zeigen wieder die Originale (${rp.aktuell}/${rp.n})`);
+
+  // ── L2 · RÜCKWEG DES RUNBOOKS: Vollsicherung zurückspielen → Datenordner EXAKT wie vor der Migration ─────
+  pid = startedPids().find((p) => p && pathOfPid(p)?.toLowerCase() === APP.toLowerCase());
+  primary.close(); primary = null;
+  await closeTestWindow(pid, APP); await waitTestImageGone('lataif.exe');
+  const rw = sicherungsSkript('zurueckspielen', '--sicherung', join(RUN, 'voll', BNAME), '--ziel', APP_DATA_DIR, '--beiseite', join(RUN, 'beiseite-voll'), '--bestaetigen', BNAME, '--nur-pfad', APP);
+  ok(rw.code === 0 && rw.out?.ok, `L2 Vollsicherung zurückgespielt (${S(rw.out).slice(0, 160)})`);
+  ok(vollBaum && baum(APP_DATA_DIR) === vollBaum, 'L2 Datenordner Datei für Datei exakt der Stand vor der Migration (auch historische Fotos, keine Protokolle der Läufe)');
+  const intVoll = integritaet();
+  ok(dbQ(BIZ_DB, 'SELECT MAX(generation_no) AS m FROM media_blob_generations')[0]?.m === 1 && intVoll.bad === 0 && intVoll.missing === intVorher.missing && intVoll.n === intVorher.n,
+    `L2 nur Generation 1, alle Dateien wie vorher (${S(intVoll)})`);
+  primary = await primaryStarten();
+  const rv = await kartenPruefen(primary, 'L2 Primary nach dem Rückweg');
+  ok(rv.n > 50 && rv.veraltet === 0 && rv.aktuell === warmP.aktuell, `L2 App startet, Karten zeigen die Originale (${rv.aktuell}/${rv.n})`);
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
 } finally {

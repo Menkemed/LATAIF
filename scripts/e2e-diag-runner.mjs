@@ -26,6 +26,8 @@ if (!OUT || TESTS.length === 0) { console.error('Aufruf: node scripts/e2e-diag-r
 mkdirSync(OUT, { recursive: true });
 const SUM = join(OUT, 'summary.txt');
 const TREIBER_ABSTURZ = 0xC0000409;
+// Zeitgrenze je Lauf (Minuten). Standard 50; lange Läufe (z. B. die vollständige Bildmigration) setzen E2E_DIAG_MINUTEN.
+const ZEITGRENZE_MIN = Math.max(1, Number(process.env.E2E_DIAG_MINUTEN) || 50);
 const helper = await import(pathToFileURL(join(process.cwd(), 'test', 'e2e', '_e2e-process.mjs')).href);
 const ps = (cmd) => { try { return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], { encoding: 'utf8', windowsHide: true }).trim(); } catch (e) { return 'ERR ' + String(e.message).slice(0, 80); } };
 const reste = () => ps(`$e=@(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*\\Temp\\lataif-*' }).Count; $p=@(Get-NetTCPConnection -State Listen -LocalPort 9223,9224,3011 -ErrorAction SilentlyContinue).Count; $a=@(Get-CimInstance Win32_Process -Filter "Name='lataif.exe' OR Name='lataif-e2e-client.exe'" | Where-Object { $_.ExecutablePath -like '*\\target\\debug\\*' }).Count; "edge=$e ports=$p testapps=$a"`);
@@ -51,7 +53,7 @@ for (const t of TESTS) {
       '--report-on-fatalerror', '--report-on-signal', '--report-uncaught-exception', `--report-directory=${reportDir}`, t,
     ], { stdio: ['ignore', fd, fd], windowsHide: true });
     // Zeitgrenze: den EIGENEN Kindprozess beenden und warten, bis er weg ist — nie den nächsten Lauf daneben starten.
-    const zeit = setTimeout(() => { try { c.kill(); } catch { /* weg */ } c.once('exit', () => res({ code: 'TIMEOUT', signal: null, pid: c.pid })); }, 50 * 60 * 1000);
+    const zeit = setTimeout(() => { try { c.kill(); } catch { /* weg */ } c.once('exit', () => res({ code: 'TIMEOUT', signal: null, pid: c.pid })); }, ZEITGRENZE_MIN * 60 * 1000);
     c.on('exit', (code, signal) => { clearTimeout(zeit); res({ code, signal, pid: c.pid }); });
     c.on('error', (e) => { clearTimeout(zeit); res({ code: 'SPAWN_ERROR ' + e.message, signal: null, pid: c.pid }); });
   });

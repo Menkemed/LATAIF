@@ -13,6 +13,7 @@ mod media;
 mod sync;
 // INSTANCE-LOCK — höchstens ein LATAIF-Prozess je Anwendung und Benutzer (schließt die Lücke des Plugins).
 mod instance_lock;
+mod maintenance;
 
 /// Hält die Sperre für die ganze Lebensdauer des Prozesses (Windows gibt sie beim Prozessende frei).
 struct InstanceLockState(#[allow(dead_code)] instance_lock::InstanceLock);
@@ -2431,6 +2432,32 @@ fn media_ingest_journal_present(
         .map_err(|e| e.code().to_string())
 }
 
+/// WARTUNGSMODUS (Owner-Wartung, z. B. Bildmigration): der Server weist verändernde Aufträge von PC2 und
+/// vom Handy mit 503 `MAINTENANCE_ACTIVE` ab. Nur im Speicher — ein Neustart beendet ihn.
+/// Wurzelgebunden: nur ein Primary mit Datenort hat einen Server, den der Wartungsmodus betrifft.
+#[tauri::command]
+fn maintenance_mode_set(
+    _state: tauri::State<'_, AppHandleState>,
+    active: bool,
+    reason: Option<String>,
+) -> Result<(), String> {
+    maintenance::set(active, reason.as_deref().unwrap_or(""));
+    eprintln!("[maintenance] mode {}", if active { "ON" } else { "OFF" });
+    Ok(())
+}
+
+#[tauri::command]
+fn maintenance_mode_status(_state: tauri::State<'_, AppHandleState>) -> serde_json::Value {
+    serde_json::json!({ "active": maintenance::is_active(), "reason": maintenance::reason() })
+}
+
+/// Wartungsprotokoll: eine JSON-Zeile an `<Datenordner>/maintenance-logs/<name>.jsonl` anhängen.
+#[tauri::command]
+fn maintenance_log_append(app_handle: tauri::AppHandle, name: String, line: String) -> Result<(), String> {
+    let root = data_root_of(&app_handle)?;
+    maintenance::append_log(&root, &name, &line)
+}
+
 // ── MOBILE-04B2A2 — internal mobile-upload claim/handoff bridge ───────────────
 // INTERNAL Tauri commands ONLY — no HTTP route, no `mobile_page.rs` change, no legacy /sync/push
 // touch. The JS/WebView drain worker uses these to lease one `accepted` upload job, hand its
@@ -3643,6 +3670,9 @@ pub fn run() {
             media_stat_original,
             media_recover_ingests,
             media_ingest_journal_present,
+            maintenance_mode_set,
+            maintenance_mode_status,
+            maintenance_log_append,
             media_recompress_stored,
             // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
             // but activation is scope-gated: every wrapper's first act (after opening the config DB and
