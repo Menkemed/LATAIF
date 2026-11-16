@@ -74,6 +74,7 @@ const EINGEORDNET: Record<string, { beim: 'handlung' | 'maschine'; grund: string
   'components/shared/HistoryPanel.tsx:getAuditForEntity': { beim: 'handlung', grund: 'der Verlauf oeffnet erst auf Klick' },
   'pages/watches/WatchList.tsx:getStockAggregates': { beim: 'handlung', grund: 'Ausfuhr nach Excel' },
   'pages/watches/WatchList.tsx:resolvePrimaryImageForExport': { beim: 'handlung', grund: 'Ausfuhr nach Excel' },
+  'pages/agents/approval-excel.ts:resolvePrimaryImageForExport': { beim: 'handlung', grund: 'Approval-Druck: Produktbilder erst auf Klick „Print"' },
 };
 
 const dateien: string[] = [];

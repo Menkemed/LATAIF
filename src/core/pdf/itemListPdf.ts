@@ -31,7 +31,11 @@ export interface ItemListRow {
    *  als Eine-Zeile-Untertitel unter dem itemLabel. Wird gerendert als
    *  kleinere graue Zeile direkt darunter. */
   specsLine?: string;
-  refOrSerial?: string;           // SKU / Reference / Serial — kompakt in einer Zelle
+  /** Lieferumfang („Box · Papers · Warranty Card") — eigene Zeile unter den Merkmalen, nur wenn vorhanden. */
+  scopeLine?: string;
+  /** Kleines Produktbild als data:-URL (vorab aufgelöst, verkleinert); ohne → leere Bildzelle. Approval only. */
+  imageUrl?: string;
+  refOrSerial?: string;           // SKU / Reference / Model / Serial — je eine Zeile in einer Zelle
   ourPrice: number;               // Approval: agentPrice / Consignment: agreedPrice
   saleOrPayout?: number;          // Approval: actualSalePrice / Consignment: salePrice
   paid?: number;                  // Approval only
@@ -75,12 +79,13 @@ function filterLabel(f: ItemListFilter): string {
 
 /**
  * A4 hochkant: 190 mm bedruckbare Breite (Ränder 10 mm). Feste Spaltenbreiten, damit nichts über den Rand läuft;
- * „Item" bekommt den Rest und bricht um. Beträge 10 px Monospace passen bis „999,999.999" in 21 mm.
+ * „Item" bekommt den Rest (~38 mm) und bricht um. Beträge 10 px Monospace passen bis „999,999.999" in 20.5 mm.
+ * Das Bild steht klein (13 mm, proportional) in einer eigenen Spalte.
  */
 const APPROVAL_COLS: Array<{ h: string; w?: string; right?: boolean }> = [
-  { h: '#', w: '6mm' }, { h: 'Date', w: '16mm' }, { h: 'Item' }, { h: 'Ref / Serial', w: '24mm' },
-  { h: 'Our Price', w: '21mm', right: true }, { h: 'Status', w: '19mm' }, { h: 'Paid', w: '21mm', right: true },
-  { h: 'Outstanding', w: '21mm', right: true }, { h: 'Return By', w: '16mm' },
+  { h: '#', w: '5mm' }, { h: '', w: '15mm' }, { h: 'Date', w: '16mm' }, { h: 'Item' }, { h: 'Ref / Serial', w: '21mm' },
+  { h: 'Our Price', w: '20.5mm', right: true }, { h: 'Status', w: '17mm' }, { h: 'Paid', w: '20.5mm', right: true },
+  { h: 'Outstanding', w: '20.5mm', right: true }, { h: 'Return By', w: '16mm' },
 ];
 
 function renderApprovalTable(rows: ItemListRow[]): string {
@@ -100,11 +105,17 @@ function renderApprovalTable(rows: ItemListRow[]): string {
   // Zahl und Einheit bleiben zusammen („15.4 g", „41 mm", „0.50 ct").
   const keepUnits = (s: string) => escapeHtml(s).replace(/(\d) (?=(g|mm|ct)\b)/g, '$1&nbsp;');
   rows.forEach((r, i) => {
-    const itemCell = `<div style="color:#1a1a1a">${keepUnits(r.itemLabel || '—')}</div>${r.specsLine ? `<div style="color:#888;font-size:10px;margin-top:2px;line-height:1.3">${keepUnits(r.specsLine)}</div>` : ''}`;
-    // SKU, Referenz, Seriennummer je eine Zeile — nie mitten in der SKU umbrechen.
+    const itemCell = `<div style="color:#1a1a1a">${keepUnits(r.itemLabel || '—')}</div>${r.specsLine ? `<div style="color:#888;font-size:10px;margin-top:2px;line-height:1.3">${keepUnits(r.specsLine)}</div>` : ''}`
+      + (r.scopeLine ? `<div class="delivery" style="color:#1a1a1a;font-size:10px;margin-top:3px;line-height:1.3"><span style="color:#888">Includes:</span> ${escapeHtml(r.scopeLine)}</div>` : '');
+    // SKU, Referenz, Modellnummer, Seriennummer je eine Zeile — nie mitten in der SKU umbrechen.
     const refCell = r.refOrSerial ? r.refOrSerial.split(' · ').map(x => `<div>${escapeHtml(x)}</div>`).join('') : '—';
+    // Nur data:-Bilder (vorab aufgelöst und verkleinert) — nie eine fremde Adresse im Druck.
+    const img = r.imageUrl && r.imageUrl.startsWith('data:image/')
+      ? `<img class="thumb" src="${r.imageUrl.replace(/"/g, '')}" alt="" style="display:block;width:13mm;height:13mm;object-fit:contain">`
+      : '';
     html += `<tr>
       <td style="${cellBase};color:#999">${i + 1}</td>
+      <td style="${cellBase};padding:4px 2px">${img}</td>
       <td style="${cellBase};color:#555;font-size:10px;white-space:nowrap">${escapeHtml(r.date || '—')}</td>
       <td style="${cellBase};overflow-wrap:anywhere">${itemCell}</td>
       <td style="${cellBase};color:#555;font-family:monospace;font-size:9.5px;overflow-wrap:anywhere">${refCell}</td>
@@ -120,7 +131,7 @@ function renderApprovalTable(rows: ItemListRow[]): string {
   const anyMoney = rows.some(r => r.paid !== undefined);
   const tot = 'padding:6px 3px;font-size:11px;font-weight:600;border-top:1px solid #ccc;background:#fafafa';
   html += `<tr class="total">
-      <td colspan="4" style="${tot}">Total (${rows.length} item${rows.length === 1 ? '' : 's'})</td>
+      <td colspan="5" style="${tot}">Total (${rows.length} item${rows.length === 1 ? '' : 's'})</td>
       <td style="${tot};${num}">${fmtBhd(sum(r => r.ourPrice))}</td>
       <td style="${tot}"></td>
       <td style="${tot};${num}">${anyMoney ? fmtBhd(sum(r => r.paid)) : '—'}</td>
@@ -256,10 +267,15 @@ export function printItemListPdf(opts: ItemListPdfOptions): void {
     doc.write(html);
     doc.close();
 
+    // Erst drucken, wenn alle Bilder geladen sind (bei vielen Produktbildern reichten 300 ms nicht) — höchstens 8 s.
+    const pending = Array.from(doc.images).filter(img => !img.complete)
+      .map(img => new Promise<void>(res => { img.onload = () => res(); img.onerror = () => res(); }));
+    const ready = Promise.race([Promise.all(pending), new Promise<void>(res => setTimeout(res, 8000))]);
+
     // Focus + print: bei Tauri/WebView2 ist iframe.contentWindow.focus()
     // noetig damit der Print-Dialog die iframe-Inhalte druckt und nicht
     // die App-Outerframe. Identisch zu downloadPdf-Pattern.
-    setTimeout(() => {
+    void ready.then(() => setTimeout(() => {
       try {
         iframe.contentWindow?.focus();
         iframe.contentWindow?.print();
@@ -267,7 +283,7 @@ export function printItemListPdf(opts: ItemListPdfOptions): void {
         console.error('[itemListPdf] print failed:', err);
       }
       setTimeout(() => iframe.remove(), 2000);
-    }, 300);
+    }, 300));
   } catch (err) {
     console.error('[itemListPdf] fatal:', err);
     alert(`Print failed: ${err instanceof Error ? err.message : String(err)}`);

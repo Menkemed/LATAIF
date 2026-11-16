@@ -17,7 +17,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { Bhd } from '@/components/ui/Bhd';
 import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
-import { exportApprovalsToExcel } from './approval-excel';
+import { approvalPrintImageUrl, exportApprovalsToExcel } from './approval-excel';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 
 
@@ -210,7 +210,8 @@ export function AgentDetail() {
             invoices,
             products,
             categories,
-          });
+            resolveImageUrl: approvalPrintImageUrl,
+          }).catch((e) => { console.error('[Approval-Druck]', e); alert('Print failed: ' + (e instanceof Error ? e.message : String(e))); });
         }}
       />
 

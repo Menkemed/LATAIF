@@ -19,7 +19,7 @@ import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { PrintItemsFilterModal } from '@/components/print/PrintItemsFilterModal';
 import { runApprovalPrint } from '@/core/pdf/agent-print-helpers';
-import { exportApprovalsToExcel } from './approval-excel';
+import { approvalPrintImageUrl, exportApprovalsToExcel } from './approval-excel';
 import { productSearchText } from '@/core/utils/product-format';
 import type { ItemListFilter } from '@/core/pdf/itemListPdf';
 import { useAgentStore } from '@/stores/agentStore';
@@ -341,7 +341,8 @@ export function AgentList() {
             invoices,
             products,
             categories,
-          });
+            resolveImageUrl: approvalPrintImageUrl,
+          }).catch((e) => { console.error('[Approval-Druck]', e); alert('Print failed: ' + (e instanceof Error ? e.message : String(e))); });
         }}
       />
 

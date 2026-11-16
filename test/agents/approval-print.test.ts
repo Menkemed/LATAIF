@@ -27,7 +27,7 @@ registerHooks({
   },
 } as never);
 
-const { buildAgentPrintGroup } = await import('../../src/core/pdf/agent-print-helpers.ts');
+const { buildAgentPrintGroup, approvalRefLine, buildSpecsLine, scopeOfDeliveryLine } = await import('../../src/core/pdf/agent-print-helpers.ts');
 const { generateItemListHtml } = await import('../../src/core/pdf/itemListPdf.ts');
 const { buildApprovalWorkbookBuffer } = await import('../../src/core/agents/approval-workbook.ts');
 const ExcelJS = (await import('exceljs')).default;
@@ -99,12 +99,62 @@ for (const filter of ['all', 'sold', 'open', 'returned']) {
   check(/table-layout:fixed/.test(html), 'feste Spaltenbreiten (nichts läuft über den Rand)');
   const widths = [...html.matchAll(/<col style="width:(\d+(?:\.\d+)?)mm">/g)].map((m) => Number(m[1]));
   const fixed = widths.reduce((s, w) => s + w, 0);
-  check(widths.length === 8 && fixed <= 190 - 40, `feste Spalten ${fixed} mm + mindestens 40 mm für „Item" ≤ 190 mm bedruckbare Breite`);
-  check((html.match(/<tr class="total">/g) || []).length === 1 && /Total \(6 items\)[\s\S]*?3,900\.000[\s\S]*?1,400\.000[\s\S]*?990\.000/.test(html), 'Summenzeile unter den Beträgen');
+  check(widths.length === 9 && fixed <= 190 - 38, `feste Spalten ${fixed} mm (inkl. Bild) + mindestens 38 mm für „Item" ≤ 190 mm bedruckbare Breite`);
+  check((html.match(/<tr class="total">/g) || []).length === 1 && /colspan="5"[^>]*>Total \(6 items\)[\s\S]*?3,900\.000[\s\S]*?1,400\.000[\s\S]*?990\.000/.test(html), 'Summenzeile unter den Beträgen');
   check(/<div>SKU-P1<\/div><div>REF-P1<\/div>/.test(html), 'SKU und Referenz je eine Zeile (kein Umbruch mitten in der SKU)');
   const p1Row = html.split('<tr>').find((r) => r.includes('SKU-P1')) || '';
   check((p1Row.match(/color:#bbb">—/g) || []).length === 2 && !/1,000\.000<\/span>/.test(p1Row), 'offenes Stück: „—" statt Betrag unter Paid/Outstanding');
   check(/41&nbsp;mm|\d&nbsp;(g|mm|ct)/.test(generateItemListHtml({ kind: 'approval', filter: 'all', groups: [{ heading: 'X', rows: [{ date: '', itemLabel: 'Ring · 5.4 g', specsLine: '41 mm', ourPrice: 1, status: 'On Approval' }] }] })), 'Zahl und Einheit bleiben zusammen');
+}
+
+// ── Ref/Serial-Spalte, keine Dopplung in der Merkmalzeile, Lieferumfang ─────────────────────────────
+{
+  const a = (key: string, label: string, type = 'text', unit?: string) => ({ key, label, type, unit, required: false, showInList: true });
+  const cats = [
+    { id: 'w', name: 'Watch', attributes: [a('reference_number', 'Reference Number'), a('case_diameter_mm', 'Case Diameter', 'number', 'mm'), a('serial_number', 'Serial Number'), a('dial', 'Dial')] },
+    { id: 'acc', name: 'Accessory', attributes: [a('item_type', 'Item Type'), a('color', 'Color'), a('model_number', 'Model No'), a('serial_number', 'Serial No')] },
+    { id: 'g', name: 'Gold', attributes: [a('weight', 'Weight', 'number', 'g'), a('item_type', 'Item Type'), a('karat', 'Karat & Color'), a('description', 'Description')] },
+  ];
+  const watchP = { id: 'x1', sku: 'RLX-1', brand: 'Rolex', name: 'Datejust', categoryId: 'w', condition: 'Pre-Owned', scopeOfDelivery: ['Box', 'Papers', 'Warranty Card'], attributes: { reference_number: '126334', case_diameter_mm: 41, serial_number: 'E67041D8', dial: 'Blue' } };
+  const bagP = { id: 'x2', sku: 'HER-7', brand: 'Hermes', name: 'Kelly', categoryId: 'acc', condition: 'Pre-Owned', scopeOfDelivery: [], attributes: { item_type: 'Handbag', color: 'Pink', model_number: 'B3414871', serial_number: 'B1346114', papers: true } };
+  const ringP = { id: 'x3', sku: 'ITM-1', brand: '', name: '', categoryId: 'g', condition: 'Pre-Owned', scopeOfDelivery: [], attributes: { weight: 7.8, item_type: 'Ring', karat: '18K White', description: 'Red Stone' } };
+  check(approvalRefLine(watchP as never) === 'RLX-1 · 126334 · E67041D8', `Uhr: SKU · Referenz · Serie (${approvalRefLine(watchP as never)})`);
+  check(approvalRefLine(bagP as never) === 'HER-7 · B3414871 · B1346114', `Accessory: Model No steht in der Spalte (${approvalRefLine(bagP as never)})`);
+  check(buildSpecsLine(watchP as never, cats as never) === 'Pre-Owned · 41 mm · Blue', `Uhr: Referenz/Serie nicht noch einmal in der Merkmalzeile (${buildSpecsLine(watchP as never, cats as never)})`);
+  check(buildSpecsLine(bagP as never, cats as never) === 'Pre-Owned · Handbag · Pink', `Accessory: Model No/Serial nicht doppelt (${buildSpecsLine(bagP as never, cats as never)})`);
+  check(buildSpecsLine(ringP as never, cats as never) === 'Pre-Owned', `Schmuck ohne Marke: Art/Karat/Gewicht stehen schon im Namen (${buildSpecsLine(ringP as never, cats as never)})`);
+  const catsD = [...cats, { id: 'gd', name: 'Gold-Diamond', attributes: [a('diamond_weight', 'Diamond Weight', 'number', 'ct'), a('stones', 'Stones', 'stones'), a('item_type', 'Item Type')] }];
+  const solitaire = { id: 'x4', sku: 'ITM-2', brand: '', name: '', categoryId: 'gd', condition: 'Pre-Owned', scopeOfDelivery: [], attributes: { diamond_weight: 1.65, stones: [{ type: 'diamond', qty: 1, carat: 1.65 }], item_type: 'Ring' } };
+  const line = String(buildSpecsLine(solitaire as never, catsD as never));
+  check(/Diamond 1\.65 ct/.test(line) && !/^Pre-Owned · 1\.65 ct/.test(line), `Diamantgewicht nicht doppelt neben den Steinen (${line})`);
+  check(scopeOfDeliveryLine(watchP as never) === 'Box · Papers · Warranty Card', 'Lieferumfang aus Scope of Delivery');
+  check(scopeOfDeliveryLine(bagP as never) === 'Papers', 'älteres Ja/Nein-Merkmal „papers" zählt mit');
+  check(scopeOfDeliveryLine(ringP as never) === undefined, 'ohne Lieferumfang: keine Zeile');
+  const g = buildAgentPrintGroup({ agent: agent as never, transfers: [tr('S1', 'x1', 5000, 'transferred'), tr('S2', 'x3', 190, 'transferred')] as never, invoices: [] as never, products: [watchP, ringP] as never, categories: cats as never, filter: 'all' });
+  const html = generateItemListHtml({ kind: 'approval', filter: 'all', groups: [g] });
+  check((html.match(/class="delivery"/g) || []).length === 1 && /Includes:<\/span> Box · Papers · Warranty Card/.test(html), 'Druck: „Includes: Box · Papers · …" nur beim Stück mit Lieferumfang');
+
+  // Produktbilder: klein, proportional, nur data:-Bilder; ohne Bild bleibt die Zelle leer.
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const gi = buildAgentPrintGroup({ agent: agent as never, transfers: [tr('S1', 'x1', 5000, 'transferred'), tr('S2', 'x3', 190, 'transferred')] as never, invoices: [] as never,
+    products: [watchP, ringP] as never, categories: cats as never, filter: 'all', imageUrls: new Map([['x1', PNG], ['x3', 'https://example.com/x.jpg']]) });
+  const hi = generateItemListHtml({ kind: 'approval', filter: 'all', groups: [gi] });
+  const thumbs = hi.match(/<img class="thumb"[^>]*>/g) || [];
+  check(thumbs.length === 1 && /width:13mm;height:13mm;object-fit:contain/.test(thumbs[0]) && thumbs[0].includes(PNG), `Bild 13 mm, proportional (contain), nur data:-URL (${thumbs.length})`);
+  check(!hi.includes('example.com'), 'keine fremde Bildadresse im Druck');
+}
+
+// ── runApprovalPrint löst die Bilder genau der gedruckten Stücke auf ──────────────────────────────────
+{
+  // Ohne echtes DOM (der Druck selbst bricht still ab): geprüft wird, welche Bilder angefragt werden und dass ein
+  // Fehler beim Bild den Druck nicht abbricht.
+  const seen: string[] = [];
+  const { runApprovalPrint } = await import('../../src/core/pdf/agent-print-helpers.ts');
+  (globalThis as { document?: unknown }).document = { getElementById: () => null, createElement: () => ({ style: {} }), body: { appendChild: () => {} } };
+  await runApprovalPrint({ filter: 'open', scope: 'single', agents: [agent as never], transfers: transfers as never, invoices: invoices as never, products: products as never, categories: categories as never,
+    resolveImageUrl: async (p: { id: string }) => { seen.push(p.id); if (p.id === 'P1') throw new Error('kaputt'); return null; } }).catch(() => {});
+  check(JSON.stringify(seen) === JSON.stringify(['P1']), `Filter Open: nur das offene Stück wird nach einem Bild gefragt (${seen})`);
+  delete (globalThis as { document?: unknown }).document;
 }
 
 if (fail.length) { console.error('APPROVAL-PRINT: FAILURES:'); for (const f of fail) console.error('  ✗ ' + f); process.exit(1); }
