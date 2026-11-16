@@ -107,7 +107,12 @@ check(anchoredRows[0] === 1 && anchoredRows[1] === 2, `images anchored to the me
 
 // ── COLLECTIONS-EXPORT — Artikeldetails als Spalten, gruppierte Reihenfolge ─────────────────────────
 {
-  const { COLLECTION_BASE_HEADERS } = await import('../../src/core/media/collection-workbook.ts');
+  const { COLLECTION_BASE_HEADERS, canonicalDetailLabel } = await import('../../src/core/media/collection-workbook.ts');
+  const CANON: Array<[string, string]> = [['Serial No', 'Serial Number'], ['Serial No.', 'Serial Number'], ['Serial #', 'Serial Number'], ['serial  nr', 'serial Number'],
+    ['Model No', 'Model Number'], ['Ref No', 'Reference Number'], ['Ref.', 'Reference Number'], ['Reference', 'Reference Number'], ['Reference Number', 'Reference Number'],
+    ['Casino', 'Casino'], ['No', 'No'], ['Item Type', 'Item Type'], ['Piano', 'Piano']];
+  const canonBad = CANON.filter(([a, b]) => canonicalDetailLabel(a) !== b);
+  check(canonBad.length === 0, `Schreibweisen vereinheitlicht (No/Nr/# → Number, Ref → Reference), sonst unverändert (${JSON.stringify(canonBad.map(([a]) => [a, canonicalDetailLabel(a)]))})`);
   const headersOf = (sheet: typeof ws): string[] => { const h: string[] = []; sheet!.getRow(1).eachCell((cell) => { h.push(String(cell.value)); }); return h; };
   const BASE = ['Image', 'SKU', 'Brand', 'Name', 'Category', 'Condition',
     'Supplier', 'Purchase Source', 'Purchase Date', 'Paid From',
@@ -122,6 +127,7 @@ check(anchoredRows[0] === 1 && anchoredRows[1] === 2, `images anchored to the me
     { id: 'cat-watch', name: 'Watches', attributes: [
       attr('reference_number', 'Reference', 'text'), attr('serial_number', 'Serial Number', 'text'),
       attr('case_diameter_mm', 'Case Diameter', 'number', 'mm'), attr('material', 'Material', 'select'),
+      attr('model_number', 'Model Number', 'text'),                                   // im Schema hinten → wandert zu den Kennnummern
       attr('box', 'Box', 'boolean'), attr('notes', 'Notes', 'text'),                 // „Notes" = Grundspalte → keine zweite
     ] },
     { id: 'cat-gold-jewelry', name: 'Gold-Diamond Jewellery', attributes: [
@@ -129,7 +135,8 @@ check(anchoredRows[0] === 1 && anchoredRows[1] === 2, `images anchored to the me
       attr('karat', 'Karat', 'select'), attr('weight', 'Weight', 'number', 'g'), attr('stones', 'Stones', 'stones'),
       attr('size', 'Size', 'text'),                                                   // nirgends ausgefüllt → keine Spalte
     ] },
-    { id: 'cat-accessory', name: 'Accessories', attributes: [attr('color', 'Color', 'text'), attr('dimensions', 'Dimensions', 'text')] },
+    { id: 'cat-accessory', name: 'Accessories', attributes: [attr('color', 'Color', 'text'), attr('serial_no', 'Serial No', 'text'),   // andere Schreibweise → dieselbe Spalte
+      attr('serial_number', 'Serial Number', 'text'), attr('model_no', 'Model No.', 'text'), attr('dimensions', 'Dimensions', 'text')] },
     { id: 'cat-unused', name: 'Unused', attributes: [attr('xyz', 'Never Exported', 'text')] },   // kein Artikel → keine Spalte
   ];
   const art = (id: string, categoryId: string, attributes: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
@@ -137,9 +144,9 @@ check(anchoredRows[0] === 1 && anchoredRows[1] === 2, `images anchored to the me
     quantity: 1, purchasePrice: 100, plannedSalePrice: 150, stockStatus: 'in_stock', sourceType: 'OWN', taxScheme: 'MARGIN', ...extra,
   }) as never;
   const items2 = [
-    art('WATCH1', 'cat-watch', { reference_number: '126610LN', serial_number: 'S123', case_diameter_mm: 41, material: 'Steel', box: true, notes: 'attr-note' }, { notes: 'echte Notiz' }),
+    art('WATCH1', 'cat-watch', { reference_number: '126610LN', serial_number: 'S123', case_diameter_mm: 41, material: 'Steel', model_number: 'MN-1', box: true, notes: 'attr-note' }, { notes: 'echte Notiz' }),
     art('RING1', 'cat-gold-jewelry', { item_type: 'Ring', material: '18K Gold', karat: '18K', weight: '3.10', stones: [{ type: 'diamond', qty: 1, carat: 0.5 }], size: '' }),
-    art('BAG1', 'cat-accessory', { color: 'Black', reference_number: 'fremd' }),        // fremder Schlüssel → nicht in „Reference"
+    art('BAG1', 'cat-accessory', { color: 'Black', reference_number: 'fremd', serial_no: '', serial_number: 'SN-BAG', model_no: 'M-7' }),   // leeres „Serial No" → „Serial Number" derselben Kategorie        // fremder Schlüssel → nicht in „Reference"
     art('WATCH2', 'cat-watch', {}),                                                       // fehlende Felder → leere Zellen
   ];
   const buf2 = await buildCollectionWorkbookBuffer(items2, {
@@ -150,21 +157,23 @@ check(anchoredRows[0] === 1 && anchoredRows[1] === 2, `images anchored to the me
   const wb2 = new ExcelJS.Workbook(); await wb2.xlsx.load(buf2 as ArrayBuffer);
   const ws2 = wb2.getWorksheet('Collection');
   const h2 = headersOf(ws2);
-  const DETAILS = ['Reference', 'Serial Number', 'Case Diameter (mm)', 'Material', 'Box', 'Item Type', 'Karat', 'Weight (g)', 'Stones', 'Color'];
+  const DETAILS = ['Reference Number', 'Serial Number', 'Model Number', 'Case Diameter (mm)', 'Material', 'Box', 'Item Type', 'Karat', 'Weight (g)', 'Stones', 'Color'];
   check(JSON.stringify(h2) === JSON.stringify([...BASE.slice(0, 6), ...DETAILS, ...BASE.slice(6)]),
     `Reihenfolge: Grunddaten · Artikeldetails · Einkauf · Preise · Bestand · Weitere (${h2.join(' | ')})`);
-  check(new Set(h2).size === h2.length, 'keine doppelte Spalte (Material einmal, Notes einmal)');
+  check(new Set(h2).size === h2.length && !h2.includes('Serial No') && !h2.includes('Model No.'), 'keine doppelte Spalte (Material, Notes, Serial/Model je einmal)');
+  check(h2.indexOf('Serial Number') === h2.indexOf('Reference Number') + 1, 'Reference Number und Serial Number direkt nebeneinander');
   check(!h2.includes('Size') && !h2.includes('Dimensions') && !h2.includes('Never Exported'), 'keine vollständig leere Zusatzspalte');
   const rowOf = (name: string) => { let r: ExcelJS.Row | undefined; ws2!.eachRow((x) => { if (x.getCell(4).value === name) r = x; }); return r!; };
   const v = (name: string, header: string) => rowOf(name).getCell(h2.indexOf(header) + 1).value;
-  check(v('WATCH1', 'Reference') === '126610LN' && v('WATCH1', 'Serial Number') === 'S123' && v('WATCH1', 'Material') === 'Steel' && v('WATCH1', 'Box') === 'Yes', 'Uhr: Referenz, Seriennummer, Material, Box');
+  check(v('WATCH1', 'Reference Number') === '126610LN' && v('WATCH1', 'Serial Number') === 'S123' && v('WATCH1', 'Model Number') === 'MN-1' && v('WATCH1', 'Material') === 'Steel' && v('WATCH1', 'Box') === 'Yes', 'Uhr: Referenz, Seriennummer, Modell, Material, Box');
+  check(v('BAG1', 'Serial Number') === 'SN-BAG' && v('BAG1', 'Model Number') === 'M-7', `Accessory: „Serial No"/„Model No." in den gemeinsamen Spalten (${v('BAG1', 'Serial Number')} / ${v('BAG1', 'Model Number')})`);
   check(v('WATCH1', 'Case Diameter (mm)') === 41 && typeof v('WATCH1', 'Case Diameter (mm)') === 'number', 'Uhr: Durchmesser als Excel-Zahl, Einheit im Kopf');
   check(v('RING1', 'Weight (g)') === 3.1 && typeof v('RING1', 'Weight (g)') === 'number', 'Schmuck: Gewicht als Zahl (auch aus Text „3.10")');
   check(v('RING1', 'Material') === '18K Gold' && v('RING1', 'Karat') === '18K' && v('RING1', 'Item Type') === 'Ring', 'Schmuck: Material in derselben Spalte wie bei der Uhr');
   check(/Diamond 0\.50 ct/.test(String(v('RING1', 'Stones'))), `Schmuck: Steine als Kurzform (${v('RING1', 'Stones')})`);
-  check(v('RING1', 'Reference') === null || v('RING1', 'Reference') === '', 'Schmuck: Uhren-Feld bleibt leer (nicht zutreffend)');
-  check(v('BAG1', 'Color') === 'Black' && (v('BAG1', 'Reference') === null || v('BAG1', 'Reference') === ''), 'Accessory: Farbe; fremder Schlüssel ohne Definition wird nicht exportiert');
-  check(['Reference', 'Serial Number', 'Case Diameter (mm)', 'Material', 'Box'].every((x) => v('WATCH2', x) === null || v('WATCH2', x) === ''), 'fehlende Felder: leere Zellen');
+  check(v('RING1', 'Reference Number') === null || v('RING1', 'Reference Number') === '', 'Schmuck: Uhren-Feld bleibt leer (nicht zutreffend)');
+  check(v('BAG1', 'Color') === 'Black' && (v('BAG1', 'Reference Number') === null || v('BAG1', 'Reference Number') === ''), 'Accessory: Farbe; fremder Schlüssel ohne Definition wird nicht exportiert');
+  check(['Reference Number', 'Serial Number', 'Model Number', 'Case Diameter (mm)', 'Material', 'Box'].every((x) => v('WATCH2', x) === null || v('WATCH2', x) === ''), 'fehlende Felder: leere Zellen');
   check(v('WATCH1', 'Notes') === 'echte Notiz', 'Notes ist die Artikelnotiz, nicht ein gleichnamiges Merkmal');
   check(typeof v('WATCH1', 'Purchase Price (BHD)') === 'number' && typeof v('WATCH1', 'Quantity') === 'number' && typeof v('WATCH1', 'Planned Sale Price (BHD)') === 'number', 'Preise und Menge bleiben Excel-Zahlen');
   check(ws2!.getColumn(h2.indexOf('Purchase Price (BHD)') + 1).numFmt === '#,##0.000', 'BHD-Format der Preisspalten erhalten');

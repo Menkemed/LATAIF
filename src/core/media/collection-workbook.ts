@@ -95,12 +95,33 @@ export interface DetailColumn {
   key: string;
   header: string;
   type: CategoryAttribute['type'];
-  /** Je Kategorie: welcher Attribut-Schlüssel dieser Kategorie in diese Spalte gehört. */
-  byCategory: Map<string, string>;
+  /** Je Kategorie: welche Merkmale dieser Kategorie in diese Spalte gehören (erstes ausgefülltes zählt). */
+  byCategory: Map<string, Array<{ key: string; type: CategoryAttribute['type'] }>>;
 }
 
 const norm = (s: string): string => s.trim().replace(/\s+/g, ' ').toLowerCase();
-const headerOf = (a: CategoryAttribute): string => (a.unit ? `${a.label.trim()} (${a.unit})` : a.label.trim());
+/**
+ * Gleiche Bedeutung, andere Schreibweise je Kategorie → eine Spalte:
+ * „Serial No" / „Serial No." / „Serial #" = „Serial Number", „Model No" = „Model Number",
+ * „Ref No" / „Reference" = „Reference Number".
+ */
+export function canonicalDetailLabel(label: string): string {
+  let s = label.trim().replace(/\s+/g, ' ');
+  s = s.replace(/(?:\s+(?:no|nr)\.?|\s*#)$/i, ' Number');
+  s = s.replace(/^ref\.?(?=\s|$)/i, 'Reference');
+  if (/^reference$/i.test(s)) s = 'Reference Number';
+  return s;
+}
+const headerOf = (a: CategoryAttribute): string => {
+  const label = canonicalDetailLabel(a.label);
+  return a.unit ? `${label} (${a.unit})` : label;
+};
+/** Kennnummern stehen vorn und direkt nebeneinander; alle übrigen Merkmale danach in Schema-Reihenfolge. */
+const IDENT_ORDER = ['reference number', 'serial number', 'model number'];
+const identRank = (header: string): number => {
+  const i = IDENT_ORDER.indexOf(norm(header));
+  return i < 0 ? IDENT_ORDER.length : i;
+};
 /** Bezeichnungen der Grundspalten ohne „(BHD)" — ein gleichnamiges Merkmal bekommt keine zweite Spalte. */
 const BASE_LABELS = new Set(COLLECTION_BASE_HEADERS.map((h) => norm(h.replace(/\s*\(BHD\)\s*$/, ''))));
 
@@ -129,9 +150,19 @@ function attributesOf(p: Product): Record<string, unknown> {
   return attributesForDisplay(p.categoryId, a as Record<string, unknown>) as Record<string, unknown>;
 }
 
+/** Der Wert eines Artikels in einer Detailspalte: das erste ausgefüllte passende Merkmal seiner Kategorie, sonst ''. */
+function detailValueFor(col: DetailColumn, p: Product, attrs: Record<string, unknown> | undefined): string | number {
+  for (const m of col.byCategory.get(p.categoryId) ?? []) {
+    const v = detailCellValue(m.type, attrs?.[m.key]);
+    if (v !== '') return v;
+  }
+  return '';
+}
+
 /**
- * Die Detailspalten für genau diese Artikel: aus den Definitionen ihrer Kategorien, in Schema-Reihenfolge,
- * gleiche Bezeichnung (inkl. Einheit) = eine Spalte, Grundspalten-Namen ausgenommen, und nur Spalten, in denen
+ * Die Detailspalten für genau diese Artikel: aus den Definitionen ihrer Kategorien; Kennnummern (Reference,
+ * Serial, Model) vorn nebeneinander, danach Schema-Reihenfolge. Gleiche Bezeichnung (inkl. Einheit, nach
+ * Vereinheitlichung „No" = „Number") = eine Spalte, Grundspalten-Namen ausgenommen, und nur Spalten, in denen
  * mindestens ein exportierter Artikel einen Wert hat.
  */
 export function collectionDetailColumns(items: readonly Product[], categories: readonly Category[] | undefined): DetailColumn[] {
@@ -152,14 +183,15 @@ export function collectionDetailColumns(items: readonly Product[], categories: r
         byHeader.set(id, col);
         cols.push(col);
       }
-      if (!col.byCategory.has(cat.id)) col.byCategory.set(cat.id, a.key);
+      const list = col.byCategory.get(cat.id) ?? [];
+      if (!list.some((m) => m.key === a.key)) list.push({ key: a.key, type: a.type });
+      col.byCategory.set(cat.id, list);
     }
   }
   const attrs = new Map(items.map((p) => [p.id, attributesOf(p)]));
-  return cols.filter((c) => items.some((p) => {
-    const k = c.byCategory.get(p.categoryId);
-    return k !== undefined && detailCellValue(c.type, attrs.get(p.id)?.[k]) !== '';
-  }));
+  return cols
+    .filter((c) => items.some((p) => detailValueFor(c, p, attrs.get(p.id)) !== ''))
+    .sort((x, y) => identRank(x.header) - identRank(y.header));   // stabil: Rest bleibt in Schema-Reihenfolge
 }
 
 /** Build the Collection workbook and return its .xlsx bytes. Never throws for a
@@ -208,10 +240,7 @@ export async function buildCollectionWorkbookBuffer(
     const fmt3 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
     const attrs = details.length ? attributesOf(p) : {};
     const detailValues: Record<string, string | number> = {};
-    for (const d of details) {
-      const k = d.byCategory.get(p.categoryId);
-      detailValues[d.key] = k === undefined ? '' : detailCellValue(d.type, attrs[k]);
-    }
+    for (const d of details) detailValues[d.key] = detailValueFor(d, p, attrs);
     const row = ws.addRow({
       image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
       sku:      p.sku || '',
