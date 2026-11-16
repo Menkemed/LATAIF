@@ -16,6 +16,10 @@
 // in Schema-Reihenfolge, gleiche Bezeichnung = eine Spalte, nur Spalten mit mindestens einem Wert.
 // Ein Wert erscheint nur, wenn die eigene Kategorie des Artikels das Feld kennt; sonst bleibt die Zelle
 // leer. Zahlen bleiben Excel-Zahlen (Einheit im Kopf). Nur lesend.
+//
+// Aufbau der Mappe: je Kategorie ein eigenes Blatt (Reihenfolge wie die Kategorien, nur die Detailspalten
+// dieser Kategorie, eigene Summenzeile), am Ende das Blatt „Total" mit einer Zeile je Kategorie und der
+// Gesamtsumme — dieselbe Regel wie die Summenzeilen (eigene Ware, auf Lager).
 // ════════════════════════════════════════════════════════════════════════════
 
 import ExcelJS from 'exceljs';
@@ -100,16 +104,19 @@ export interface DetailColumn {
 }
 
 const norm = (s: string): string => s.trim().replace(/\s+/g, ' ').toLowerCase();
+/** Die gemeinsame Spalte für Referenz- und Modellnummer (Uhren: „Reference Number", Schmuck/Accessory: „Model No"). */
+export const REF_MODEL_HEADER = 'Reference / Model No';
 /**
  * Gleiche Bedeutung, andere Schreibweise je Kategorie → eine Spalte:
- * „Serial No" / „Serial No." / „Serial #" = „Serial Number", „Model No" = „Model Number",
- * „Ref No" / „Reference" = „Reference Number".
+ * „Serial No" / „Serial No." / „Serial #" = „Serial Number";
+ * „Reference Number" / „Ref No" / „Reference" / „Model Number" / „Model No" = „Reference / Model No".
+ * Ein bloßes „Model" (Modellname) bleibt eine eigene Spalte.
  */
 export function canonicalDetailLabel(label: string): string {
   let s = label.trim().replace(/\s+/g, ' ');
   s = s.replace(/(?:\s+(?:no|nr)\.?|\s*#)$/i, ' Number');
   s = s.replace(/^ref\.?(?=\s|$)/i, 'Reference');
-  if (/^reference$/i.test(s)) s = 'Reference Number';
+  if (/^(?:reference|reference number|model number)$/i.test(s)) return REF_MODEL_HEADER;
   return s;
 }
 const headerOf = (a: CategoryAttribute): string => {
@@ -117,7 +124,7 @@ const headerOf = (a: CategoryAttribute): string => {
   return a.unit ? `${label} (${a.unit})` : label;
 };
 /** Kennnummern stehen vorn und direkt nebeneinander; alle übrigen Merkmale danach in Schema-Reihenfolge. */
-const IDENT_ORDER = ['reference number', 'serial number', 'model number'];
+const IDENT_ORDER = [norm(REF_MODEL_HEADER), 'serial number'];
 const identRank = (header: string): number => {
   const i = IDENT_ORDER.indexOf(norm(header));
   return i < 0 ? IDENT_ORDER.length : i;
@@ -150,13 +157,19 @@ function attributesOf(p: Product): Record<string, unknown> {
   return attributesForDisplay(p.categoryId, a as Record<string, unknown>) as Record<string, unknown>;
 }
 
-/** Der Wert eines Artikels in einer Detailspalte: das erste ausgefüllte passende Merkmal seiner Kategorie, sonst ''. */
+/**
+ * Der Wert eines Artikels in einer Detailspalte: das ausgefüllte passende Merkmal seiner Kategorie, sonst ''.
+ * Hat eine Kategorie zwei Merkmale für dieselbe Spalte (z. B. Referenz UND Modellnummer) mit verschiedenen
+ * Werten, stehen beide da („A / B") — es geht nichts verloren.
+ */
 function detailValueFor(col: DetailColumn, p: Product, attrs: Record<string, unknown> | undefined): string | number {
+  const vals: Array<string | number> = [];
   for (const m of col.byCategory.get(p.categoryId) ?? []) {
     const v = detailCellValue(m.type, attrs?.[m.key]);
-    if (v !== '') return v;
+    if (v !== '' && !vals.some((x) => String(x) === String(v))) vals.push(v);
   }
-  return '';
+  if (vals.length === 0) return '';
+  return vals.length === 1 ? vals[0] : vals.map(String).join(' / ');
 }
 
 /**
@@ -194,18 +207,144 @@ export function collectionDetailColumns(items: readonly Product[], categories: r
     .sort((x, y) => identRank(x.header) - identRank(y.header));   // stabil: Rest bleibt in Schema-Reihenfolge
 }
 
+/** Summen eines Blatts — dieselbe Regel für die Summenzeile des Blatts und das Blatt „Total". */
+export interface SheetTotals {
+  items: number;
+  inStock: number;
+  sold: number;
+  other: number;
+  /** Stück eigener Ware auf Lager. */
+  pieces: number;
+  /** Einkaufswert eigener Ware auf Lager (aus den Lots, sonst Preis × Stück). */
+  stockValue: number;
+  /** Geplanter Verkaufswert eigener Ware auf Lager. */
+  plannedSale: number;
+}
+
+const isInStock = (p: Product): boolean => p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK';
+const isSold = (p: Product): boolean => p.stockStatus === 'sold' || p.stockStatus === 'SOLD';
+
+export function sheetTotals(items: readonly Product[], lotAgg: Map<string, LotAggregate>): SheetTotals {
+  const ownInStock = items.filter((p) => isInStock(p) && p.sourceType === 'OWN');
+  let pieces = 0, stockValue = 0;
+  for (const p of ownInStock) {
+    const a = lotAgg.get(p.id);
+    if (a) { pieces += a.totalQty; stockValue += a.totalValue; }
+    else   { pieces += pieceCount(p.quantity); stockValue += p.purchasePrice * pieceCount(p.quantity); }
+  }
+  const plannedSale = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * pieceCount(p.quantity), 0);
+  const inStock = items.filter(isInStock).length;
+  const sold = items.filter(isSold).length;
+  return { items: items.length, inStock, sold, other: items.length - inStock - sold, pieces, stockValue, plannedSale };
+}
+
+/** Die Detailwerte eines Artikels für genau diese Spalten (Schlüssel = Spaltenschlüssel). */
+export function detailRowValues(details: readonly DetailColumn[], p: Product): Record<string, string | number> {
+  const attrs = details.length ? attributesOf(p) : {};
+  const out: Record<string, string | number> = {};
+  for (const d of details) out[d.key] = detailValueFor(d, p, attrs);
+  return out;
+}
+
+/** Excel-taugliche, eindeutige Blattnamen: ohne \ / ? * [ ] :, höchstens 31 Zeichen. */
+export function uniqueSheetName(raw: string, used: Set<string>): string {
+  const base = (raw.replace(/[\\/?*[\]:]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '') || 'Other').slice(0, 31).trim();
+  let name = base;
+  for (let n = 2; used.has(name.toLowerCase()); n++) {
+    const suffix = ` (${n})`;
+    name = base.slice(0, 31 - suffix.length).trim() + suffix;
+  }
+  used.add(name.toLowerCase());
+  return name;
+}
+
+export const styleHeaderRow = (row: ExcelJS.Row): void => {
+  row.font = { bold: true, size: 11, color: { argb: 'FF0F0F10' } };
+  row.alignment = { vertical: 'middle', horizontal: 'left' };
+  row.height = 22;
+  row.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F7FA' } };
+    cell.border = { bottom: { style: 'thin', color: { argb: 'FFC6A36D' } } };
+  });
+};
+export const styleTotalRow = (row: ExcelJS.Row): void => {
+  row.height = 22;
+  row.eachCell((cell) => {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F0F10' } };
+    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  });
+};
+
 /** Build the Collection workbook and return its .xlsx bytes. Never throws for a
- *  single unreadable image — that row just omits its picture. */
+ *  single unreadable image — that row just omits its picture.
+ *  Je Kategorie ein Blatt, am Ende das Blatt „Total". */
 export async function buildCollectionWorkbookBuffer(
   items: Product[],
   deps: CollectionWorkbookDeps,
 ): Promise<ArrayBuffer> {
-  const { lotAgg, categoryName, resolveImage, scope } = deps;
+  const { categoryName } = deps;
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'LATAIF';
   wb.created = new Date();
-  const ws = wb.addWorksheet('Collection');
+
+  // Artikel nach Kategorie, in der Reihenfolge der Kategorie-Definitionen; Unbekannte danach nach Name.
+  const groups = new Map<string, Product[]>();
+  for (const p of items) {
+    const g = groups.get(p.categoryId);
+    if (g) g.push(p); else groups.set(p.categoryId, [p]);
+  }
+  const order = (deps.categories ?? []).map((c) => c.id);
+  const rank = (id: string): number => { const i = order.indexOf(id); return i < 0 ? order.length : i; };
+  const ids = [...groups.keys()].sort((a, b) => rank(a) - rank(b) || categoryName(a).localeCompare(categoryName(b)));
+
+  const used = new Set<string>(['total']);   // „Total" ist für das Summenblatt reserviert
+  const summary: Array<{ label: string; sheet: string; totals: SheetTotals }> = [];
+  if (ids.length === 0) {
+    await addCategorySheet(wb, uniqueSheetName('Collection', used), [], deps);
+  }
+  for (const id of ids) {
+    const label = categoryName(id) || 'Other';
+    const sheet = uniqueSheetName(label, used);
+    const totals = await addCategorySheet(wb, sheet, groups.get(id)!, deps);
+    summary.push({ label, sheet, totals });
+  }
+  addTotalSheet(wb, summary);
+
+  return wb.xlsx.writeBuffer();
+}
+
+/** Das Summenblatt am Ende: eine Zeile je Kategorie (mit Sprung zum Blatt) und die Gesamtsumme. */
+function addTotalSheet(wb: ExcelJS.Workbook, summary: Array<{ label: string; sheet: string; totals: SheetTotals }>): void {
+  const ws = wb.addWorksheet('Total');
+  ws.columns = [
+    { header: 'Category',                 key: 'cat',         width: 28 },
+    { header: 'Items',                    key: 'items',       width: 10, style: { numFmt: COUNT } },
+    { header: 'In Stock',                 key: 'inStock',     width: 10, style: { numFmt: COUNT } },
+    { header: 'Sold',                     key: 'sold',        width: 10, style: { numFmt: COUNT } },
+    { header: 'Other Status',             key: 'other',       width: 13, style: { numFmt: COUNT } },
+    { header: 'Pieces in Stock',          key: 'pieces',      width: 15, style: { numFmt: COUNT } },
+    { header: 'Stock Value (BHD)',        key: 'stockValue',  width: 18, style: { numFmt: MONEY } },
+    { header: 'Planned Sale Value (BHD)', key: 'plannedSale', width: 24, style: { numFmt: MONEY } },
+  ];
+  styleHeaderRow(ws.getRow(1));
+  const sum: SheetTotals = { items: 0, inStock: 0, sold: 0, other: 0, pieces: 0, stockValue: 0, plannedSale: 0 };
+  for (const s of summary) {
+    const row = ws.addRow({ ...s.totals, cat: { text: s.label, hyperlink: `#'${s.sheet.replace(/'/g, "''")}'!A1` } });
+    row.getCell('cat').font = { color: { argb: 'FF1F4E79' }, underline: true };
+    for (const k of Object.keys(sum) as Array<keyof SheetTotals>) sum[k] += s.totals[k];
+  }
+  styleTotalRow(ws.addRow({ cat: 'TOTAL', ...sum }));
+  ws.addRow({});
+  const note = ws.addRow({ cat: 'Pieces in Stock, Stock Value and Planned Sale Value: own goods in stock only — same rule as the TOTAL row on each sheet.' });
+  note.getCell('cat').font = { italic: true, color: { argb: 'FF6B6B6B' } };
+  ws.views = [{ state: 'frozen', ySplit: 1 }];
+}
+
+/** Ein Kategorie-Blatt: Grundspalten + die Detailspalten genau dieser Artikel, Bilder, Summenzeile. */
+async function addCategorySheet(wb: ExcelJS.Workbook, sheetName: string, items: readonly Product[], deps: CollectionWorkbookDeps): Promise<SheetTotals> {
+  const { lotAgg, categoryName, resolveImage, scope } = deps;
+  const ws = wb.addWorksheet(sheetName);
 
   const details = collectionDetailColumns(items, deps.categories);
   const asCol = (c: BaseColumn): Partial<ExcelJS.Column> => ({ header: c.header, key: c.key, width: c.width, ...(c.numFmt ? { style: { numFmt: c.numFmt } } : {}) });
@@ -219,13 +358,7 @@ export async function buildCollectionWorkbookBuffer(
 
   // Header-Row Styling.
   const header = ws.getRow(1);
-  header.font = { bold: true, size: 11, color: { argb: 'FF0F0F10' } };
-  header.alignment = { vertical: 'middle', horizontal: 'left' };
-  header.height = 22;
-  header.eachCell(cell => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F7FA' } };
-    cell.border = { bottom: { style: 'thin', color: { argb: 'FFC6A36D' } } };
-  });
+  styleHeaderRow(header);
   // Gruppengrenzen: eine feine Linie links am ersten Kopf jeder Gruppe (Details, Einkauf, Preise, Bestand, Weitere).
   const gruppenStart = [details[0]?.key, EINKAUF[0].key, PREISE[0].key, BESTAND[0].key, WEITERE[0].key].filter(Boolean) as string[];
   for (const k of gruppenStart) {
@@ -238,9 +371,7 @@ export async function buildCollectionWorkbookBuffer(
     const p = items[i];
     const a = lotAgg.get(p.id);
     const fmt3 = (n: number) => n.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    const attrs = details.length ? attributesOf(p) : {};
-    const detailValues: Record<string, string | number> = {};
-    for (const d of details) detailValues[d.key] = detailValueFor(d, p, attrs);
+    const detailValues = detailRowValues(details, p);
     const row = ws.addRow({
       image:    '', // Platzhalter — Bild wird via addImage über die Zelle gelegt.
       sku:      p.sku || '',
@@ -294,29 +425,13 @@ export async function buildCollectionWorkbookBuffer(
   }
 
   // Totals-Row (nur OWN, in_stock). Stock Value kommt aus stock_lots wenn vorhanden.
-  const ownInStock = items.filter(p =>
-    (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
-  );
-  let totalQty = 0, totalEK = 0;
-  for (const p of ownInStock) {
-    const a = lotAgg.get(p.id);
-    if (a) { totalQty += a.totalQty; totalEK += a.totalValue; }
-    else   { totalQty += pieceCount(p.quantity); totalEK += p.purchasePrice * pieceCount(p.quantity); }
-  }
-  const totalVK = ownInStock.reduce((s, p) => s + (p.plannedSalePrice || 0) * pieceCount(p.quantity), 0);
-
-  const totalRow = ws.addRow({
+  const totals = sheetTotals(items, lotAgg);
+  styleTotalRow(ws.addRow({
     image: '', sku: '', brand: '', name: 'TOTAL (OWN · In Stock)', category: '',
-    qty: totalQty, cond: '', pp: '', ppRange: '', stockVal: totalEK, lots: '', spp: totalVK,
-  });
-  totalRow.height = 22;
-  totalRow.eachCell(cell => {
-    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F0F10' } };
-    cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-  });
+    qty: totals.pieces, cond: '', pp: '', ppRange: '', stockVal: totals.stockValue, lots: '', spp: totals.plannedSale,
+  }));
 
   // Kopfzeile fixieren beim Scrollen.
   ws.views = [{ state: 'frozen', ySplit: 1 }];
-
-  return wb.xlsx.writeBuffer();
+  return totals;
 }

@@ -639,6 +639,15 @@ export function loadCategoriesFor(ctx: BusinessReadContext): { categorySchema: C
   return { categorySchema: schema, categories: active };
 }
 
+/**
+ * Die Kategorie-Definitionen für Exporte (Collections-, Approval-Excel): ALLE bekannten, auch deaktivierte — so wie
+ * die App einen bestehenden Artikel auslegt. Nie als Auswahl verwenden; ohne geladenes Schema die aktive Liste.
+ */
+export function categoryDefinitionsForExport(): Category[] {
+  const { categorySchema, categories } = useProductStore.getState();
+  return categorySchema.length > 0 ? categorySchema : categories;
+}
+
 function rowToProduct(row: Record<string, unknown>): Product {
   return {
     id: row.id as string,

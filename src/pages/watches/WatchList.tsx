@@ -17,7 +17,7 @@ import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/Dupl
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { buildBatchTagsZpl, tagProblem } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
-import { useProductStore } from '@/stores/productStore';
+import { useProductStore, categoryDefinitionsForExport } from '@/stores/productStore';
 import { validateProductFields, blockingIssues, editableAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
@@ -87,13 +87,12 @@ async function exportProductsToExcel(items: Product[], categories: Category[]) {
 
   // Die Artikeldetails werden mit ALLEN bekannten Kategorie-Definitionen ausgelegt (auch deaktivierte) — wie die App
   // einen bestehenden Artikel liest; ohne Schema die aktive Auswahl.
-  const schema = useProductStore.getState().categorySchema;
   const buffer = await buildCollectionWorkbookBuffer(items, {
     lotAgg,
     categoryName: cat,
     resolveImage: resolvePrimaryImageForExport,
     scope: mediaScope,
-    categories: schema.length > 0 ? schema : categories,
+    categories: categoryDefinitionsForExport(),
   });
   await exportFile(
     `LATAIF_Collection_${today}.xlsx`,
