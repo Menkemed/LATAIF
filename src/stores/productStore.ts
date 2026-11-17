@@ -101,6 +101,44 @@ export interface MobileUploadReceiptIntent {
 // `products.image_embedding` column (no schema change).
 const retryCreateManifests = new Map<string, { images: string[] }>();
 const embeddingInFlight = new Set<string>();
+
+// ── EMBEDDING-BACKFILL (Weg A) — gemeinsame Bausteine für jeden Weg, der ein fehlendes Embedding nachrechnet ──
+// (Einstellungen „Backfill Embeddings", Lazy-Backfill beim Laden). Vorher speicherte der Einstellungs-Knopf über
+// `updateProduct`, dessen Feldliste `imageEmbedding` nicht kennt: der Vektor wurde berechnet und protokolliert,
+// aber nie gespeichert — jeder weitere Lauf rief die KI für dieselben Artikel erneut auf.
+
+/** Fehlt dem Artikel JETZT (frisch aus der DB, nicht aus einer alten Liste) noch das Embedding? */
+export function productEmbeddingMissing(productId: string): boolean {
+  const r = query('SELECT image_embedding FROM products WHERE id = ?', [productId])[0];
+  if (!r) return false;                                   // Artikel weg → nichts zu tun
+  const v = r.image_embedding;
+  return v == null || String(v).length === 0 || String(v) === '[]';
+}
+
+/** In dieser Sitzung genau EIN Rechenweg je Artikel (dieselbe Menge wie Anlegen/Wiederherstellen). */
+export function claimEmbeddingCompute(productId: string): boolean {
+  if (embeddingInFlight.has(productId)) return false;
+  embeddingInFlight.add(productId);
+  return true;
+}
+export function releaseEmbeddingCompute(productId: string): void {
+  embeddingInFlight.delete(productId);
+}
+
+/**
+ * Ein berechnetes Embedding dauerhaft speichern — nur, wenn es noch fehlt (ein anderer Weg kann es inzwischen
+ * gespeichert haben; dann bleibt dessen Wert und es entsteht kein zweiter Eintrag). Changelog und Audit tragen
+ * dabei keinen Vektor (SYNC-SLIM). true = gespeichert.
+ */
+export function persistProductEmbedding(productId: string, description: string, embedding: number[]): boolean {
+  if (!Array.isArray(embedding) || embedding.length === 0) return false;
+  if (!productEmbeddingMissing(productId)) return false;
+  getDatabase().run('UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
+    [description, JSON.stringify(embedding), productId]);
+  saveDatabase();
+  trackUpdate('products', productId, { imageDescription: description, imageEmbedding: embedding });
+  return true;
+}
 // MEDIA-04A-3B2C2 — retain the frozen edit batch id per product so a retry
 // reuses the SAME durable batch (no duplicate links/changelog/audit).
 const retryEditBatches = new Map<string, string>();
@@ -729,16 +767,16 @@ function backfillEmbeddings(products: Product[]): void {
       return;
     }
     const p = todo[i++];
+    // EMBEDDING-BACKFILL — frisch prüfen und den Artikel für diese Sitzung belegen: hat ein anderer Weg
+    // (Einstellungs-Knopf, Anlegen, Wiederherstellen) ihn inzwischen gerechnet oder rechnet ihn gerade, kein KI-Aufruf.
+    if (!productEmbeddingMissing(p.id) || !claimEmbeddingCompute(p.id)) { setTimeout(processNext, 0); return; }
     try {
       const { description, embedding } = await computeImageEmbedding(p.images[0]);
       try {
-        getDatabase().run(
-          'UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?',
-          [description, JSON.stringify(embedding), p.id],
-        );
-        trackUpdate('products', p.id, { imageDescription: description, imageEmbedding: embedding });
-        p.imageDescription = description;
-        p.imageEmbedding = embedding;
+        if (persistProductEmbedding(p.id, description, embedding)) {
+          p.imageDescription = description;
+          p.imageEmbedding = embedding;
+        }
       } catch (err) { console.warn('[embedding-backfill] persist failed:', err); }
     } catch (err) {
       console.warn('[embedding-backfill] compute failed for', p.id, err);
@@ -749,6 +787,8 @@ function backfillEmbeddings(products: Product[]): void {
         embeddingBackfillRunning = false;
         return;
       }
+    } finally {
+      releaseEmbeddingCompute(p.id);
     }
     // 1s Pause zwischen API-Calls.
     setTimeout(processNext, 1000);

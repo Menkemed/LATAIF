@@ -12,6 +12,7 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
 import { applySyncChange, assertSyncIdentifier, SyncPoisonError } from './apply-change';
+import { changelogPayload } from './changelog-payload';
 import { prepareRecordImages, syncMediaGovernance, SYNC_RECORD_IMAGE_REJECTED } from './pulled-record-images';
 import { planPush, pushBody } from './push-batch';
 // M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
@@ -203,10 +204,11 @@ export function trackChange(tableName: string, recordId: string, action: 'insert
       } catch { /* Tabelle ohne id-Spalte → Fallback auf Caller-data */ }
     }
 
+    // SYNC-SLIM (Weg A) — entbehrliche Spalten (Artikel: der KI-Vektor) nicht in jeden Eintrag kopieren.
     db.run(
       `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
        VALUES (?, ?, ?, ?, ?, 0, ?)`,
-      [tableName, recordId, branchId, action, JSON.stringify(syncData), now]
+      [tableName, recordId, branchId, action, JSON.stringify(changelogPayload(tableName, syncData)), now]
     );
     saveDatabase();
   } catch (err) {

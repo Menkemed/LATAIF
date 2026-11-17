@@ -87,6 +87,50 @@ export function isInlineDataUrl(v: unknown): boolean {
   return !!m && !!m[2];
 }
 
+// ── SYNC-SLIM (Weg A) — AI embedding vectors ──────────────────────────────────────
+// `imageEmbedding` is machine-derived (≈ 1536 floats, ~30 KB of JSON). The audit must show THAT it
+// was set or changed, when and by whom — not the floats. Same rule as the image descriptor above:
+// a stable, compact DESCRIPTOR with the dimension and a 64-bit identity digest over the canonical
+// JSON text of the vector. Equal vector → equal digest; changed vector → different digest.
+// New writes only; existing rows are never rewritten.
+
+/** Marker so a reader (and a test) can recognise a substituted embedding unambiguously. */
+export const AUDIT_EMBEDDING_MARKER = '__audit_embedding__';
+
+export interface AuditEmbeddingDescriptor {
+  [AUDIT_EMBEDDING_MARKER]: 'vector';
+  /** number of dimensions */
+  dims: number;
+  /** 64-bit identity digest over JSON.stringify(vector), hex, 16 chars */
+  digest: string;
+}
+
+const EMBEDDING_KEYS = new Set(['imageEmbedding', 'image_embedding']);
+
+/** Is this field / key an AI embedding (camelCase model field or DB column)? */
+export function isEmbeddingField(name: string | null | undefined): boolean {
+  return !!name && EMBEDDING_KEYS.has(name);
+}
+
+/** The numeric vector inside `v` (array, or the column's JSON text), else null. */
+function embeddingVector(v: unknown): number[] | null {
+  let arr: unknown = v;
+  if (typeof v === 'string') {
+    if (!v.startsWith('[')) return null;
+    try { arr = JSON.parse(v); } catch { return null; }
+  }
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  for (const x of arr) if (typeof x !== 'number') return null;
+  return arr as number[];
+}
+
+/** Replace an embedding vector with its descriptor; null when `v` is not a (non-empty) vector. */
+export function describeEmbedding(v: unknown): AuditEmbeddingDescriptor | null {
+  const vec = embeddingVector(v);
+  if (!vec) return null;
+  return { [AUDIT_EMBEDDING_MARKER]: 'vector', dims: vec.length, digest: identityDigest64(JSON.stringify(vec)) };
+}
+
 /** Replace ONE inline data: URL with its descriptor. */
 export function describeInlineDataUrl(src: string): AuditMediaDescriptor {
   const m = DATA_URL_RE.exec(src)!;
@@ -124,7 +168,8 @@ export function stripInlineMedia(value: unknown, depth = 0): unknown {
     let changed = false;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const n = stripInlineMedia(v, depth + 1);
+      // SYNC-SLIM — an embedding inside a structured value (e.g. a whole product row) → descriptor.
+      const n = (isEmbeddingField(k) ? describeEmbedding(v) : null) ?? stripInlineMedia(v, depth + 1);
       if (n !== v) changed = true;
       out[k] = n;
     }
@@ -139,8 +184,13 @@ export function stripInlineMedia(value: unknown, depth = 0): unknown {
  * as an array) is re-serialised through the same substitution, so both shapes —
  * structured value and stringified column — end up blob-free.
  */
-export function serializeAuditValue(v: unknown): string | null {
+export function serializeAuditValue(v: unknown, field?: string | null): string | null {
   if (v === undefined || v === null) return null;
+  // SYNC-SLIM — the audited FIELD is an embedding (`trackUpdate(…, { imageEmbedding })`): descriptor only.
+  if (isEmbeddingField(field)) {
+    const d = describeEmbedding(v);
+    if (d) return JSON.stringify(d);
+  }
   if (typeof v === 'string') {
     if (isInlineDataUrl(v)) return JSON.stringify(describeInlineDataUrl(v));
     // A stringified JSON column that embeds data: URLs (e.g. products.images).

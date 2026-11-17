@@ -63,8 +63,8 @@ export interface LogAuditInput {
 // (logAudit, logAuditOrThrow, logUpdateDiff, and trackInsert/trackUpdate above
 // them) funnels through here, so an inline base64 image can never reach
 // `audit_log` from any path. Semantics are unchanged for every non-image value.
-function toStr(v: unknown): string | null {
-  return serializeAuditValue(v);
+function toStr(v: unknown, field?: string | null): string | null {
+  return serializeAuditValue(v, field);
 }
 
 // Schreibt EINEN audit_log-Eintrag. Wirft bei Fehler (Roh-Variante).
@@ -89,8 +89,8 @@ function writeAuditRow(input: LogAuditInput): void {
       input.entityId,
       input.action,
       input.field || null,
-      toStr(input.oldValue),
-      toStr(input.newValue),
+      toStr(input.oldValue, input.field),
+      toStr(input.newValue, input.field),
       userId,
       new Date().toISOString(),
     ]

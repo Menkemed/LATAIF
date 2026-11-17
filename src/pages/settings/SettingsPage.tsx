@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -23,7 +23,8 @@ import { OpeningAccountingPanel } from '@/components/finance/OpeningAccountingPa
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
-import { useProductStore } from '@/stores/productStore';
+import { useProductStore, productEmbeddingMissing, claimEmbeddingCompute, releaseEmbeddingCompute, persistProductEmbedding } from '@/stores/productStore';
+import { runEmbeddingBackfill } from '@/core/ai/embedding-backfill';
 import { runSafePurge, countPurge, PURGE_PLANS, runGuardedReset, isFactoryResetBlocked, FACTORY_RESET_BLOCKED_MESSAGE, type PurgeDb } from '@/core/settings/safe-purge';
 import { createPreDestructiveBackup } from '@/core/settings/pre-destructive-backup';
 import { trackDelete } from '@/core/sync/track';
@@ -2391,7 +2392,7 @@ function StatusCell({ label, value, sub, tone }: {
 }
 
 function DuplicatesTab() {
-  const { products, updateProduct, deleteProduct, mergeIntoExistingOnPrimary, getLinkedRecordCounts, loadProducts } = useProductStore();
+  const { products, deleteProduct, mergeIntoExistingOnPrimary, getLinkedRecordCounts, loadProducts } = useProductStore();
   const navigate = useNavigate();
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<{ stage: string; current: number; total: number } | null>(null);
@@ -2401,6 +2402,9 @@ function DuplicatesTab() {
 
   // Backfill-State
   const [backfilling, setBackfilling] = useState(false);
+  // EMBEDDING-BACKFILL — Verlassen der Seite hält einen laufenden Backfill zwischen zwei Artikeln an.
+  const backfillStopRef = useRef(false);
+  useEffect(() => () => { backfillStopRef.current = true; }, []);
   const [backfillProgress, setBackfillProgress] = useState<{ current: number; total: number; errors: number } | null>(null);
 
   // Status: wie viele Produkte haben AI-Embedding, wie viele nicht, wie viele
@@ -2620,25 +2624,31 @@ function DuplicatesTab() {
     setBackfilling(true);
     setBackfillProgress({ current: 0, total: todo.length, errors: 0 });
     setActionMsg(null);
+    backfillStopRef.current = false;
 
-    let errors = 0;
-    for (let i = 0; i < todo.length; i++) {
-      const p = todo[i];
-      try {
-        const { description, embedding } = await computeImageEmbedding(p.images[0]);
-        updateProduct(p.id, { imageDescription: description, imageEmbedding: embedding });
-      } catch (err) {
-        errors++;
-        console.warn('[backfill] embedding failed for', p.id, err);
-      }
-      setBackfillProgress({ current: i + 1, total: todo.length, errors });
+    // EMBEDDING-BACKFILL — speichert jetzt wirklich (vorher über updateProduct: berechnet, protokolliert, nie
+    // gespeichert). Frische Prüfung + Belegung je Artikel: kein KI-Aufruf für schon vorhandene oder gerade
+    // anderswo gerechnete Embeddings; Kontingent-/Schlüsselfehler brechen ab; Verlassen der Seite hält an.
+    let r: Awaited<ReturnType<typeof runEmbeddingBackfill>>;
+    try {
+      r = await runEmbeddingBackfill(todo.map(p => ({ id: p.id, image: p.images[0] })), {
+        stillMissing: productEmbeddingMissing,
+        claim: claimEmbeddingCompute,
+        release: releaseEmbeddingCompute,
+        compute: computeImageEmbedding,
+        persist: persistProductEmbedding,
+        shouldStop: () => backfillStopRef.current,
+        onProgress: (p) => { if (!backfillStopRef.current) setBackfillProgress({ current: p.current, total: p.total, errors: p.errors }); },
+      });
+    } finally {
+      if (!backfillStopRef.current) { setBackfilling(false); setBackfillProgress(null); }
     }
-    setBackfilling(false);
-    setBackfillProgress(null);
+    if (backfillStopRef.current) return;
     loadProducts();
     setActionMsg({
-      text: `Backfill fertig — ${todo.length - errors} von ${todo.length} Produkten analysiert${errors > 0 ? `, ${errors} Fehler` : ''}.`,
-      ok: errors === 0,
+      text: `Backfill ${r.outcome === 'blocked' ? 'abgebrochen (KI-Kontingent/Schlüssel)' : 'fertig'} — ${r.saved} gespeichert, `
+        + `${r.skipped} übersprungen (schon vorhanden)${r.errors > 0 ? `, ${r.errors} Fehler` : ''}.`,
+      ok: r.errors === 0 && r.outcome === 'done',
     });
   }
 

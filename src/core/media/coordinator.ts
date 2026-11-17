@@ -18,6 +18,7 @@ import { assertSkuChangeFree } from '../products/sku-unique.ts';
 import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
 import { isTransactionUnhealthy } from '../db/transaction-health.ts';
 import { assertOwnerKind, type MediaSecurityClass } from './media-owner.ts';
+import { changelogPayload } from '../sync/changelog-payload.ts';
 import {
   blobIdFor,
   dedupTokenFor,
@@ -1472,12 +1473,13 @@ export class MediaDbCoordinator {
     // for a gallery-only edit (set = []).
     this.db.run(`UPDATE products SET ${parts.join(', ')} WHERE id = ?`, vals);
     if (pe.withSync) {
-      // Echo the full row (sync replicates the whole record, like trackChange).
+      // Echo the full row (sync replicates the whole record, like trackChange) — minus the columns a
+      // changelog entry never carries (SYNC-SLIM: the AI vector), exactly as trackChange does.
       const full = firstRow(this.db, `SELECT * FROM products WHERE id = $id`, { $id: ctx.entityId }) ?? {};
       this.db.run(
         `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
          VALUES ('products', ?, ?, 'update', ?, 0, ?)`,
-        [ctx.entityId, ctx.branchId, JSON.stringify(full), now] as unknown[],
+        [ctx.entityId, ctx.branchId, JSON.stringify(changelogPayload('products', full)), now] as unknown[],
       );
     }
     // Deterministic audit id per batch → a save-loss retry never doubles it.
