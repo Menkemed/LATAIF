@@ -14,6 +14,7 @@ mod sync;
 // INSTANCE-LOCK — höchstens ein LATAIF-Prozess je Anwendung und Benutzer (schließt die Lücke des Plugins).
 mod instance_lock;
 mod maintenance;
+mod maintenance_lock;
 
 /// Hält die Sperre für die ganze Lebensdauer des Prozesses (Windows gibt sie beim Prozessende frei).
 struct InstanceLockState(#[allow(dead_code)] instance_lock::InstanceLock);
@@ -3465,6 +3466,15 @@ pub fn run() {
                 eprintln!("[data-root] {msg}");
                 show_fatal_data_root_error(&msg);
                 return Err(msg.into());
+            }
+            // A2-WARTUNG — eine laufende oder abgebrochene OFFLINE-Wartung (Sperrdatei im Datenordner, siehe
+            // maintenance_lock.rs) hält den ganzen Start an: kein Aufräumen, keine Recovery, kein Restore/Backup,
+            // keine Datenbank, kein Sync-/Mobile-Server (also auch kein Schreiben von PC2 oder Handy). Fail-closed.
+            if let maintenance_lock::MaintenanceState::Locked(detail) = maintenance_lock::state(root.path()) {
+                eprintln!("[maintenance-lock] offline maintenance lock present ({detail}) — not starting");
+                show_fatal_box("LATAIF — data maintenance", maintenance_lock::BLOCKING_MESSAGE);
+                app.handle().cleanup_before_exit();
+                std::process::exit(1);
             }
             let app_dir = root.path().to_path_buf();
             // v0.8.44 — dead copies of the locator / move intent that an earlier move carried into the

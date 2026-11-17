@@ -112,6 +112,8 @@ const ausfuehren = (w: { DATA: string; C: string; E: string }, name: string, env
     '--bestaetigen', name, '--nur-pfad', DECOY], env);
 const pP = (w: { DATA: string }) => join(w.DATA, 'lataif.db');
 const pS = (w: { DATA: string }) => join(w.DATA, 'lataif_sync_server.db');
+const LOCK = (w: { DATA: string }) => join(w.DATA, 'WARTUNG-LAEUFT.lock');
+const sperre = (w: { DATA: string }) => (existsSync(LOCK(w)) ? JSON.parse(readFileSync(LOCK(w), 'utf8')).stand : null);
 const unberuehrt = (w: { DATA: string }) => dump(pP(w), 'SELECT * FROM products ORDER BY id') + dump(pP(w), 'SELECT * FROM audit_log')
   + dump(pP(w), 'SELECT * FROM invoices') + dump(pP(w), 'SELECT * FROM payments') + dump(pP(w), 'SELECT * FROM sync_cursor');
 const ohne = (d: string) => { const o = JSON.parse(d); delete o.image_embedding; return JSON.stringify(o); };
@@ -144,6 +146,7 @@ try {
   { const p = new DatabaseSync(pP(A)); p.exec("UPDATE payments SET amount = 26"); p.close(); }
   const r3 = ausfuehren(A, '2026-11-18_a2-test-a');
   ok(r3.code !== 0 && /weichen ab/.test(r3.out.abbruch), `Sicherung nicht mehr frisch: abgelehnt (${String(r3.out.abbruch).slice(0, 80)})`);
+  ok(sperre(A) === null, 'Abbruch vor dem ersten Schreiben: die eigene Wartungssperre ist wieder entfernt');
   // Cursor nicht am Ende / ungesendeter eigener Eintrag → Vorbedingungen.
   const B = welt('b');
   { const p = new DatabaseSync(pP(B)); p.exec('UPDATE sync_cursor SET last_sync_id = last_sync_id - 1'); p.close(); }
@@ -183,6 +186,7 @@ try {
   ok(r6.code === 0 && r6.out.ok && r6.out.stand === 'abgeschlossen' && r6.out.primary.geaendert === 4 && r6.out.server.geaendert === 5,
     `ausführen: abgeschlossen, Primary 4 / Server 5 Einträge (${JSON.stringify(r6.out).slice(0, 200)})`);
   const pNach = cl(pP(W)), sNach = cl(pS(W));
+  ok(r6.out.sperre === 'entfernt' && sperre(W) === null, 'nach bestandenem Gesamtnachweis: Wartungssperre entfernt');
   ok(JSON.stringify(pNach.map((r) => [r.id, r.table_name, r.record_id, r.action])) === JSON.stringify(pVor.map((r) => [r.id, r.table_name, r.record_id, r.action]))
     && JSON.stringify(sNach.map((r) => [r.id, r.table_name, r.record_id, r.action])) === JSON.stringify(sVor.map((r) => [r.id, r.table_name, r.record_id, r.action])),
   'Zeilen, Nummern, Reihenfolge, Tabellen, Datensätze, Aktionen unverändert (beide Seiten)');
@@ -218,15 +222,20 @@ try {
   const sVorX = cl(pS(X));
   const r8 = ausfuehren(X, '2026-11-18_a2-test-x', { LATAIF_A2_TESTABBRUCH: 'nach-primary' });
   ok(r8.code !== 0 && /TESTABBRUCH/.test(r8.out.abbruch), 'Abbruch nach dem Primary simuliert');
+  ok(sperre(X) === 'laeuft', 'nach dem Abbruch liegt die Wartungssperre weiter (App würde nicht starten)');
   ok(JSON.stringify(cl(pP(X))) === JSON.stringify(pNach) && JSON.stringify(cl(pS(X))) === JSON.stringify(sVorX),
     'Zwischenstand: Primary vollständig nachher, Server vollständig vorher (je Datenbank atomar)');
   const r9 = ausfuehren(X, '2026-11-18_a2-test-x');
-  ok(r9.code !== 0 && /offener Lauf/.test(r9.out.abbruch), 'neuer Lauf verweigert, solange der offene nicht fortgesetzt ist');
+  ok(r9.code !== 0 && /Wartungssperre liegt|offener Lauf/.test(r9.out.abbruch), 'neuer Lauf verweigert, solange der offene nicht fortgesetzt ist');
+  const fg1 = run(TOOL, ['freigeben', '--daten', X.DATA, '--nur-pfad', DECOY]);
+  ok(fg1.code !== 0 && /offener Lauf/.test(fg1.out.abbruch) && sperre(X) === 'laeuft', 'freigeben verweigert, solange der Lauf offen ist — Sperre bleibt');
   const pr2 = run(TOOL, ['pruefen', '--daten', X.DATA, '--nur-pfad', DECOY]);
-  ok(pr2.code === 0 && /a2-stufe1-/.test(String(pr2.out.offenesJournal)) && pr2.out.gepaart === 6, 'prüfen meldet den offenen Lauf; Paare auch im Zwischenstand erkannt');
+  ok(pr2.code !== 0 && pr2.out.sperre === 'laeuft' && /a2-stufe1-/.test(String(pr2.out.offenesJournal)) && pr2.out.gepaart === 6,
+    'prüfen meldet Sperre und offenen Lauf; Paare auch im Zwischenstand erkannt');
   const r10 = run(TOOL, ['fortsetzen', '--daten', X.DATA, '--nur-pfad', DECOY]);
   ok(r10.code === 0 && r10.out.fortgesetzt && r10.out.stand === 'abgeschlossen', `fortsetzen: abgeschlossen (${JSON.stringify(r10.out).slice(0, 160)})`);
   ok(JSON.stringify(cl(pP(X))) === JSON.stringify(pNach) && JSON.stringify(cl(pS(X))) === JSON.stringify(sNach), 'Endstand identisch mit dem ununterbrochenen Lauf');
+  ok(r10.out.sperre === 'entfernt' && sperre(X) === null, 'fortsetzen: Sperre erst nach dem Gesamtnachweis entfernt');
 
   ok(!existsSync(pP(X) + '.a2-neu') && !existsSync(pP(X) + '-journal') && !existsSync(pP(W) + '.a2-neu') && !existsSync(pP(W) + '-journal'),
     'keine Arbeitskopie und kein SQLite-Journal neben lataif.db zurückgeblieben');
@@ -239,9 +248,11 @@ try {
   const r12 = ausfuehren(Z, '2026-11-18_a2-test-z', { LATAIF_A2_TESTABBRUCH: 'vor-tausch' });
   ok(r12.code !== 0 && /TESTABBRUCH vor-tausch/.test(r12.out.abbruch) && sha(pP(Z)) === sollZ.get('lataif.db') && existsSync(pP(Z) + '.a2-neu'),
     'Absturz vor dem Einsetzen: lataif.db unverändert der alte Stand (die App sähe nie eine halbe Datei), Arbeitskopie liegt daneben');
+  ok(sperre(Z) === 'laeuft', '…und die Wartungssperre liegt');
   const r13 = run(TOOL, ['fortsetzen', '--daten', Z.DATA, '--nur-pfad', DECOY]);
   ok(r13.code === 0 && r13.out.stand === 'abgeschlossen' && JSON.stringify(cl(pP(Z))) === JSON.stringify(pNach) && !existsSync(pP(Z) + '.a2-neu'),
     'fortsetzen nach Absturz vor dem Einsetzen: abgeschlossen, Endstand wie ununterbrochen, Arbeitskopie weg');
+  ok(sperre(Z) === null, '…Sperre danach entfernt');
 
   // ── 7) Abbruch, danach wurde geschrieben → fortsetzen verweigert → Satz zurückspielen ───
   const Y = welt('y');
@@ -251,12 +262,48 @@ try {
   { const p = new DatabaseSync(pP(Y)); p.exec("UPDATE invoices SET invoice_number = 'SRINV-2026-000013'"); p.close(); }
   const vorY = treeHash(Y.DATA);
   const r11 = run(TOOL, ['fortsetzen', '--daten', Y.DATA, '--nur-pfad', DECOY]);
-  ok(r11.code !== 0 && /geschrieben/.test(r11.out.abbruch) && treeHash(Y.DATA) === vorY, 'nach Abbruch geschrieben: fortsetzen verweigert, nichts verändert');
+  ok(r11.code !== 0 && /geschrieben/.test(r11.out.abbruch) && treeHash(Y.DATA) === vorY && sperre(Y) === 'laeuft', 'nach Abbruch geschrieben: fortsetzen verweigert, nichts verändert, Sperre bleibt');
+  const fg2 = run(TOOL, ['freigeben', '--daten', Y.DATA, '--nur-pfad', DECOY]);
+  ok(fg2.code !== 0 && sperre(Y) === 'laeuft', 'freigeben ebenso verweigert — nur der Sicherungssatz hilft');
   const rz2 = run(BACKUP, ['zurueckspielen', '--sicherung', join(Y.E, '2026-11-18_a2-test-y'), '--ziel', Y.DATA, '--beiseite', join(boxC, 'y-beiseite'),
     '--bestaetigen', '2026-11-18_a2-test-y', '--nur-pfad', DECOY]);
   const sollY = new Map((mfY.dateien as Array<{ file: string; sha256: string }>).map((e) => [e.file, e.sha256]));
   ok(rz2.code === 0 && sha(pP(Y)) === sollY.get('lataif.db') && sha(pS(Y)) === sollY.get('lataif_sync_server.db'),
     'Rückweg: Sicherungssatz (von E:) eingespielt — beide Datenbanken auf dem Vorher-Stand');
+  ok(sperre(Y) === null, 'Zurückspielen des Satzes nimmt auch die Sperre weg (Datenordner = Sicherung)');
+
+  // ── 8) Absturz direkt nach dem Anlegen der Sperre (vor jedem Schreiben) → freigeben ──────
+  const V = welt('v');
+  sichern(V, '2026-11-18_a2-test-v');
+  const vorV = [sha(pP(V)), sha(pS(V))];
+  const r14 = ausfuehren(V, '2026-11-18_a2-test-v', { LATAIF_A2_TESTABBRUCH: 'nach-sperre' });
+  ok(r14.code !== 0 && sperre(V) === 'vorbereitung' && !existsSync(join(V.DATA, 'maintenance-logs')) && sha(pP(V)) === vorV[0] && sha(pS(V)) === vorV[1],
+    'Absturz nach dem Sperren: Sperre liegt, kein Journal, Datenbanken unverändert');
+  ok(ausfuehren(V, '2026-11-18_a2-test-v').code !== 0 && sperre(V) === 'vorbereitung', 'neuer Lauf verweigert, solange die Sperre liegt');
+  const fg3 = run(TOOL, ['freigeben', '--daten', V.DATA, '--nur-pfad', DECOY]);
+  ok(fg3.code === 0 && sperre(V) === null, 'freigeben: Dateien wie beim Sperren → Sperre entfernt');
+  ok(ausfuehren(V, '2026-11-18_a2-test-v').code === 0 && sperre(V) === null, 'danach läuft die Wartung normal durch');
+
+  // ── 9) Absturz nach dem Gesamtnachweis, vor dem Entfernen der Sperre → freigeben ─────────
+  const U = welt('u');
+  sichern(U, '2026-11-18_a2-test-u');
+  const r15 = ausfuehren(U, '2026-11-18_a2-test-u', { LATAIF_A2_TESTABBRUCH: 'vor-freigabe' });
+  ok(r15.code !== 0 && sperre(U) === 'laeuft' && JSON.stringify(cl(pP(U))) === JSON.stringify(pNach), 'Absturz vor dem Entfernen: Lauf fertig, Sperre liegt noch');
+  const fg4 = run(TOOL, ['freigeben', '--daten', U.DATA, '--nur-pfad', DECOY]);
+  ok(fg4.code === 0 && sperre(U) === null, 'freigeben: abgeschlossenes Journal + Zustand erneut nachgeprüft → Sperre entfernt');
+
+  // ── 10) Windows: ein fremder offener Griff auf lataif.db verhindert den Dateitausch → sicher angehalten ──
+  const H = welt('h');
+  sichern(H, '2026-11-18_a2-test-h');
+  const vorH = sha(pP(H));
+  const griff = new DatabaseSync(pP(H));               // wie ein anderer Prozess, der die Datei offen hält
+  griff.prepare('SELECT COUNT(*) AS n FROM products').get();
+  const r16 = ausfuehren(H, '2026-11-18_a2-test-h');
+  griff.close();
+  ok(r16.code !== 0 && /EPERM|EBUSY|EACCES|operation not permitted|resource busy/i.test(String(r16.out.abbruch)) && sha(pP(H)) === vorH && sperre(H) === 'laeuft',
+    `Windows: Tausch scheitert am fremden Griff — lataif.db unverändert, Sperre liegt (${String(r16.out.abbruch).slice(0, 70)})`);
+  const r17 = run(TOOL, ['fortsetzen', '--daten', H.DATA, '--nur-pfad', DECOY]);
+  ok(r17.code === 0 && sperre(H) === null && JSON.stringify(cl(pP(H))) === JSON.stringify(pNach), 'Griff geschlossen → fortsetzen: abgeschlossen, Sperre entfernt');
 } finally {
   rmSync(boxC, { recursive: true, force: true });
   rmSync(boxE, { recursive: true, force: true });

@@ -7,6 +7,13 @@
 //   ausfuehren  --daten <Datenordner> --sicherung <E:\…\Name> --sicherung <F:\…\Name> --bestaetigen <Name>
 //               [--erlaube-nur-primary <id,id>] [--nur-pfad <exe>]
 //   fortsetzen  --daten <Datenordner> [--nur-pfad <exe>]
+//   freigeben   --daten <Datenordner> [--nur-pfad <exe>]   (liegengebliebene Sperre nach geprüftem Zustand entfernen)
+//
+// WARTUNGSSPERRE: `ausfuehren` legt ZUERST `WARTUNG-LAEUFT.lock` im Datenordner exklusiv an; solange sie liegt,
+// startet LATAIF nicht (src-tauri/src/maintenance_lock.rs) — also auch kein Server, kein PC2, kein Handy. Ab dem
+// ersten Schreiben bleibt sie bei jedem Abbruch liegen; sie fällt nur nach bestandenem Gesamtnachweis
+// (`ausfuehren`/`fortsetzen`), über `freigeben` nach geprüftem Zustand oder mit dem Zurückspielen des
+// Sicherungssatzes (der Datenordner wird dabei ersetzt).
 //
 // Ablauf `ausfuehren` (jeder Schritt bricht VOR dem nächsten ab, wenn etwas nicht stimmt):
 //   1. Exklusiv: kein `lataif.exe` läuft (ohne App kein Sync-Server → auch PC2 und Handy können nicht schreiben);
@@ -33,9 +40,9 @@
 // Embeddings), Rechnungen, Zahlungen, Buchungen. Kein VACUUM.
 // ════════════════════════════════════════════════════════════════════════════
 import { createHash } from 'node:crypto';
-import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, parse, resolve } from 'node:path';
+import { basename, join, parse, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { planSide, reconcileSides, SLIM_KEY } from '../../src/core/sync/changelog-slim.ts';
@@ -130,6 +137,34 @@ function unsauber(daten) {
   return existsSync(join(daten, PRIMARY + '-journal')) ? [`${PRIMARY}-journal vorhanden — die Datei ist nicht sauber geschlossen`] : [];
 }
 const NEU = '.a2-neu';
+
+// ── Wartungssperre (gelesen von der App beim Start: src-tauri/src/maintenance_lock.rs) ─────────────────
+// Liegt `WARTUNG-LAEUFT.lock` im Datenordner, startet LATAIF nicht (kein Server → auch PC2/Handy schreiben
+// nicht). Angelegt wird sie exklusiv VOR jeder Prüfung; nach dem ersten Schreiben bleibt sie bei jedem Abbruch
+// liegen und fällt erst nach bestandenem Gesamtnachweis (oder über `freigeben` nach geprüftem Zustand).
+const SPERRE = 'WARTUNG-LAEUFT.lock';
+function sperreLesen(daten) {
+  const p = join(daten, SPERRE);
+  if (!existsSync(p)) return null;
+  try { return JSON.parse(readFileSync(p, 'utf8')); } catch { return { stand: 'unlesbar' }; }
+}
+function sperreAnlegen(daten, inhalt) {
+  let fd;
+  try { fd = openSync(join(daten, SPERRE), 'wx'); } catch (e) {
+    if (e.code === 'EEXIST') fail('Wartungssperre liegt schon (laufender oder abgebrochener Lauf) — „fortsetzen" oder „freigeben"');
+    throw e;
+  }
+  try { writeSync(fd, JSON.stringify(inhalt)); fsyncSync(fd); } finally { closeSync(fd); }
+}
+/** Inhalt ersetzen — die Sperrdatei existiert dabei in jedem Augenblick (Umbenennen über die alte). */
+function sperreSetzen(daten, inhalt) {
+  const p = join(daten, SPERRE);
+  const tmp = `${p}.tmp`;
+  writeFileSync(tmp, JSON.stringify(inhalt));
+  const fd = openSync(tmp, 'r+'); fsyncSync(fd); closeSync(fd);
+  renameSync(tmp, p);
+}
+function sperreEntfernen(daten) { rmSync(join(daten, SPERRE)); }
 
 const zeilenPrimary = (db) => db.prepare('SELECT id, table_name, record_id, action, data, synced FROM sync_changelog ORDER BY id').all()
   .map((r) => ({ ...r, id: Number(r.id), data: String(r.data ?? '') }));
@@ -245,12 +280,13 @@ function pruefen(o) {
   const dbs = { p, s, close: () => { try { p.close(); } catch { /* */ } try { s.close(); } catch { /* */ } rmSync(kopie, { recursive: true, force: true }); } };
   try {
     const l = lage(daten, dbs, bestaetigteNurPrimary(o));
-    const probleme = [...unsauber(daten), ...l.probleme];
+    const sperre = sperreLesen(daten);
+    const probleme = [...unsauber(daten), ...(sperre ? [`Wartungssperre liegt (${sperre.stand}) — „fortsetzen" oder „freigeben"`] : []), ...l.probleme];
     return {
       ok: probleme.length === 0, modus: 'pruefen', geschrieben: false,
       cursor: l.cursor, serverMax: l.serverMax, gepaart: l.abgleich.paired, nurServer: l.abgleich.serverOnly,
       nurPrimary: l.abgleich.primaryOnly, eigenerAnfang: l.eigenerAnfang, primary: zahlen(l.pPlan), server: zahlen(l.sPlan),
-      offenesJournal: offenesJournal(daten)?.datei ?? null, restKopie: existsSync(join(daten, PRIMARY + NEU)), probleme,
+      offenesJournal: offenesJournal(daten)?.datei ?? null, restKopie: existsSync(join(daten, PRIMARY + NEU)), sperre: sperre?.stand ?? null, probleme,
     };
   } finally { dbs.close(); }
 }
@@ -383,14 +419,24 @@ function abschluss(daten, dbs, j, datei) {
 function ausfuehren(o) {
   const daten = resolve(o.daten ?? fail('--daten fehlt'));
   const name = o.bestaetigen ?? fail('--bestaetigen <Sicherungsname> fehlt');
-  appMussZuSein(o);
+  if (!existsSync(join(daten, PRIMARY))) fail(`Datenordner ohne ${PRIMARY}: ${daten}`);
+  if (sperreLesen(daten)) fail('Wartungssperre liegt schon (laufender oder abgebrochener Lauf) — „fortsetzen" oder „freigeben"');
   const offen = offenesJournal(daten);
   if (offen) fail(`offener Lauf ${offen.datei} (${offen.inhalt.stand}) — erst „fortsetzen" oder den Sicherungssatz zurückspielen`);
   for (const x of unsauber(daten)) fail(x);
   if (existsSync(join(daten, PRIMARY + NEU))) fail(`${PRIMARY}${NEU} liegt im Datenordner — Rest eines abgebrochenen Laufs ohne Journal; prüfen und entfernen`);
-  const nachweis = sicherungenNachweisen(daten, o.sicherung, name);   // VOR dem ersten Öffnen: Dateien unverändert
-  const dbs = oeffnen(daten);
+  const dateienBeiSperre = dbDateien(daten);
+  // ZUERST sperren, DANN prüfen, ob eine App läuft: eine App, die zwischen beidem startet, wird erkannt —
+  // jede spätere findet die Sperre und startet nicht.
+  sperreAnlegen(daten, { werkzeug: 'changelog-schlankung/1', stand: 'vorbereitung', angelegt: new Date().toISOString(), dateien: dateienBeiSperre });
+  testabbruch('nach-sperre');
+  let dbs = null;
+  let geschrieben = false;
   try {
+    appMussZuSein(o);
+    const nachweis = sicherungenNachweisen(daten, o.sicherung, name);   // VOR dem ersten Öffnen: Dateien unverändert
+    if (JSON.stringify(nachweis.dateien) !== JSON.stringify(dateienBeiSperre)) fail('Datenbankdateien seit dem Anlegen der Sperre verändert');
+    dbs = oeffnen(daten);
     const l = lage(daten, dbs, bestaetigteNurPrimary(o));
     if (l.probleme.length) fail(`Vorbedingungen nicht erfüllt: ${l.probleme.join(' | ')}`);
     const j = {
@@ -404,6 +450,8 @@ function ausfuehren(o) {
     mkdirSync(join(daten, JOURNAL_DIR), { recursive: true });
     const datei = join(daten, JOURNAL_DIR, `${JOURNAL_PREFIX}${j.begonnen.replace(/[:.]/g, '-')}.json`);
     journalSchreiben(datei, j);
+    geschrieben = true;   // ab hier bleibt die Sperre bei JEDEM Abbruch liegen
+    sperreSetzen(daten, { werkzeug: 'changelog-schlankung/1', stand: 'laeuft', angelegt: j.begonnen, journal: basename(datei) });
 
     appMussZuSein(o);
     primaryUmwandeln(daten, dbs, l.pPlan, j.primary, o);
@@ -417,8 +465,52 @@ function ausfuehren(o) {
     j.stand = 'server-fertig'; journalSchreiben(datei, j);
     testabbruch('nach-server');
 
-    return abschluss(daten, dbs, j, datei);
+    const r = abschluss(daten, dbs, j, datei);
+    dbs.close(); dbs = null;
+    testabbruch('vor-freigabe');
+    sperreEntfernen(daten);                 // erst nach bestandenem Gesamtnachweis
+    return { ...r, sperre: 'entfernt' };
+  } catch (e) {
+    if (!geschrieben) {                     // nichts geschrieben → die eigene Sperre wieder weg
+      try { dbs?.close(); } catch { /* */ }
+      dbs = null;
+      try { sperreEntfernen(daten); } catch { /* */ }
+    }
+    throw e;
+  } finally { dbs?.close(); }
+}
+
+/** Eine liegengebliebene Sperre nur nach geprüftem Zustand entfernen. */
+function freigeben(o) {
+  const daten = resolve(o.daten ?? fail('--daten fehlt'));
+  appMussZuSein(o);
+  const s = sperreLesen(daten) ?? fail('keine Wartungssperre vorhanden');
+  if (offenesJournal(daten)) fail('offener Lauf — erst „fortsetzen" (oder den Sicherungssatz zurückspielen)');
+  for (const x of unsauber(daten)) fail(x);
+  if (existsSync(join(daten, PRIMARY + NEU))) fail(`${PRIMARY}${NEU} liegt im Datenordner — nicht freigeben`);
+  if (!s.journal) {
+    // Der Lauf endete vor dem ersten Schreiben: die Dateien müssen exakt die beim Anlegen der Sperre sein.
+    if (!s.dateien || JSON.stringify(dbDateien(daten)) !== JSON.stringify(s.dateien)) {
+      fail('Datenbankdateien weichen vom Stand beim Anlegen der Sperre ab — Sicherungssatz zurückspielen');
+    }
+    sperreEntfernen(daten);
+    return { ok: true, modus: 'freigeben', grund: 'Lauf endete vor dem ersten Schreiben; Dateien unverändert', sperre: 'entfernt' };
+  }
+  const j = journale(daten).find((x) => basename(x.datei) === s.journal) ?? fail('das Journal der Sperre fehlt — Sicherungssatz zurückspielen');
+  if (j.inhalt.stand !== 'abgeschlossen') fail(`Journal steht auf „${j.inhalt.stand}" — erst „fortsetzen"`);
+  const dbs = oeffnen(daten);
+  try {
+    const l = lage(daten, dbs, j.inhalt.nurPrimary ?? []);
+    if (l.probleme.length || l.pPlan.changes.length || l.sPlan.changes.length) fail(`Zustand nicht wie abgeschlossen: ${l.probleme.join(' | ') || 'noch Einträge mit Vektor'}`);
+    seiteNachweisen(l.pRows, j.inhalt.primary, 'Primary');
+    seiteNachweisen(l.sRows, j.inhalt.server, 'Server');
+    if (l.cursor !== j.inhalt.cursor || l.serverMax !== j.inhalt.serverMax) fail('Cursor oder letzte Server-Nummer verändert');
+    for (const [db, key] of [[dbs.p, 'primaryUnberuehrt'], [dbs.s, 'serverUnberuehrt']]) {
+      if (JSON.stringify(unberuehrtDigests(db)) !== JSON.stringify(j.inhalt[key])) fail(`seit dem Abschluss wurde geschrieben (${key})`);
+    }
   } finally { dbs.close(); }
+  sperreEntfernen(daten);
+  return { ok: true, modus: 'freigeben', grund: 'Lauf abgeschlossen und erneut nachgeprüft', sperre: 'entfernt' };
 }
 
 function fortsetzen(o) {
@@ -427,6 +519,9 @@ function fortsetzen(o) {
   const offen = offenesJournal(daten) ?? fail('kein offener Lauf');
   const j = offen.inhalt;
   for (const x of unsauber(daten)) fail(x);
+  // Sofort (wieder) sperren — fehlte die Sperre, könnte inzwischen jemand gestartet haben; die Nachweise unten
+  // erkennen jedes Schreiben, die Sperre verhindert jedes weitere.
+  if (!sperreLesen(daten)) sperreAnlegen(daten, { werkzeug: 'changelog-schlankung/1', stand: 'laeuft', angelegt: new Date().toISOString(), journal: basename(offen.datei) });
   // Die Sicherungen des Laufs müssen unversehrt den VORHER-Stand halten — sie sind der Rückweg.
   for (const s of j.sicherungen) {
     const m = JSON.parse(readFileSync(join(s.ordner, 'MANIFEST-sha256.json'), 'utf8'));
@@ -455,7 +550,11 @@ function fortsetzen(o) {
     dbs.s.exec('PRAGMA wal_checkpoint(TRUNCATE)');
     seiteNachweisen(zeilenServer(dbs.s), j.server, 'Server');
     j.stand = 'server-fertig'; journalSchreiben(offen.datei, j);
-    return { ...abschluss(daten, dbs, j, offen.datei), fortgesetzt: true };
+    const r = abschluss(daten, dbs, j, offen.datei);
+    dbs.close();
+    testabbruch('vor-freigabe');
+    sperreEntfernen(daten);                 // erst nach bestandenem Gesamtnachweis
+    return { ...r, fortgesetzt: true, sperre: 'entfernt' };
   } finally { dbs.close(); }
 }
 
@@ -463,7 +562,7 @@ try {
   const [mode, ...rest] = process.argv.slice(2);
   const o = args(rest);
   const r = mode === 'pruefen' ? pruefen(o) : mode === 'ausfuehren' ? ausfuehren(o) : mode === 'fortsetzen' ? fortsetzen(o)
-    : fail('Modus: pruefen | ausfuehren | fortsetzen');
+    : mode === 'freigeben' ? freigeben(o) : fail('Modus: pruefen | ausfuehren | fortsetzen | freigeben');
   console.log(JSON.stringify(r, null, 1));
   process.exit(r.ok ? 0 : 2);
 } catch (e) {
