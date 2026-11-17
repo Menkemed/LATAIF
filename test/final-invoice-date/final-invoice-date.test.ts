@@ -80,6 +80,7 @@ const { vatFingerprint } = await import('../../src/core/tax/vat-period-lock.ts')
 const { invoiceDocumentDate } = await import('../../src/core/invoices/invoice-document-date.ts');
 const { fullPaymentDate } = await import('../../src/core/invoices/finalization-date.ts');
 const { buildInvoiceA5Data, invoiceDateText } = await import('../../src/core/pdf/invoice-a5.ts');
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -273,9 +274,24 @@ const A = rechnung('2026-11-02');
   ok(k.status === 'FINAL' && /^INV-/.test(k.nummer) && k.final === '2026-11-03T10:00:00.000Z',
     `F5 Preisreduzierung macht voll: Endnummer, Datum = späteste Zahlung wie im NBR (${k.nummer}/${k.final})`);
   ok(vergaben(db, D) === 1, 'F5 …genau eine Endnummer');
+  // F5b — schon festgehaltenes Datum: Erhöhung (fällt zurück), dann Reduzierung (wieder voll, ohne neue Zahlung).
+  const R = rechnung('2026-11-02');
+  zahle(R, 1100, '2026-11-04T10:00:00.000Z');
+  const fest = kopf(db, R).final;
+  const nr = kopf(db, R).nummer;
+  imHaus(() => useInvoiceStore.getState().editInvoice(R, { lines: [LINE('p' + lauf, 1200)] as never, reason: 'FID +', overpayChoice: 'credit' } as never));
+  reload();
+  ok(kopf(db, R).status === 'PARTIAL' && kopf(db, R).final === fest, `F5b Erhöhung: zurückgefallen, Datum bleibt (${kopf(db, R).final})`);
+  imHaus(() => useInvoiceStore.getState().editInvoice(R, { lines: [LINE('p' + lauf, 1000)] as never, reason: 'FID -', overpayChoice: 'credit' } as never));
+  reload();
+  ok(kopf(db, R).status === 'FINAL' && kopf(db, R).final === fest && kopf(db, R).nummer === nr && vergaben(db, R) === 1,
+    `F5b Reduzierung macht wieder voll: erstes Datum und Nummer bleiben (${kopf(db, R).final})`);
 }
 
 // ── F6 — VAT-Periodensperre ─────────────────────────────────────────────────────────────────
+// Das Szenario spielt im Q3 — vor dem Eröffnungsstichtag; wie im VAT-Sperren-Test wird er für den Node-Lauf früher gelegt,
+// damit hier die VAT-Sperre (und nicht der Stichtag) geprüft wird.
+setOpeningCutoffForTest('2026-01-01');
 {
   const E = rechnung('2026-09-01');                     // Q3
   zahle(E, 1100, '2026-09-10T10:00:00.000Z');
@@ -285,6 +301,8 @@ const A = rechnung('2026-11-02');
   zahle(G, 1100, '2026-09-12T10:00:00.000Z');
   useInvoiceStore.getState().deletePayment(payIds(db, E)[0], E); reload();   // fällt zurück, solange Q3 offen ist
   ok(kopf(db, E).status === 'PARTIAL' && kopf(db, E).final === fest, 'F6 …zurückgefallen, Datum bleibt Q3');
+  const Rq = rechnung('2026-09-01');
+  zahle(Rq, 1000, '2026-09-15T10:00:00.000Z');          // Teilzahlung im Q3, noch offen
   db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, invoice_count, snapshot_json, created_at)
           VALUES ('vf-q3','branch-main',2026,3,'2026-10-15T00:00:00.000Z',1,'[]','2026-10-15T00:00:00.000Z')`);
   const zahlungenVorher = payIds(db, E).length;
@@ -294,8 +312,14 @@ const A = rechnung('2026-11-02');
   const m2 = meldung(() => { useInvoiceStore.getState().updatePayment(payIds(db, G)[0], G, { receivedAt: new Date().toISOString() }); });
   ok(m2.startsWith('VAT_PERIOD_FILED|') && kopf(db, G).final === '2026-09-12T10:00:00.000Z',
     `F6 Zahlung einer gemeldeten Endrechnung umdatieren: abgelehnt, Datum bleibt (${m2.slice(0, 40)})`);
+  const lineRq = s(db, 'SELECT product_id FROM invoice_lines WHERE invoice_id = ?', [Rq]);
+  const m4 = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(Rq, {
+    lines: [LINE(lineRq, 900)] as never, reason: 'FID Q3', overpayChoice: 'credit' } as never)));
+  reload();
+  ok(m4.startsWith('VAT_PERIOD_FILED|') && kopf(db, Rq).status === 'PARTIAL' && kopf(db, Rq).final === null,
+    `F6 Reduzierung, deren Zahlung im eingereichten Q3 liegt: abgelehnt, nichts festgehalten (${m4.slice(0, 40)})`);
   const H = rechnung('2026-11-02');
-  const m3 = meldung(() => zahle(H, 1100, '2026-09-20T10:00:00.000Z'));
+  const m3 =meldung(() => zahle(H, 1100, '2026-09-20T10:00:00.000Z'));
   ok(m3.startsWith('VAT_PERIOD_FILED|') && kopf(db, H).final === null, 'F6 Vollzahlung rückdatiert ins eingereichte Q3: abgelehnt');
 }
 
