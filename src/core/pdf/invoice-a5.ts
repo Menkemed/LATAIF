@@ -140,6 +140,7 @@ export interface InvoiceA5Data {
 export interface InvoiceA5Input {
   company: InvoiceA5Company;
   invoice: {
+    /** `issuedAt` = das Datum, das der Beleg trägt: `invoiceDocumentDate` (Endrechnung: Tag der ersten Vollzahlung). */
     number: string; status: string; issuedAt?: string | null; createdAt?: string | null;
     grossAmount: number; paidAmount: number;
     lines: Array<{

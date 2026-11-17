@@ -16,7 +16,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { exportCsv } from '@/core/utils/export-file';
 import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-export';
-import { invoiceListDate } from '@/core/invoices/invoice-list-date';
+import { invoiceDocumentDate } from '@/core/invoices/invoice-document-date';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
@@ -208,7 +208,8 @@ export function InvoiceList() {
       const customerName = c ? `${c.firstName} ${c.lastName}${c.company ? ' (' + c.company + ')' : ''}` : '';
       return {
         invoice_number: inv.invoiceNumber,
-        date: (inv.issuedAt || inv.createdAt || '').split('T')[0],
+        // FINAL-INVOICE-DATE — dasselbe Datum wie Liste, Detailseite und PDF.
+        date: invoiceDocumentDate(inv, nbrPaymentsByInvoice.get(inv.id)).date.split('T')[0],
         status: inv.status,
         customer: customerName,
         tax_scheme: inv.taxSchemeSnapshot,
@@ -429,17 +430,17 @@ export function InvoiceList() {
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
             {(() => {
-              // Endrechnung: Tag der Vollzahlung (dieselbe Quelle wie NBR-Export und VAT-Sperre); der Rechnungstag
-              // des Dokuments steht sichtbar darunter, wenn er abweicht. Vorläufig/offen: Rechnungstag wie bisher.
-              const d = invoiceListDate(inv, nbrPaymentsByInvoice.get(inv.id));
+              // Endrechnung: Datum der Endrechnung (erste Vollzahlung) — dasselbe wie Detailseite, PDF und NBR-Export;
+              // das Datum der vorläufigen Rechnung steht klein darunter, wenn es abweicht. Vorläufig/offen: Rechnungstag.
+              const d = invoiceDocumentDate(inv, nbrPaymentsByInvoice.get(inv.id));
               return (
                 <span data-invoice-list-date={d.kind} style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   title={d.kind === 'final'
-                    ? `Final — day of full payment (as in the NBR report). Invoice date on the document: ${fmtDate(d.issued)}`
+                    ? `Final invoice date — day of full payment. Provisional invoice dated ${fmtDate(d.issued)}`
                     : 'Invoice date'}>
                   {fmtDate(d.date)}
                   {d.differs && (
-                    <span data-invoice-list-issued style={{ display: 'block', fontSize: 10, color: '#9CA3AF' }}>issued {fmtDate(d.issued)}</span>
+                    <span data-invoice-list-issued style={{ display: 'block', fontSize: 10, color: '#9CA3AF' }}>provisional {fmtDate(d.issued)}</span>
                   )}
                 </span>
               );

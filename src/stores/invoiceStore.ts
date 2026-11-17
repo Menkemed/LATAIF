@@ -32,7 +32,7 @@ function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
   return { branchId, userId, now };
 }
 import { issuedAtIso } from '@/core/invoices/issued-at';
-import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
+import { ensureFinalInvoiceNumber, finalIssuedAtIfFinalNow } from '@/core/invoices/final-number';
 import {
   assertInvoiceDateNotInClosedVatQuarter, assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter,
   assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint,
@@ -285,6 +285,7 @@ function rowToInvoice(row: Record<string, unknown>): Invoice {
     staffId: (row.staff_id as string) || undefined,
     specialMark: Number(row.special_mark) === 1,
     numberFinalizedAt: (row.number_finalized_at as string | null) || undefined,
+    finalIssuedAt: (row.final_issued_at as string | null) || undefined,
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -1604,7 +1605,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (inv0.status === 'FINAL') assertInvoiceNotInClosedVatQuarter(invoiceId);
       else if (inv0.paidAmount + amount >= inv0.grossAmount - 0.005) {
         // Der Exportmonat einer Rechnung ist der Tag ihrer Vollzahlung (received_at) — also gegen DIESEN Tag prüfen.
-        assertNotFinalizingIntoClosedVatQuarter(String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? ''), receivedAt);
+        const filiale = String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? '');
+        assertNotFinalizingIntoClosedVatQuarter(filiale, receivedAt);
+        // FINAL-INVOICE-DATE — und gegen das Datum, das die Endrechnung damit trüge: das schon festgehaltene
+        // (eine zurückgefallene Endrechnung behält ihren ersten Tag) bzw. die späteste Zahlung samt dieser.
+        assertNotFinalizingIntoClosedVatQuarter(filiale, finalIssuedAtIfFinalNow(invoiceId, receivedAt));
       }
     }
     // Slice 3b — suppressOverpayCredit (editInvoice-Delta): kein 3a-Split, voller Betrag auf

@@ -2203,6 +2203,13 @@ function runMigrations(database: Database): void {
     // bleiben Nummer und Sonder-Kennzeichen, auch wenn der Status zurückfällt. NULL = vorläufig.
     `ALTER TABLE invoices ADD COLUMN number_finalized_at TEXT`,
 
+    // ── FINAL-INVOICE-DATE — das Datum der Endrechnung, einmal festgehalten ─────────────────
+    // Gesetzt im selben Schritt wie `number_finalized_at`: der Tag, an dem die Rechnung erstmals voll
+    // bezahlt war (tatsächliches Zahlungsdatum `received_at`, dieselbe Regel wie der NBR-Export). Danach
+    // fest — spätere Zahlungen, Korrekturen oder Rückfälle ändern es nicht. NULL = vorläufig, oder eine
+    // Endrechnung von vor diesem Vertrag (wird NICHT nachträglich befüllt; Anzeige wie NBR).
+    `ALTER TABLE invoices ADD COLUMN final_issued_at TEXT`,
+
     // ── VAT-PERIOD-LOCK — ein Quartal ausdrücklich als „VAT eingereicht" markieren ────────────
     // Eine Zeile je Filiale und Quartal (Kalenderquartal der NBR-Monate). `snapshot_json` hält die
     // zum Einreichungszeitpunkt gemeldeten Daten (je Rechnung: Monat, Nummer, Kunde, Zeilenbeträge).

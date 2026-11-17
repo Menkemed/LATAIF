@@ -682,6 +682,7 @@
         "currency",
         "customer_id",
         "due_at",
+        "final_issued_at",
         "gross_amount",
         "id",
         "invoice_number",

@@ -30,6 +30,7 @@ import { buildInvoiceA5Data, printInvoiceA5 } from '@/core/pdf/invoice-a5';
 import { invoicePrintFor, type InvoicePrintExtras } from '@/core/data/page-reads';
 import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 import { useSharedRead } from '@/core/data/shared-read';
+import { invoiceDocumentDate } from '@/core/invoices/invoice-document-date';
 import { usePartyBalances } from '@/core/parties/use-party-balances';
 import { localReadContext } from '@/core/data/read-context';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
@@ -252,6 +253,9 @@ export function InvoiceDetail() {
   const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
   // v0.8.88 — die Untergrenze des Zahlungstags („Record Payment"): das Rechnungsdatum.
   const rechnungstag = String(invoice.issuedAt || invoice.createdAt || '').slice(0, 10);
+  // FINAL-INVOICE-DATE — das Datum dieser Rechnung, wie Liste, PDF/Beleg, CSV und NBR es zeigen
+  // (Endrechnung: Tag der ersten Vollzahlung; vorläufig: Rechnungstag).
+  const belegDatum = invoiceDocumentDate(invoice, zahlungen);
   // Customer-Credit UI-Slice 1 — offenes Store-Guthaben des Kunden (Σ amount-used_amount,
   // OPEN). Plain const wie `remaining`: jeder Render liest frisch → nach Verrechnung aktuell.
   const availableCredit = creditBalances.customer(invoice.customerId)?.storeCredit ?? 0;
@@ -542,7 +546,7 @@ export function InvoiceDetail() {
     printInvoiceA5(buildInvoiceA5Data({
       company: extras.company,
       invoice: {
-        number: formatInvoiceDisplayShort(invoice), status: invoice.status, issuedAt: invoice.issuedAt, createdAt: invoice.createdAt,
+        number: formatInvoiceDisplayShort(invoice), status: invoice.status, issuedAt: belegDatum.date, createdAt: invoice.createdAt,
         grossAmount: invoice.grossAmount, paidAmount: invoice.paidAmount, lines: invoice.lines,
       },
       customer,
@@ -562,7 +566,7 @@ export function InvoiceDetail() {
       const margin = l.taxScheme === 'MARGIN' ? l.unitPrice - l.purchasePriceSnapshot : 0;
       return [
         invoice.invoiceNumber,
-        fmtDate(invoice.issuedAt || invoice.createdAt),
+        fmtDate(belegDatum.date),
         lineName(l).replace(/,/g, ' '),
         l.taxScheme,
         l.unitPrice.toFixed(3),
@@ -1083,7 +1087,8 @@ export function InvoiceDetail() {
               <div style={{ marginTop: 16 }}>
                 {renderField('Invoice Number', formatInvoiceDisplay(invoice))}
                 {renderField('Status', <StatusDot status={invoice.status} label={derivedInvoiceLabel(invoice)} />)}
-                {renderField('Issued', fmtDate(invoice.issuedAt))}
+                {renderField('Issued', <span data-invoice-detail-date={belegDatum.kind}>{fmtDate(belegDatum.date)}</span>)}
+                {belegDatum.differs && renderField('Provisional', <span data-invoice-detail-provisional>{fmtDate(belegDatum.issued)}</span>)}
                 {renderField('Due', fmtDate(invoice.dueAt))}
                 {renderField('Created', fmtDate(invoice.createdAt))}
                 {invoice.staffId && renderField('Staff',
@@ -1526,7 +1531,7 @@ export function InvoiceDetail() {
         </div>
         <div className="receipt-meta">
           <div><span>Invoice:</span><span>{formatInvoiceDisplayShort(invoice)}</span></div>
-          <div><span>Date:</span><span>{fmtDate(invoice.issuedAt || invoice.createdAt)}</span></div>
+          <div><span>Date:</span><span>{fmtDate(belegDatum.date)}</span></div>
           {customer && <div><span>Client:</span><span>{customer.firstName} {customer.lastName}</span></div>}
         </div>
         <div className="receipt-lines">

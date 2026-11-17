@@ -244,6 +244,10 @@ function bezahlt(pid: string, ausgestellt: string, am: string, qty = 1): { inv: 
   const pay = imHaus(() => useInvoiceStore.getState().recordPayment(inv, brutto, 'cash'));
   DB.run('UPDATE payments SET received_at = ? WHERE id = ?', [am, pay]);
   DB.run("UPDATE ledger_entries SET occurred_at = ? WHERE source_module = 'PAYMENT' AND source_id = ?", [am, pay]);
+  // FINAL-INVOICE-DATE — die Zahlung wird hier direkt in der Datenbank zurückdatiert, also wie eine Endrechnung von
+  // VOR dem festgehaltenen Datum (Altbestand, `final_issued_at` leer): ihr Datum kommt aus den Zahlungen, wie bisher.
+  // Der Weg MIT festgehaltenem Datum ist in test/final-invoice-date geprüft.
+  DB.run('UPDATE invoices SET final_issued_at = NULL WHERE id = ?', [inv]);
   reload();
   return { inv, z: s(DB, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]), pay };
 }

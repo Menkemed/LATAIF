@@ -89,15 +89,17 @@ function customerIdentity(c: Record<string, unknown> | undefined): { name: strin
  */
 export function vatFingerprint(invoiceId: string, opts?: { butterfly?: boolean }): VatFingerprint | null {
   const inv = query(
-    'SELECT id, invoice_number, customer_id, status, issued_at, created_at, butterfly FROM invoices WHERE id = ?', [invoiceId],
+    'SELECT id, invoice_number, customer_id, status, issued_at, created_at, butterfly, final_issued_at FROM invoices WHERE id = ?', [invoiceId],
   )[0];
   if (!inv || String(inv.status) !== 'FINAL') return null;
   const butterfly = opts?.butterfly ?? Number(inv.butterfly ?? 0) === 1;
   if (butterfly) return null;
   const pays = query('SELECT amount, method, received_at FROM payments WHERE invoice_id = ? ORDER BY received_at, id', [invoiceId])
     .map((p) => ({ amount: r3(p.amount), method: String(p.method), receivedAt: String(p.received_at) }));
+  // FINAL-INVOICE-DATE — das festgehaltene Datum der Endrechnung, wie der Export es zeigt.
   const iso = invoiceFinalizationDate(
-    { issuedAt: (inv.issued_at as string) || undefined, createdAt: String(inv.created_at) } as Invoice, pays,
+    { issuedAt: (inv.issued_at as string) || undefined, createdAt: String(inv.created_at),
+      finalIssuedAt: (inv.final_issued_at as string | null) || undefined } as Invoice, pays,
   );
   const q = nbrQuarterOfDate(iso);
   if (!q) return null;

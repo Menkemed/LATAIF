@@ -14,6 +14,7 @@ import { paymentMethodLabel } from '../utils/payment-method-label.ts';
 import * as XLSX from 'xlsx';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 import { productDisplayName } from '../products/display-name.ts';
+import { finalizationDate } from '../invoices/finalization-date.ts';
 
 type AOA = (string | number | null)[][];
 
@@ -64,16 +65,11 @@ export type PaymentsByInvoice = Map<string, NbrPayment[]>;
  * Finalisierungs-Datum = Tag an dem die Rechnung VOLL bezahlt wurde.
  * = Datum der spaetesten Zahlung. Das ist der Steuer-Zeitpunkt (NBR-Periode).
  * Fallback (Alt-Daten ohne Payment-Zeilen, 0-BHD-Rechnung): issuedAt/createdAt.
+ * FINAL-INVOICE-DATE — seit die Endrechnung ihr Datum bei der ersten Vollzahlung festhält
+ * (`finalIssuedAt`, nach genau dieser Regel), gilt das festgehaltene; Altbestand wie bisher.
  */
 export function invoiceFinalizationDate(inv: Invoice, payments?: NbrPayment[]): string {
-  if (payments && payments.length > 0) {
-    let max = '';
-    for (const p of payments) {
-      if (p.receivedAt && p.receivedAt > max) max = p.receivedAt;
-    }
-    if (max) return max;
-  }
-  return inv.issuedAt || inv.createdAt;
+  return finalizationDate(inv, payments);
 }
 
 /**

@@ -365,6 +365,9 @@ export interface Invoice {
   // INVOICE-NUMBER-FREEZE — wann die Endnummer vergeben wurde; gesetzt = Nummer und Sonder-
   // Kennzeichen stehen für immer fest, auch wenn der Status später zurückfällt.
   numberFinalizedAt?: string;
+  // FINAL-INVOICE-DATE — Datum der Endrechnung (Tag der ersten Vollzahlung, `received_at`), einmal
+  // festgehalten mit der Endnummer. Fehlt bei vorläufigen und bei Endrechnungen von vor diesem Vertrag.
+  finalIssuedAt?: string;
   /**
    * MIXED-INVOICE P1c — was aus einer Überzahlung nach einer Rechnungskorrektur steht: Kundenguthaben (einlösbar) oder
    * Rückzahlungsanspruch (offen bis zur tatsächlichen Auszahlung). Vom Primary gerechnet, an beiden Rechnern gleich.

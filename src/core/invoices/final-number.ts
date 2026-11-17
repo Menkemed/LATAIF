@@ -17,6 +17,7 @@
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { getDatabase } from '@/core/db/database';
 import { logAudit } from '@/core/audit/audit-log';
+import { finalizationDate } from '@/core/invoices/finalization-date';
 
 export interface FinalNumberResult {
   invoiceNumber: string;
@@ -40,10 +41,11 @@ export function isInvoiceNumberFinal(invoiceId: string): boolean {
  * das Kennzeichen, das die Rechnung schon trägt.
  */
 export function ensureFinalInvoiceNumber(invoiceId: string, now: string, specialMarkOnFinal?: boolean): FinalNumberResult {
-  const r = query('SELECT invoice_number, special_mark, number_finalized_at FROM invoices WHERE id = ?', [invoiceId])[0];
+  const r = query('SELECT invoice_number, special_mark, number_finalized_at, issued_at, created_at FROM invoices WHERE id = ?', [invoiceId])[0];
   if (!r) throw new Error(`ensureFinalInvoiceNumber: invoice ${invoiceId} not found`);
   const current = String(r.invoice_number ?? '');
   const currentSpecial = Number(r.special_mark) === 1;
+  // Schon endgültig: Nummer, Kennzeichen UND Datum der Endrechnung bleiben, wie sie sind.
   if (r.number_finalized_at) return { invoiceNumber: current, specialMark: currentSpecial, assigned: false };
 
   const special = typeof specialMarkOnFinal === 'boolean' ? specialMarkOnFinal : currentSpecial;
@@ -52,13 +54,37 @@ export function ensureFinalInvoiceNumber(invoiceId: string, now: string, special
   const next = isRepair
     ? getNextDocumentNumber(special ? 'SRINV' : 'RINV')
     : getNextDocumentNumber(special ? 'SINV' : 'INV');
+  // FINAL-INVOICE-DATE — der Tag der ersten Vollzahlung, einmal festgehalten (Zahlungen stehen schon in der
+  // Datenbank: jeder Aufrufer schreibt sie vorher). `now` bleibt der technische Zeitpunkt der Vergabe.
+  const finalDate = finalIssuedAtIfFinalNow(invoiceId);
   getDatabase().run(
-    'UPDATE invoices SET invoice_number = ?, special_mark = ?, number_finalized_at = ?, updated_at = ? WHERE id = ?',
-    [next, special ? 1 : 0, now, now, invoiceId],
+    'UPDATE invoices SET invoice_number = ?, special_mark = ?, number_finalized_at = ?, final_issued_at = ?, updated_at = ? WHERE id = ?',
+    [next, special ? 1 : 0, now, finalDate, now, invoiceId],
   );
   logAudit({ module: 'Sales', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE',
     field: 'invoice_number', oldValue: current, newValue: next });
+  logAudit({ module: 'Sales', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE',
+    field: 'final_issued_at', oldValue: String(r.issued_at ?? r.created_at ?? ''), newValue: finalDate });
   return { invoiceNumber: next, specialMark: special, assigned: true };
+}
+
+/**
+ * FINAL-INVOICE-DATE — welches Datum die Endrechnung trägt bzw. trüge, wäre sie JETZT voll bezahlt:
+ * das schon festgehaltene; sonst der Tag der Vollzahlung aus den gespeicherten Zahlungen (dieselbe Regel
+ * wie NBR-Export und VAT-Sperre), auf Wunsch samt einer noch nicht geschriebenen Zahlung (`pendingReceivedAt`,
+ * für die Vorprüfung vor jedem Schreiben).
+ */
+export function finalIssuedAtIfFinalNow(invoiceId: string, pendingReceivedAt?: string): string {
+  const r = query('SELECT issued_at, created_at, final_issued_at FROM invoices WHERE id = ?', [invoiceId])[0];
+  if (!r) return pendingReceivedAt || '';
+  const pays = query('SELECT received_at FROM payments WHERE invoice_id = ?', [invoiceId])
+    .map((p) => ({ receivedAt: String(p.received_at ?? '') }));
+  if (pendingReceivedAt) pays.push({ receivedAt: pendingReceivedAt });
+  return finalizationDate({
+    finalIssuedAt: (r.final_issued_at as string | null) || undefined,
+    issuedAt: (r.issued_at as string | null) || undefined,
+    createdAt: (r.created_at as string | null) || undefined,
+  }, pays);
 }
 
 interface BackfillDb {
