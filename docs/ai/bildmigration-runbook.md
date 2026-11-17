@@ -111,10 +111,36 @@ Erwartet wird `ok: true`:
 
 - **Aktuelle Bilddaten:** Sie werden deutlich kleiner. Das spüren die Sicherungen sowie das Laden an PC2 und auf dem Handy.
 - **Platte:** Sie wächst zunächst um die neuen Fassungen, denn die alten Fassungen bleiben.
-- **Späterer eigener Schritt:** Alte Fassungen löschen
-  - Ablauf: superseded → gc_pending → deleted, danach Medien-GC.
-  - Bedingungen: nur mit geprüfter Sicherung, die die alten Dateien enthält, und eigener Freigabe.
-  - Erst dann wird Platz frei. Dieser Schritt ist nicht gebaut.
+- **Eigener Schritt (Phase 5B, gebaut 17.11.2026):** alte Fassungen löschen — siehe unten.
+
+## Alte Fassungen löschen (Phase 5B)
+
+Stand 17.11.2026, Primary nach der Migration:
+- **Gelöscht werden dürfen:** 869 alte Fassungen (Generation 1, `superseded`) mit 55,69 MB, davon 546 Hauptbilder (51,22 MB) und 323 Vorschauen (4,46 MB). Weiter verweist darauf nur noch die eigene Generationszeile. Dazu kommen Kennungen (`blob_id`, `dedup_token`) und Geschichte (Ergebnisse abgeschlossener Aufnahmen, veröffentlichte Ingest-Journale ohne Dateizugriff). PC2 und Handy erreichen sie nicht: Der LAN-Weg liefert nur die aktuelle Fassung oder einen eingefrorenen Einkaufs-Ausweis.
+- **Bleibt:**
+  - **Aktuelle Fassungen entfernter Fotos** (57 Fotos, 90 Dateien, 4,8 MB; 24 weitere fehlen seit 22.10.):
+    - Ihr Medienobjekt lebt und kann wieder verknüpft werden (`media-links.ts`).
+    - Das Löschen eines Artikels lässt die Fotodateien bewusst stehen (`product-leftovers.ts`).
+    - Für eine aktuelle Generation gibt es keinen freigebenden Lebenszyklus.
+  - **Ingest-Journal** (`.ingest-journal`, 397 JSON, 0,55 MB):
+    - Es ist der Idempotenz- und Konfliktanker je Aufnahme-Anfrage.
+    - Der Code kennt kein Löschen veröffentlichter Einträge.
+    - Der GC betritt Steuerordner nie.
+- **Bausteine:** `src/core/media/old-version-release.ts` (Kern) und `runOldVersionReleaseWith` in `image-store-migration-wiring.ts`. Die Karte „Release old image versions" in Settings → Data Repairs, Test `test/image-store/old-version-release.test.ts`.
+- **Ablauf:**
+  1. PC2 schließen, Handy ruhig.
+  2. Frische Vollsicherung `<Datum>_vor-bildbereinigung` auf E: und F: (`manuelle-sicherung.mjs`), prüfen und dauerhaft behalten.
+  3. Data Repairs: Grund eintragen, dann „Dry run (changes nothing)". Erwartet: 869 freigebbar, 55,7 MB, „Stay“ mit aktuellen Bildern, Ausweisen, entfernten Fotos und Journal.
+  4. Sicherungsname eintragen, „Release old versions“, Rückfrage bestätigen. Wartungsmodus und Pakete zu 25 Bildern; jede aktuelle Datei wird vorher von Rust verifiziert. „Stop“ hält sauber an; ein neuer Start setzt fort.
+  5. Settings → Backup & Restore → Unused media cleanup:
+     - **Scan:** erwartet 869 unbenutzte Dateien und 55,7 MB.
+     - **Schedule:** Die App startet neu, beim Start werden die Dateien in die Quarantäne `.gc-quarantine` verschoben.
+     - **Nach dem Neustart:** Der Scan zeigt 869 in Quarantäne.
+     - **Finalize:** löscht endgültig.
+  6. Nachweis gegen die Sicherung, danach PC2 öffnen.
+- **Rückweg:**
+  - Bis „Finalize" liegen die Dateien in der Quarantäne.
+  - Das Freigeben in der Datenbank ist einseitig (`deleted` ist terminal). Zurück geht es nur über das Zurückspielen der Vollsicherung.
 
 ## Rückweg
 

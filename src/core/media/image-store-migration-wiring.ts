@@ -22,6 +22,7 @@ import {
   type ImageStoreInventory, type MigrationDb, type MigrationJournalEntry, type MigrationProgress, type MigrationReport,
   type RecompressArgs, type RecompressOutcome,
 } from './image-store-migration.ts';
+import { runOldVersionRelease, type ReleaseJournalEntry, type ReleaseProgress, type ReleaseReport } from './old-version-release.ts';
 import { canonicalRole } from '../models/types.ts';
 
 export interface MigrationRunRequest {
@@ -67,6 +68,8 @@ export interface MigrationEnv {
   appendLog(name: string, line: string): Promise<void>;
   transactionActive(): boolean;
   now?(): string;
+  /** Phase 5B: eine gespeicherte Datei verifiziert lesen (Rust prüft SHA-256); wirft bei Fehlen/Abweichung/Größe. */
+  verifyStored?(scope: string, hash: string, extension: string, bytes: number): Promise<void>;
 }
 
 // ── Zustand für die Anzeige (nur Zahlen) ─────────────────────────────────────
@@ -197,7 +200,123 @@ async function primaryEnv(): Promise<MigrationEnv> {
     waitForDrainIdle: () => drain.waitForMobileDrainIdle(),
     appendLog: (name, line) => core.invoke('maintenance_log_append', { name, line }),
     transactionActive: () => txc.isTransactionActive(),
+    verifyStored: async (scope, hash, extension, bytes) => {
+      // Rust liest im Medienstamm und prüft den SHA-256 gegen den Namen; dazu hier die Größe.
+      const buf = await core.invoke<ArrayBuffer>('media_read_verified_raw', { tenantScope: scope, hash, extension });
+      const n = buf instanceof ArrayBuffer ? buf.byteLength : (buf as unknown as { length?: number })?.length ?? -1;
+      if (n !== bytes) throw new Error('MEDIA_VERIFY_SIZE_MISMATCH');
+    },
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Phase 5B — alte Bildfassungen für den vorhandenen Medien-GC freigeben (`old-version-release.ts`).
+// Derselbe Owner-Weg wie die Migration: nur Primary, Owner-Rolle (vor dem Lauf und vor jedem Paket), für `apply`
+// Grund + Name der geprüften Vollsicherung, Wartungsmodus, Protokoll `maintenance-logs/<runId>.jsonl`, Stop.
+// Teilt die Laufsperre mit der Migration (nie beide zugleich). Löscht KEINE Datei — das macht danach der GC.
+// ════════════════════════════════════════════════════════════════════════════
+export interface ReleaseRunRequest {
+  mode: 'dry-run' | 'apply';
+  reason?: string;
+  backupRef?: string;
+  batchSize?: number;
+  /** Test: nach so vielen Freigaben kooperativ anhalten. */
+  stopAfter?: number;
+  onlyBlobIds?: string[];
+}
+export interface ReleaseRunResult {
+  report?: ReleaseReport;
+  journal: ReleaseJournalEntry[];
+  refused?: { code: MigrationRefusal; detail: string };
+  logName?: string;
+}
+export interface ReleaseUiState { running: boolean; mode: 'dry-run' | 'apply' | null; progress: ReleaseProgress | null; report: ReleaseReport | null; logName: string | null; error: string | null; stopRequested: boolean }
+let relUi: ReleaseUiState = { running: false, mode: null, progress: null, report: null, logName: null, error: null, stopRequested: false };
+const relListeners = new Set<() => void>();
+function setRelUi(patch: Partial<ReleaseUiState>): void {
+  relUi = { ...relUi, ...patch };
+  for (const l of relListeners) { try { l(); } catch { /* Anzeige */ } }
+}
+export function oldVersionReleaseUiState(): ReleaseUiState { return relUi; }
+export function subscribeOldVersionRelease(fn: () => void): () => void { relListeners.add(fn); return () => { relListeners.delete(fn); }; }
+export function requestOldVersionReleaseStop(): void { if (relUi.running) setRelUi({ stopRequested: true }); }
+
+export async function runOldVersionReleaseWith(env: MigrationEnv, req: ReleaseRunRequest): Promise<ReleaseRunResult> {
+  const journal: ReleaseJournalEntry[] = [];
+  if (env.isClientMode()) return { journal, refused: { code: 'MIGRATION_PRIMARY_ONLY', detail: 'old image versions are released on the main computer only' } };
+  const isOwner = () => canonicalRole(env.session()?.role ?? undefined) === 'ADMIN';
+  if (!isOwner()) return { journal, refused: { code: 'MIGRATION_NOT_OWNER', detail: 'only the owner may release old image versions' } };
+  if (req.mode === 'apply' && (!req.reason?.trim() || !BACKUP_REF.test(req.backupRef?.trim() ?? ''))) {
+    return { journal, refused: { code: 'MIGRATION_NOTE_REQUIRED', detail: 'a reason and the name of the verified full backup are required' } };
+  }
+  if (!env.verifyStored) throw new Error('RELEASE_VERIFY_UNAVAILABLE');
+  if (running) return { journal, refused: { code: 'MIGRATION_ALREADY_RUNNING', detail: 'an image maintenance run is already in progress' } };
+  running = true;
+  const now = env.now ?? (() => new Date().toISOString());
+  let logName: string | undefined;
+  let released = 0;
+  let current: { db: unknown; saveDurably(): Promise<void> } | null = null;
+  const leaseDb = (): MigrationDb => { if (!current) throw new Error('MIGRATION_NO_LEASE'); return current.db as MigrationDb; };
+  const db: MigrationDb = { run: (sql, params) => leaseDb().run(sql, params), exec: (sql, params) => leaseDb().exec(sql, params) };
+  let maintenanceOn = false;
+  setRelUi({ running: true, mode: req.mode, progress: null, report: null, logName: null, error: null, stopRequested: false });
+  const log = async (obj: Record<string, unknown>) => {
+    if (!logName) return;
+    try { await env.appendLog(logName, JSON.stringify(obj)); } catch (e) { console.warn('[Bildfassungen] Protokollzeile nicht geschrieben', e); }
+  };
+  const verify = env.verifyStored;
+  try {
+    if (req.mode === 'apply') {
+      await env.setMaintenance(true, 'old-image-version-release');
+      maintenanceOn = true;
+      await env.waitForDrainIdle?.();
+    }
+    const report = await runOldVersionRelease({
+      db,
+      verifyCurrent: (c) => verify(c.scope, c.currentHash, c.currentExtension, c.currentBytes),
+      saveDurably: async () => { if (!current) throw new Error('MIGRATION_NO_LEASE'); await current.saveDurably(); },
+      exclusive: (fn) => env.exclusive(async (lease) => { current = lease; try { return await fn(); } finally { current = null; } }),
+      transactionActive: () => env.transactionActive(),
+      assertAllowed: () => { if (!isOwner()) throw new NotOwnerError(); },
+      progress: (p) => {
+        if (!logName) {
+          logName = req.mode === 'apply' ? p.runId : `${p.runId}-dry`;
+          setRelUi({ logName });
+          void log({ at: now(), runId: p.runId, event: 'owner', reason: req.reason?.trim(), backup: req.backupRef?.trim(), user: env.session()?.userId ?? null });
+        }
+        setRelUi({ progress: p });
+      },
+      journal: async (e) => {
+        journal.push(e);
+        if (e.event === 'released') released++;
+        await log(e as unknown as Record<string, unknown>);
+      },
+      now,
+    }, {
+      mode: req.mode, batchSize: req.batchSize,
+      onlyBlobIds: req.onlyBlobIds ? new Set(req.onlyBlobIds) : undefined,
+      shouldStop: () => relUi.stopRequested || (req.stopAfter != null && released >= req.stopAfter),
+    });
+    await log({ at: now(), runId: report.runId, event: 'report', report: { ...report, errors: report.errors.slice(0, 200) } });
+    setRelUi({ report });
+    return { report, journal, logName };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    await log({ at: now(), event: 'error', reason: msg.slice(0, 300) });
+    setRelUi({ error: msg });
+    if (e instanceof NotOwnerError) return { journal, refused: { code: 'MIGRATION_NOT_OWNER', detail: 'the owner session ended — the run stopped after the last saved package' }, logName };
+    throw e;
+  } finally {
+    if (maintenanceOn) {
+      try { await env.setMaintenance(false, ''); } catch (e) { console.error('[Bildfassungen] Wartungsmodus nicht beendet', e); }
+    }
+    running = false;
+    setRelUi({ running: false, stopRequested: false });
+  }
+}
+
+export async function runOldVersionReleaseOnPrimary(req: ReleaseRunRequest): Promise<ReleaseRunResult> {
+  return runOldVersionReleaseWith(await primaryEnv(), req);
 }
 
 export async function runImageStoreMigrationOnPrimary(req: MigrationRunRequest): Promise<MigrationRunResult> {
@@ -231,4 +350,5 @@ export function installImageMigrationBridge(): void {
       return { plans: p.plans.length, skipped: p.skipped.length };
     },
   };
+  w.__lataifOldVersionRelease = { run: runOldVersionReleaseOnPrimary, stop: requestOldVersionReleaseStop, state: oldVersionReleaseUiState };
 }

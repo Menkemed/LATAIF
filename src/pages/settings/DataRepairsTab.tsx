@@ -22,6 +22,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { SupersededGalleryEditsCard } from './SupersededGalleryEditsCard';
 import { ImageStoreMigrationCard } from './ImageStoreMigrationCard';
+import { OldImageVersionsCard } from './OldImageVersionsCard';
 
 export function DataRepairsTab() {
   const [refresh, setRefresh] = useState(0);
@@ -118,6 +119,7 @@ export function DataRepairsTab() {
 
       {/* OWNER-WARTUNG — Bildspeicher verkleinern (nur auf ausdrücklichen Klick, mit Probelauf und Rückfrage). */}
       <ImageStoreMigrationCard reason={reason} />
+      <OldImageVersionsCard reason={reason} />
 
       <Card>
         <span className="text-overline">BULK METAL LOTS CLOSED BY THE START-UP STEP</span>
