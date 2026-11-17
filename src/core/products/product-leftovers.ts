@@ -61,6 +61,22 @@ export function purgeProductLeftovers(db: LeftoverDb, productIds: readonly strin
   return res;
 }
 
+/**
+ * Phase 5B — DAUERHAFTER Beleg, dass ein Artikel gelöscht wurde, ohne Abhängigkeit vom Änderungs-/Audit-Protokoll:
+ * das Protokoll (falls vorhanden) ODER die Zeile fehlt und der Artikel hat nur noch ENTFERNTE Foto-Verknüpfungen.
+ * Verknüpfungszeilen werden nie hart gelöscht, und jeder Löschweg eines Artikels entfernt sie (`purgeProductLeftovers`).
+ * Ein neuer, noch nicht angelegter Artikel hat keine Verknüpfung; ein bestehender hat seine Zeile. Lesend.
+ */
+export function productDeletionEvident(db: LeftoverDb, productId: string): boolean {
+  if (!productId) return false;
+  if (productWasDeleted(db, productId)) return true;
+  if (!hasTable(db, 'products') || !hasTable(db, 'media_links')) return false;
+  if (values(db, `SELECT 1 FROM products WHERE id = ? LIMIT 1`, [productId]).length) return false;
+  const retired = values(db, `SELECT 1 FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NOT NULL LIMIT 1`, [productId]).length > 0;
+  const active = values(db, `SELECT 1 FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL LIMIT 1`, [productId]).length > 0;
+  return retired && !active;
+}
+
 /** Wurde dieser Artikel gelöscht? Belegt durch das Löschen im Abgleich- oder im Änderungsprotokoll. */
 export function productWasDeleted(db: LeftoverDb, productId: string): boolean {
   if (!productId) return false;

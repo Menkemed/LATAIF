@@ -227,7 +227,7 @@ async function main(): Promise<void> {
       saveDurably: async () => { saves++; if (!inside) savesOutside++; },
       exclusive: async (fn) => { inside = true; try { return await fn(); } finally { inside = false; } },
       now: () => '2026-11-17T12:00:00Z',
-    }, { mode: 'apply', batchSize: 5 });
+    }, { mode: 'apply', batchSize: 5, includeDeadMedia: false });   // §3 prüft nur den ersten Abschnitt (alte Fassungen)
     ok(rep.released === 16 && rep.failed === 0 && !rep.stoppedEarly, `§3 Lauf: 16 freigegeben (${rep.released}/${rep.failed})`);
     ok(saves === 4 && savesOutside === 0, `§3 je Paket (5) einmal gespeichert, nur im exklusiven Platz (${saves}/${savesOutside})`);
     const st = statuses(db);
@@ -372,22 +372,40 @@ async function main(): Promise<void> {
     const ib = await addFor('purchase_inbox', 'purchase_inbox', 'intake_photo', 'i-dis');   // Inbox verworfen (Status), Verknüpfung aktiv
     const rg = await addFor('repair', 'repairs', 'gallery', 'r-gal');                          // Reparaturfoto nur aus der Galerie entfernt
     db.run(`UPDATE media_links SET deleted_at = '2026-11-17' WHERE entity_id = 'r-gal'`);
+    const ox = await addFor('order', 'orders', 'reference_image', 'o-keep');                  // Auftrag besteht, Verknüpfung entfernt → bleibt
+    db.run(`UPDATE media_links SET deleted_at = '2026-11-17' WHERE entity_id = 'o-keep'`);
+    const pOld = 'media-req-p-old';                                                          // aus world(): Artikel besteht, Foto aus der Galerie gelöscht
     const ownerLinks = new (await import('../../src/core/media/media-links.ts')).MediaOwnerLinks(db as never);
     const plan = rel.planDeadMediaRelease(db as MigrationDb);
     const ids = plan.candidates.map((c) => c.mediaId).sort();
-    ok(S(ids) === S([d1.media, d2.media].sort()) && plan.candidates.every((c) => c.blobs.length === 2 && c.ownerTypes.join() === 'product'),
-      `§8 Kandidaten = genau die 2 endgültig gelöschten Artikel (Protokoll in Änderungs- ODER Audit-Log) (${S(ids)})`);
-    ok(plan.kept.owner_without_delete_record?.media === 1 && plan.kept.shared_blob?.media === 1 && (plan.kept.owner_exists?.media ?? 0) >= 3 && plan.kept.open_ingest_job?.media === 1,
-      `§8 bleiben: ohne Löschprotokoll, geteilt, Besitzer existiert (Galerie/Altfoto), offene Aufnahme (${S(plan.kept)})`);
-    ok(!ids.includes(d3.media) && !ids.includes(s1.media) && !ids.includes(g1.media) && !ids.includes(o1.media) && ![rp, od, ib, rg].some((x) => ids.includes(x.media)), '§8 kein geschütztes Medium ist Kandidat (auch Reparatur, Auftrag, Inbox)');
+    const kindOf = (m: string) => plan.candidates.find((c) => c.mediaId === m)?.kind;
+    ok(S(ids) === S([d1.media, d2.media, d3.media, g1.media, rg.media, pOld].sort()) && plan.candidates.every((c) => c.blobs.length === 2),
+      `§8 Kandidaten: gelöschte Artikel (auch ohne Protokoll) und ausdrücklich aus der Galerie gelöschte Artikel-/Reparaturfotos (${S(ids)})`);
+    ok([d1, d2, d3].every((x) => kindOf(x.media) === 'owner_deleted') && [g1, rg].every((x) => kindOf(x.media) === 'removed_from_gallery') && kindOf(pOld) === 'removed_from_gallery',
+      '§8 Grund je Medium: Besitzer gelöscht / aus der Galerie gelöscht');
+    ok(plan.kept.shared_blob?.media === 1 && plan.kept.owner_exists?.media === 1 && plan.kept.open_ingest_job?.media === 1,
+      `§8 bleiben: geteilt, bestehender Auftrag, offene Aufnahme (${S(plan.kept)})`);
+    ok(!ids.includes(s1.media) && !ids.includes(o1.media) && ![rp, od, ib, ox].some((x) => ids.includes(x.media)), '§8 kein geschütztes Medium ist Kandidat (geteilt, offen, Reparatur/Auftrag mit aktiver Verknüpfung, Inbox, bestehender Auftrag)');
+    // dauerhafter Löschbeleg ohne Protokoll (Handy-Sperre und Bereinigung)
+    const { productDeletionEvident } = await import('../../src/core/products/product-leftovers.ts');
+    db.run(`INSERT INTO products (id, branch_id, images, category_id, updated_at, purchase_price) VALUES ('p-ghost', 'b1', '[]', 'cat-watch', '2026-11-10', 1)`);
+    db.run(`INSERT INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id, media_id, media_role, sort_order, is_primary, created_at)
+            SELECT tenant_id, 'lk-ghost', scope_kind, branch_id, 'product', 'p-ghost', media_id, media_role, 9, 0, created_at FROM media_links WHERE entity_id = 'p-share2' LIMIT 1`);
+    db.run(`DELETE FROM products WHERE id = 'p-ghost'`);   // wie ein Löschen per Sync ohne Aufräumen: Verknüpfung bleibt aktiv
+    ok(productDeletionEvident(db as never, 'p-del3') && !productDeletionEvident(db as never, 'p-brand-new') && !productDeletionEvident(db as never, 'p-share2')
+      && !productDeletionEvident(db as never, 'p-ghost'),
+      '§8 dauerhafter Beleg: gelöscht ohne Protokoll = ja; neu = nein; bestehend = nein; fehlende Zeile mit AKTIVER Verknüpfung = nein');
+    db.run(`DELETE FROM media_links WHERE link_id = 'lk-ghost'`);
     // Probelauf: zweiter Abschnitt getrennt, nichts geschrieben
     const before = S(db.exec(`SELECT * FROM media_objects ORDER BY media_id`)) + S(db.exec(`SELECT * FROM media_blobs ORDER BY blob_id`));
     db.run(`UPDATE media_ingest_jobs SET state = 'ready' WHERE target_media_id = ?`, [o1.media]);   // für den Lauf keine offene Aufnahme
     const plan2 = rel.planDeadMediaRelease(db as MigrationDb);
-    ok(S(plan2.candidates.map((c) => c.mediaId).sort()) === S([d1.media, d2.media, o1.media].sort()), '§8 nach Abschluss der Aufnahme ist auch dieses Medium nachweislich frei (3 Kandidaten)');
+    ok(plan2.candidates.length === 7 && plan2.candidates.some((c) => c.mediaId === o1.media), '§8 nach Abschluss der Aufnahme ist auch dieses Medium nachweislich frei (7 Kandidaten)');
     const dry = await rel.runOldVersionRelease({ db: db as MigrationDb, verifyCurrent: okVerify, saveDurably: async () => { throw new Error('nein'); }, journal: () => {} }, { mode: 'dry-run' });
-    ok(dry.deadMedia.media === plan2.candidates.length && dry.deadMedia.files === plan2.candidates.length * 2 && dry.deadMedia.ownerTypes.product === plan2.candidates.length && dry.planned === 4,
-      `§8 Probelauf: alte Fassungen (${dry.planned}) und Fotos gelöschter Artikel (${dry.deadMedia.media}) getrennt ausgewiesen`);
+    ok(dry.deadMedia.media === 7 && dry.deadMedia.files === 14 && dry.deadMedia.ownerTypes.product === 6 && dry.deadMedia.ownerTypes.repair === 1 && dry.planned === 4
+      && dry.deadMedia.byKind.owner_deleted?.media === 4 && dry.deadMedia.byKind.removed_from_gallery?.media === 3
+      && dry.deadMedia.bytes === dry.deadMedia.byKind.owner_deleted!.bytes + dry.deadMedia.byKind.removed_from_gallery!.bytes,
+      `§8 Probelauf: alte Fassungen (${dry.planned}) und gelöschte Fotos (${dry.deadMedia.media}: Besitzer gelöscht ${dry.deadMedia.byKind.owner_deleted?.media}, aus der Galerie ${dry.deadMedia.byKind.removed_from_gallery?.media}) getrennt, Zahlen stimmen`);
     ok(S(db.exec(`SELECT * FROM media_objects ORDER BY media_id`)) + S(db.exec(`SELECT * FROM media_blobs ORDER BY blob_id`)) === before, '§8 Probelauf ändert nichts');
     const presBefore = preservedRust(db);
     const others0 = digestExcept(db, ['media_objects', 'media_variants', 'media_blobs', 'media_blob_generations']);
@@ -399,10 +417,14 @@ async function main(): Promise<void> {
     const presAfter = preservedRust(db);
     ok([...relKeys].every((k2) => presBefore.has(k2) && !presAfter.has(k2)), '§8 Rust-Schutzmenge (echte SQL aus reachability.rs): genau die freigegebenen Dateien fallen heraus');
     ok([...presBefore].filter((k2) => !presAfter.has(k2)).length === relKeys.size + 4, '§8 sonst nichts außer den freigegebenen alten Fassungen');
-    ok(presAfter.has(key('t1', s1.main)) && presAfter.has(key('t1', d3.main)) && presAfter.has(key('t1', g1.main)) && [rp, od, ib, rg].every((x) => presAfter.has(key('t1', x.main))), `§8 geteilte, nicht protokollierte, Galerie-, Reparatur-, Auftrags- und Inbox-Medien bleiben geschützt (${S(Object.entries({ s1, d3, g1, rp, od, ib, rg }).filter(([, x]) => !presAfter.has(key('t1', x.main))).map(([n]) => n))})`);
+    ok(presAfter.has(key('t1', s1.main)) && [rp, od, ib, ox].every((x) => presAfter.has(key('t1', x.main))), `§8 geteilte, Reparatur-, Auftrags- und Inbox-Medien mit aktiver bzw. bestehender Verknüpfung bleiben geschützt (${S(Object.entries({ s1, rp, od, ib, ox }).filter(([, x]) => !presAfter.has(key('t1', x.main))).map(([n]) => n))})`);
     let relink = '';
-    try { ownerLinks.setGallery({ tenantId: 't1', scopeKind: 'branch', branchId: 'b1', entityType: 'product', entityId: 'p-gal', role: 'stock_image', securityClass: 'internal' } as never, [d1.media]); } catch (e) { relink = (e as { code?: string }).code ?? String(e); }
-    ok(/MEDIA_LINK_OBJECT_NOT_READY/.test(relink), `§8 ein freigegebenes Medium lässt sich nicht wieder verknüpfen (${relink})`);
+    try { ownerLinks.setGallery({ tenantId: 't1', scopeKind: 'branch', branchId: 'b1', entityType: 'product', entityId: 'p-gal', role: 'stock_image', securityClass: 'internal' } as never, [g1.media]); } catch (e) { relink = (e as { code?: string }).code ?? String(e); }
+    ok(/MEDIA_LINK_OBJECT_NOT_READY/.test(relink), `§8 veraltete Galerie-Änderung (Artikel) kann ein freigegebenes Foto nicht still zurückholen (${relink})`);
+    let relinkR = '';
+    try { ownerLinks.setGallery({ tenantId: 't1', scopeKind: 'branch', branchId: 'b1', entityType: 'repair', entityId: 'r-gal', role: 'gallery', securityClass: 'internal' } as never, [rg.media]); } catch (e) { relinkR = (e as { code?: string }).code ?? String(e); }
+    ok(/MEDIA_LINK_OBJECT_NOT_READY/.test(relinkR) && q(db, `SELECT COUNT(*) AS n FROM media_links WHERE entity_id = 'r-gal' AND deleted_at IS NULL`)[0].n === 0,
+      `§8 veralteter PC2-Reparaturauftrag mit dem gelöschten Foto wird sichtbar abgewiesen, nichts wieder verknüpft (${relinkR})`);
     // wiederholen: kein Fehler, nichts mehr zu tun
     const again = await rel.runOldVersionRelease({ db: db as MigrationDb, verifyCurrent: okVerify, saveDurably: async () => {}, journal: () => {} }, { mode: 'apply' });
     ok(again.deadMedia.total === 0 && again.deadMedia.failed === 0 && again.total === 0, '§8 erneuter Lauf: kein Fehler, nichts mehr zu tun');

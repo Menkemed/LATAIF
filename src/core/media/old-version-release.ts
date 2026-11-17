@@ -201,9 +201,15 @@ export function releaseOldVersion(db: MigrationDb, c: ReleaseCandidate, now: str
 // Phase 5B, zweiter Abschnitt — Fotos ENDGÜLTIG gelöschter Einträge (ganze Medien, nicht nur alte Fassungen).
 //
 // Ein Medium ist nur dann Kandidat, wenn es nachweislich niemand mehr braucht:
-//   • es hat mindestens eine Verknüpfung, und JEDE ist entfernt; JEDER Besitzer ist gelöscht (Zeile fehlt) UND das
-//     Löschen steht im Änderungs- oder Audit-Protokoll (wie `productWasDeleted`). Existiert ein Besitzer noch (auch
-//     nur aus der Galerie entfernt, storniert, soft-gelöscht), bleibt das Medium — es könnte wieder gebraucht werden;
+//   • es hat mindestens eine Verknüpfung, und JEDE ist entfernt (Verknüpfungszeilen werden nie hart gelöscht — das
+//     ist der DAUERHAFTE Beleg, unabhängig vom Änderungs-/Audit-Protokoll). Je Verknüpfung gilt:
+//       – der Besitzer ist gelöscht (Zeile fehlt): ein Artikel nimmt beim Löschen seine Verknüpfungen mit; Reparatur,
+//         Auftrag usw. lassen sie aktiv und erscheinen deshalb gar nicht erst hier (fail-closed); ODER
+//       – der Besitzer existiert und ist ein Artikel oder eine Reparatur: das Foto wurde ausdrücklich aus der Galerie
+//         gelöscht. Nach der Freigabe ist das Medium gelöscht markiert — ein veralteter PC2-/Handy-Auftrag, der es
+//         wieder verknüpfen will, wird sichtbar abgewiesen (MEDIA_LINK_OBJECT_NOT_READY / Basis-Prüfung der Galerie);
+//       – jeder andere Besitzer (Altgold, Dokument, Kunde, Lieferant, Auftrag/Inbox mit noch bestehender Zeile) hält
+//         sein Medium fest: mögliche Nachweise;
 //   • kein anderes Medium nutzt denselben Blob (Haupt- oder Vorschaubild) — geteilte Inhalte bleiben;
 //   • kein Ausweis/höhere Sicherheitsklasse, kein Einkaufs-Nachweis, kein Backup-Pin, keine offene Aufnahme;
 //   • die Blobs sind `present`, ihre aktuelle Fassung `available`, Schlüssel in bekannter Form.
@@ -213,20 +219,23 @@ export function releaseOldVersion(db: MigrationDb, c: ReleaseCandidate, now: str
 // entfernt danach der vorhandene GC (Rust-Schutzmenge: freigegebener Blob ohne lebendes/Ausweis-Medium).
 // ════════════════════════════════════════════════════════════════════════════
 
-/** Besitzer-Typ → Tabelle. Nur diese Typen kennen wir; ein anderer Typ hält sein Medium fest (fail-closed). */
+/** Besitzer-Typ → Tabelle. Nur diese Typen kennen wir; jeder andere Typ hält sein Medium fest (fail-closed). */
 export const DEAD_MEDIA_OWNER_TABLES: Readonly<Record<string, string>> = {
   product: 'products', repair: 'repairs', order: 'orders', purchase_inbox: 'purchase_inbox',
-  scrap_trade: 'scrap_trades', scrap_trade_line: 'scrap_trade_lines', precious_metal: 'precious_metals',
 };
+/** Besitzer, deren Galerie-Löschung eines einzelnen Fotos als ausdrückliches, endgültiges Löschen gilt. */
+export const GALLERY_DELETE_OWNER_TYPES: ReadonlySet<string> = new Set(['product', 'repair']);
 
 export type DeadMediaKeepReason =
-  | 'owner_exists' | 'owner_type_unknown' | 'owner_without_delete_record' | 'no_link' | 'shared_blob' | 'security_class'
+  | 'owner_exists' | 'owner_type_protected' | 'no_link' | 'shared_blob' | 'security_class'
   | 'purchase_identity' | 'open_ingest_job' | 'backup_pinned' | 'blob_not_present' | 'storage_key_form';
 
 export interface DeadMediaCandidate {
   tenantId: string;
   mediaId: string;
   ownerTypes: string[];
+  /** Warum frei: Besitzer gelöscht, Foto aus der Galerie gelöscht, oder beides (mehrere Verknüpfungen). */
+  kind: 'owner_deleted' | 'removed_from_gallery' | 'mixed';
   blobs: Array<{ blobId: string; bytes: number; rendition: 'main' | 'thumbnail' }>;
   bytes: number;
 }
@@ -234,13 +243,6 @@ export interface DeadMediaCandidate {
 export interface DeadMediaPlan {
   candidates: DeadMediaCandidate[];
   kept: Partial<Record<DeadMediaKeepReason, { media: number; files: number; bytes: number }>>;
-}
-
-function ownerDeleteRecorded(db: MigrationDb, table: string, id: string): boolean {
-  const hasCl = tableExists(db, 'sync_changelog') && rows(db, `PRAGMA table_info(sync_changelog)`).some((c) => c.name === 'action');
-  if (hasCl && rows(db, `SELECT 1 AS x FROM sync_changelog WHERE table_name = ? AND record_id = ? AND action = 'delete' LIMIT 1`, [table, id]).length) return true;
-  const hasAudit = tableExists(db, 'audit_log') && rows(db, `PRAGMA table_info(audit_log)`).some((c) => c.name === 'action_type');
-  return hasAudit && rows(db, `SELECT 1 AS x FROM audit_log WHERE entity_type = ? AND entity_id = ? AND action_type = 'DELETE' LIMIT 1`, [table, id]).length > 0;
 }
 
 /** Warum ein Medium bleiben muss — `null` heißt: nachweislich nicht mehr gebraucht. Liest nur. */
@@ -259,11 +261,14 @@ function deadMediaVerdict(db: MigrationDb, tenantId: string, mediaId: string): {
   const links = rows(db, `SELECT entity_type AS et, entity_id AS eid, deleted_at AS d FROM media_links WHERE tenant_id = ? AND media_id = ?`, [tenantId, mediaId]);
   if (links.length === 0) return res('no_link');
   if (links.some((l) => l.d == null)) return res('owner_exists');
+  let gone = 0, removed = 0;
   for (const l of links) {
     const table = DEAD_MEDIA_OWNER_TABLES[String(l.et)];
-    if (!table || !tableExists(db, table)) return res('owner_type_unknown');
-    if (rows(db, `SELECT 1 AS x FROM "${table}" WHERE id = ?`, [l.eid]).length) return res('owner_exists');
-    if (!ownerDeleteRecorded(db, table, String(l.eid))) return res('owner_without_delete_record');
+    if (!table || !tableExists(db, table)) return res('owner_type_protected');
+    const exists = rows(db, `SELECT 1 AS x FROM "${table}" WHERE id = ?`, [l.eid]).length > 0;
+    if (!exists) { gone++; continue; }
+    if (!GALLERY_DELETE_OWNER_TYPES.has(String(l.et))) return res('owner_exists');
+    removed++;
   }
   // geteilt: ein ANDERES Medium (gleich welchen Zustands) nutzt einen der Blobs
   for (const b of blobIds) {
@@ -281,6 +286,7 @@ function deadMediaVerdict(db: MigrationDb, tenantId: string, mediaId: string): {
   const variants = new Set(blobIds.slice(1));
   return res(null, {
     tenantId, mediaId, ownerTypes: [...new Set(links.map((l) => String(l.et)))],
+    kind: gone > 0 && removed > 0 ? 'mixed' : removed > 0 ? 'removed_from_gallery' : 'owner_deleted',
     blobs: blobs.map((b) => ({ blobId: String(b!.b), bytes: Number(b!.s ?? 0), rendition: variants.has(String(b!.b)) ? 'thumbnail' : 'main' })),
     bytes,
   });
@@ -370,6 +376,8 @@ export interface ReleaseReport {
     failed: number;
     kept: DeadMediaPlan['kept'];
     ownerTypes: Record<string, number>;
+    /** Getrennt nach Grund: Besitzer gelöscht / Foto aus der Galerie gelöscht / beides. */
+    byKind: Partial<Record<DeadMediaCandidate['kind'], { media: number; files: number; bytes: number }>>;
   };
 }
 
@@ -422,7 +430,7 @@ export async function runOldVersionRelease(deps: ReleaseDeps, opts: ReleaseOptio
     runId, mode: opts.mode, total: list.length, planned: 0, released: 0, bytesPlanned: 0, bytesReleased: 0,
     byRendition: { main: { files: 0, bytes: 0 }, thumbnail: { files: 0, bytes: 0 } },
     skipped: {}, failed: 0, kept: plan.kept, stoppedEarly: false, errors: [],
-    deadMedia: { total: deadList.length, media: 0, files: 0, bytes: 0, failed: 0, kept: dead.kept, ownerTypes: {} },
+    deadMedia: { total: deadList.length, media: 0, files: 0, bytes: 0, failed: 0, kept: dead.kept, ownerTypes: {}, byKind: {} },
   };
   for (const e of plan.excluded) report.skipped[e.reason] = (report.skipped[e.reason] ?? 0) + 1;
   let done = 0;
@@ -507,6 +515,7 @@ export async function runOldVersionRelease(deps: ReleaseDeps, opts: ReleaseOptio
               }
               report.deadMedia.media++; report.deadMedia.files += c.blobs.length; report.deadMedia.bytes += c.bytes;
               for (const t of c.ownerTypes) report.deadMedia.ownerTypes[t] = (report.deadMedia.ownerTypes[t] ?? 0) + 1;
+              { const bk = (report.deadMedia.byKind[c.kind] ??= { media: 0, files: 0, bytes: 0 }); bk.media++; bk.files += c.blobs.length; bk.bytes += c.bytes; }
               await deps.journal({ at: now(), runId, event: opts.mode === 'apply' ? 'released_media' : 'planned_media', mediaId: c.mediaId, files: c.blobs.length, bytes: c.bytes });
               done++; prog(true);
             }

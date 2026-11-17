@@ -29,9 +29,8 @@ const SKIP_LABEL: Record<ReleaseSkipReason, string> = {
   current_unverified: 'current file could not be verified',
 };
 const KEEP_LABEL: Record<DeadMediaKeepReason, string> = {
-  owner_exists: 'the item, repair, order or inbox entry still exists (photo only removed from its gallery, or still linked)',
-  owner_type_unknown: 'owner type not supported',
-  owner_without_delete_record: 'deleted, but the deletion is not recorded',
+  owner_exists: 'the order or inbox entry it belongs to still exists',
+  owner_type_protected: 'possible evidence (scrap gold, document, customer or supplier)',
   no_link: 'never linked to anything',
   shared_blob: 'the same picture is used elsewhere',
   security_class: 'identity document',
@@ -64,7 +63,7 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
     if (!dry) return;
     const text = `Release for the unused media cleanup:\n`
       + `• ${dry.planned} old image version(s) (${MB(dry.bytesPlanned)} MB)\n`
-      + `• ${dry.deadMedia.media} photo(s) of permanently deleted items (${dry.deadMedia.files} file(s), ${MB(dry.deadMedia.bytes)} MB)\n`
+      + `• ${dry.deadMedia.media} deleted photo(s) — of deleted items or deleted from a gallery (${dry.deadMedia.files} file(s), ${MB(dry.deadMedia.bytes)} MB)\n`
       + 'Nothing is deleted now. Current images, photos that may still be needed, identity documents and the media journal stay.\n'
       + 'While it runs, the second computer and the phone cannot save anything.\n'
       + 'This step cannot be undone in the app — only by restoring the full backup.\n'
@@ -111,8 +110,21 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
             )}
             <div data-oldver-dead data-media={dry.deadMedia.media} data-files={dry.deadMedia.files} data-bytes={dry.deadMedia.bytes}
               style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
-              <div>Photos of permanently deleted items — can be released: <b>{dry.deadMedia.media}</b> photo(s), {dry.deadMedia.files} file(s), {MB(dry.deadMedia.bytes)} MB
-                {Object.keys(dry.deadMedia.ownerTypes).length > 0 ? ` (${Object.entries(dry.deadMedia.ownerTypes).map(([t, n]) => `${n} from deleted ${OWNER_LABEL[t] ?? t}`).join(', ')})` : ''}.</div>
+              <div>Deleted photos — can be released: <b>{dry.deadMedia.media}</b> photo(s), {dry.deadMedia.files} file(s), {MB(dry.deadMedia.bytes)} MB.</div>
+              {dry.deadMedia.byKind.owner_deleted && (
+                <div data-oldver-dead-owner={dry.deadMedia.byKind.owner_deleted.media}>• of permanently deleted items: {dry.deadMedia.byKind.owner_deleted.media} photo(s),
+                  {' '}{dry.deadMedia.byKind.owner_deleted.files} file(s), {MB(dry.deadMedia.byKind.owner_deleted.bytes)} MB</div>
+              )}
+              {dry.deadMedia.byKind.removed_from_gallery && (
+                <div data-oldver-dead-gallery={dry.deadMedia.byKind.removed_from_gallery.media}>• deleted from the gallery of an item or repair: {dry.deadMedia.byKind.removed_from_gallery.media} photo(s),
+                  {' '}{dry.deadMedia.byKind.removed_from_gallery.files} file(s), {MB(dry.deadMedia.byKind.removed_from_gallery.bytes)} MB</div>
+              )}
+              {dry.deadMedia.byKind.mixed && (
+                <div>• both: {dry.deadMedia.byKind.mixed.media} photo(s), {MB(dry.deadMedia.byKind.mixed.bytes)} MB</div>
+              )}
+              {Object.keys(dry.deadMedia.ownerTypes).length > 0 && (
+                <div style={{ color: '#6B7280' }}>from {Object.entries(dry.deadMedia.ownerTypes).map(([t, n]) => `${n} ${OWNER_LABEL[t] ?? t}`).join(', ')}</div>
+              )}
               {Object.entries(dry.deadMedia.kept).filter(([, v]) => v && v.media > 0).length > 0 && (
                 <div data-oldver-dead-kept>Photos without a gallery that stay: {Object.entries(dry.deadMedia.kept).filter(([, v]) => v && v.media > 0)
                   .map(([k, v]) => `${v!.media} — ${KEEP_LABEL[k as DeadMediaKeepReason] ?? k}`).join('; ')}.</div>
