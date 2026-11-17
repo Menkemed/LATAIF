@@ -1982,6 +1982,14 @@ export class MediaDbCoordinator {
     );
     if (sameContent && String(sameContent.blob_id) !== blobId) {
       const current = Number(sameContent.current_generation_no) === Number(sameContent.generation_no);
+      // Phase 5B — ein vom Owner freigegebener Blob (`gc_pending`, Fotos eines gelöschten Artikels) wird beim
+      // erneuten Hochladen genau desselben Bildes wiederbelebt — nur über seine AKTUELLE Fassung, deren Datei
+      // der Ingest gerade (wieder) veröffentlicht hat.
+      if (current && sameContent.gen_status === 'available' && sameContent.blob_status === 'gc_pending' &&
+          sameContent.stored_blob_hash === desc.hash && Number(sameContent.byte_size) === desc.byte_size) {
+        this.reviveReleasedBlob(tenantId, String(sameContent.blob_id), now);
+        sameContent.blob_status = 'present';
+      }
       if (
         !current || sameContent.gen_status !== 'available' || sameContent.blob_status !== 'present' ||
         sameContent.stored_blob_hash !== desc.hash || Number(sameContent.byte_size) !== desc.byte_size ||
@@ -2010,6 +2018,12 @@ export class MediaDbCoordinator {
         `SELECT * FROM media_blobs WHERE tenant_id = $t AND blob_id = $b`,
         { $t: tenantId, $b: blobId },
       );
+      // Phase 5B — freigegebener Blob, dieselben Bytes kommen wieder: wiederbeleben, aber nur wenn Generation 1
+      // (genau diese Bytes) noch die aktuelle ist — sonst bliebe ein Zeiger auf eine Datei, die es nicht mehr gibt.
+      if (blob && blob.blob_status === 'gc_pending' && Number(blob.current_generation_no) === 1 && existing.gen_status === 'available') {
+        this.reviveReleasedBlob(tenantId, blobId, now);
+        blob.blob_status = 'present';
+      }
       // BILDSPEICHER — ein migrierter Blob steht auf Generation ≥ 2 (Generation 1 ist `superseded`
       // und trägt noch genau diese Bytes). Wiederverwenden ist richtig: es ist dasselbe Bild, nur
       // in der kleineren Fassung. Der Zeiger ist durch die Schema-Trigger immer `available`.
@@ -2046,6 +2060,14 @@ export class MediaDbCoordinator {
       [tenantId, blobId, dedupTokenFor(tenantId, desc.hash), now] as unknown[],
     );
     return blobId;
+  }
+
+  /** Phase 5B — `gc_pending` → `present` (umkehrbare Freigabe). Danach schützt die GC-Schutzmenge die Datei wieder. */
+  private reviveReleasedBlob(tenantId: string, blobId: string, now: string): void {
+    this.db.run(
+      `UPDATE media_blobs SET blob_status = 'present', updated_at = ? WHERE tenant_id = ? AND blob_id = ? AND blob_status = 'gc_pending'`,
+      [now, tenantId, blobId],
+    );
   }
 
   private ensureObject(

@@ -125,6 +125,30 @@ const preserved = (db: any) => new Set(q(db, `SELECT g.storage_key AS k FROM med
   UNION SELECT g.storage_key FROM media_blob_generations g JOIN media_backup_generation_pins p ON p.tenant_id = g.tenant_id AND p.blob_id = g.blob_id AND p.generation_no = g.generation_no WHERE g.gen_status = 'deleted'`).map((r) => String(r.k)));
 const currentKeys = (db: any) => new Set(q(db, `SELECT g.storage_key AS k FROM media_blobs b JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no`).map((r) => String(r.k)));
 const okVerify = async (_c: ReleaseCandidate) => {};
+const S = JSON.stringify;
+/** Die ECHTE Rust-Schutzmenge: SQL-Texte aus `src-tauri/src/media/reachability.rs`, hier in sql.js ausgeführt. */
+function rustConst(name: string): string {
+  const src = readFileSync(join(repo, 'src-tauri/src/media/reachability.rs'), 'utf8');
+  const start = src.indexOf(`const ${name}: &str = "`);
+  if (start < 0) throw new Error('Rust-Konstante fehlt: ' + name);
+  const from = src.indexOf('"', start) + 1;
+  const to = src.indexOf('";', from);
+  return src.slice(from, to).replace(/\\\r?\n\s*/g, '');
+}
+function preservedRust(db: any): Set<string> {
+  const base = rustConst('PRESERVED_GENERATIONS_SQL') + rustConst('RELEASED_BLOB_EXCLUSION');
+  const sql = `${base} UNION ${rustConst('PRESERVED_PINNED_DELETED_SQL')}`;
+  return new Set(q(db, sql).map((r) => String(r.storage_key ?? Object.values(r)[0])));
+}
+function digestExcept(db: any, skip: string[]): string {
+  const out: string[] = [];
+  for (const t of q(db, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)) {
+    if (skip.includes(t.name)) continue;
+    out.push(t.name + ':' + JSON.stringify(db.exec(`SELECT * FROM "${t.name}" ORDER BY rowid`)));
+  }
+  return out.join('|');
+}
+
 
 async function main(): Promise<void> {
   const SQL = await initSqlJs({ locateFile: (f: string) => join(repo, 'node_modules', 'sql.js', 'dist', f) });
@@ -301,6 +325,93 @@ async function main(): Promise<void> {
     const blocked = await wiring.runOldVersionReleaseWith(mkEnv() as never, { mode: 'dry-run' });
     release(); await migRun;
     ok(blocked.refused?.code === 'MIGRATION_ALREADY_RUNNING', '§6 nie zugleich mit der Migration');
+  }
+
+  // ── §8 Fotos endgültig gelöschter Einträge: nur nachweislich unbenutzte Medien; umkehrbar ────────────
+  { console.log('  … §8');
+    const { db, gw } = await world(SQL, 2);
+    db.run(`ALTER TABLE sync_changelog ADD COLUMN action TEXT`); db.run(`ALTER TABLE audit_log ADD COLUMN action_type TEXT`);
+    const coord = new MediaDbCoordinator(db, gw as never);
+    let k = 100;
+    const add = async (id: string, h?: { main: string; thumb: string }) => {
+      k++;
+      db.run(`INSERT INTO products (id, branch_id, images, category_id, updated_at, purchase_price) VALUES (?, 'b1', '[]', 'cat-watch', '2026-11-10', 1000)`, [id]);
+      const req = `req-${id}`; const main = { hash: h?.main ?? pad64(`d${k}d${id.length}`), size: 50_000 }; const thumb = { hash: h?.thumb ?? pad64(`f${k}f${id.length}`), size: 9_000 };
+      gw.preset('t1', req, main, thumb);
+      await coord.finalize({ tenantId: 't1', branchId: 'b1', entityType: 'product', entityId: id, scopeKind: 'branch', role: 'stock_image', ingestRequestId: req, requestHash: pad64(`c${k}`), isPrimary: true, sortOrder: 0 } as never);
+      return { media: `media-${req}`, main: main.hash, thumb: thumb.hash };
+    };
+    const del = (id: string, tomb: 'cl' | 'audit' | 'none') => {
+      db.run(`UPDATE media_links SET deleted_at = '2026-11-17' WHERE entity_type = 'product' AND entity_id = ?`, [id]);   // wie purgeProductLeftovers
+      db.run(`DELETE FROM products WHERE id = ?`, [id]);
+      if (tomb === 'cl') db.run(`INSERT INTO sync_changelog (table_name, record_id, data, action) VALUES ('products', ?, '{}', 'delete')`, [id]);
+      if (tomb === 'audit') db.run(`INSERT INTO audit_log (entity_type, entity_id, action_type) VALUES ('products', ?, 'DELETE')`, [id]);
+    };
+    const d1 = await add('p-del1'); del('p-del1', 'cl');                 // endgültig gelöscht (Änderungsprotokoll)
+    const d2 = await add('p-del2'); del('p-del2', 'audit');              // endgültig gelöscht (Audit)
+    const d3 = await add('p-del3'); del('p-del3', 'none');               // gelöscht, aber nicht protokolliert → bleibt
+    const s1 = await add('p-share1');                                    // geteilter Inhalt: dieselben Bytes an einem zweiten, lebenden Artikel
+    await add('p-share2', { main: s1.main, thumb: s1.thumb }); del('p-share1', 'cl');
+    const g1 = await add('p-gal');                                       // nur aus der Galerie entfernt, Artikel existiert → bleibt
+    db.run(`UPDATE media_links SET deleted_at = '2026-11-17' WHERE entity_id = 'p-gal'`);
+    const o1 = await add('p-open'); del('p-open', 'cl');                 // offene Aufnahme nennt das Medium → bleibt
+    db.run(`UPDATE media_ingest_jobs SET state = 'accepted' WHERE target_media_id = ?`, [o1.media]);
+    const addFor = async (entityType: string, table: string, role: string, id: string) => {
+      k++;
+      db.run(`INSERT INTO ${table} (id, branch_id) VALUES (?, 'b1')`, [id]);
+      const req = `req-${id}`; const main = { hash: pad64(`e${k}e${id.length}`), size: 50_000 }; const thumb = { hash: pad64(`9${k}9${id.length}`), size: 9_000 };
+      gw.preset('t1', req, main, thumb);
+      await coord.finalize({ tenantId: 't1', branchId: 'b1', entityType, entityId: id, scopeKind: 'branch', role, ingestRequestId: req, requestHash: pad64(`c${k}`), isPrimary: true, sortOrder: 0 } as never);
+      return { media: `media-${req}`, main: main.hash };
+    };
+    // Reparatur und Auftrag gelöscht: ihr Löschweg lässt die Verknüpfung AKTIV (Sync kann sie zurückbringen) → gilt als genutzt
+    const rp = await addFor('repair', 'repairs', 'gallery', 'r-del');
+    db.run(`DELETE FROM repairs WHERE id = 'r-del'`); db.run(`INSERT INTO sync_changelog (table_name, record_id, data, action) VALUES ('repairs','r-del','{}','delete')`);
+    const od = await addFor('order', 'orders', 'reference_image', 'o-del');
+    db.run(`DELETE FROM orders WHERE id = 'o-del'`); db.run(`INSERT INTO sync_changelog (table_name, record_id, data, action) VALUES ('orders','o-del','{}','delete')`);
+    const ib = await addFor('purchase_inbox', 'purchase_inbox', 'intake_photo', 'i-dis');   // Inbox verworfen (Status), Verknüpfung aktiv
+    const rg = await addFor('repair', 'repairs', 'gallery', 'r-gal');                          // Reparaturfoto nur aus der Galerie entfernt
+    db.run(`UPDATE media_links SET deleted_at = '2026-11-17' WHERE entity_id = 'r-gal'`);
+    const ownerLinks = new (await import('../../src/core/media/media-links.ts')).MediaOwnerLinks(db as never);
+    const plan = rel.planDeadMediaRelease(db as MigrationDb);
+    const ids = plan.candidates.map((c) => c.mediaId).sort();
+    ok(S(ids) === S([d1.media, d2.media].sort()) && plan.candidates.every((c) => c.blobs.length === 2 && c.ownerTypes.join() === 'product'),
+      `§8 Kandidaten = genau die 2 endgültig gelöschten Artikel (Protokoll in Änderungs- ODER Audit-Log) (${S(ids)})`);
+    ok(plan.kept.owner_without_delete_record?.media === 1 && plan.kept.shared_blob?.media === 1 && (plan.kept.owner_exists?.media ?? 0) >= 3 && plan.kept.open_ingest_job?.media === 1,
+      `§8 bleiben: ohne Löschprotokoll, geteilt, Besitzer existiert (Galerie/Altfoto), offene Aufnahme (${S(plan.kept)})`);
+    ok(!ids.includes(d3.media) && !ids.includes(s1.media) && !ids.includes(g1.media) && !ids.includes(o1.media) && ![rp, od, ib, rg].some((x) => ids.includes(x.media)), '§8 kein geschütztes Medium ist Kandidat (auch Reparatur, Auftrag, Inbox)');
+    // Probelauf: zweiter Abschnitt getrennt, nichts geschrieben
+    const before = S(db.exec(`SELECT * FROM media_objects ORDER BY media_id`)) + S(db.exec(`SELECT * FROM media_blobs ORDER BY blob_id`));
+    db.run(`UPDATE media_ingest_jobs SET state = 'ready' WHERE target_media_id = ?`, [o1.media]);   // für den Lauf keine offene Aufnahme
+    const plan2 = rel.planDeadMediaRelease(db as MigrationDb);
+    ok(S(plan2.candidates.map((c) => c.mediaId).sort()) === S([d1.media, d2.media, o1.media].sort()), '§8 nach Abschluss der Aufnahme ist auch dieses Medium nachweislich frei (3 Kandidaten)');
+    const dry = await rel.runOldVersionRelease({ db: db as MigrationDb, verifyCurrent: okVerify, saveDurably: async () => { throw new Error('nein'); }, journal: () => {} }, { mode: 'dry-run' });
+    ok(dry.deadMedia.media === plan2.candidates.length && dry.deadMedia.files === plan2.candidates.length * 2 && dry.deadMedia.ownerTypes.product === plan2.candidates.length && dry.planned === 4,
+      `§8 Probelauf: alte Fassungen (${dry.planned}) und Fotos gelöschter Artikel (${dry.deadMedia.media}) getrennt ausgewiesen`);
+    ok(S(db.exec(`SELECT * FROM media_objects ORDER BY media_id`)) + S(db.exec(`SELECT * FROM media_blobs ORDER BY blob_id`)) === before, '§8 Probelauf ändert nichts');
+    const presBefore = preservedRust(db);
+    const others0 = digestExcept(db, ['media_objects', 'media_variants', 'media_blobs', 'media_blob_generations']);
+    const rep = await rel.runOldVersionRelease({ db: db as MigrationDb, verifyCurrent: okVerify, saveDurably: async () => {}, journal: () => {} }, { mode: 'apply' });
+    const relKeys = new Set(q(db, `SELECT g.storage_key AS k FROM media_blobs b JOIN media_blob_generations g ON g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no WHERE b.blob_status = 'gc_pending'`).map((r) => String(r.k)));
+    ok(rep.deadMedia.media === plan2.candidates.length && relKeys.size === plan2.candidates.length * 2, `§8 Lauf: ${rep.deadMedia.media} Medien freigegeben, ${relKeys.size} Blobs gc_pending`);
+    ok(q(db, `SELECT COUNT(*) AS n FROM media_objects WHERE deleted_at IS NOT NULL`)[0].n === plan2.candidates.length, '§8 nur die freigegebenen Medien sind gelöscht markiert (nicht mehr verknüpfbar)');
+    ok(digestExcept(db, ['media_objects', 'media_variants', 'media_blobs', 'media_blob_generations']) === others0, '§8 Artikel, Verknüpfungen, Buchhaltung, Sync und Audit unverändert');
+    const presAfter = preservedRust(db);
+    ok([...relKeys].every((k2) => presBefore.has(k2) && !presAfter.has(k2)), '§8 Rust-Schutzmenge (echte SQL aus reachability.rs): genau die freigegebenen Dateien fallen heraus');
+    ok([...presBefore].filter((k2) => !presAfter.has(k2)).length === relKeys.size + 4, '§8 sonst nichts außer den freigegebenen alten Fassungen');
+    ok(presAfter.has(key('t1', s1.main)) && presAfter.has(key('t1', d3.main)) && presAfter.has(key('t1', g1.main)) && [rp, od, ib, rg].every((x) => presAfter.has(key('t1', x.main))), `§8 geteilte, nicht protokollierte, Galerie-, Reparatur-, Auftrags- und Inbox-Medien bleiben geschützt (${S(Object.entries({ s1, d3, g1, rp, od, ib, rg }).filter(([, x]) => !presAfter.has(key('t1', x.main))).map(([n]) => n))})`);
+    let relink = '';
+    try { ownerLinks.setGallery({ tenantId: 't1', scopeKind: 'branch', branchId: 'b1', entityType: 'product', entityId: 'p-gal', role: 'stock_image', securityClass: 'internal' } as never, [d1.media]); } catch (e) { relink = (e as { code?: string }).code ?? String(e); }
+    ok(/MEDIA_LINK_OBJECT_NOT_READY/.test(relink), `§8 ein freigegebenes Medium lässt sich nicht wieder verknüpfen (${relink})`);
+    // wiederholen: kein Fehler, nichts mehr zu tun
+    const again = await rel.runOldVersionRelease({ db: db as MigrationDb, verifyCurrent: okVerify, saveDurably: async () => {}, journal: () => {} }, { mode: 'apply' });
+    ok(again.deadMedia.total === 0 && again.deadMedia.failed === 0 && again.total === 0, '§8 erneuter Lauf: kein Fehler, nichts mehr zu tun');
+    // Wiederbelebung: genau dasselbe Bild kommt wieder (neuer Artikel) → Blob present, Datei wieder geschützt
+    await add('p-reupload', { main: d1.main, thumb: d1.thumb });
+    const st1 = q(db, `SELECT blob_status AS s FROM media_blobs WHERE blob_id IN (?, ?)`, ['blob-' + d1.main, 'blob-' + d1.thumb]).map((r) => r.s);
+    ok(S(st1) === S(['present', 'present']) && preservedRust(db).has(key('t1', d1.main)) && preservedRust(db).has(key('t1', d1.thumb)),
+      `§8 erneutes Hochladen desselben Bildes belebt den Blob wieder; die Datei ist wieder geschützt (${S(st1)})`);
+    ok(q(db, `SELECT COUNT(*) AS n FROM media_links WHERE entity_id = 'p-reupload' AND deleted_at IS NULL`)[0].n === 1, '§8 der neue Artikel zeigt das Bild (neue Verknüpfung, neues Medium)');
   }
 
   // ── §7 Rust-GC: Schutzmenge ohne `deleted`, Quarantäne/Bestätigung unverändert, Steuerordner nie ─────────

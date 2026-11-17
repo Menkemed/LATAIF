@@ -223,6 +223,9 @@ export interface ReleaseRunRequest {
   /** Test: nach so vielen Freigaben kooperativ anhalten. */
   stopAfter?: number;
   onlyBlobIds?: string[];
+  /** Zweiter Abschnitt (Fotos endgültig gelöschter Einträge) mitnehmen — Standard: ja. */
+  includeDeadMedia?: boolean;
+  onlyMediaIds?: string[];
 }
 export interface ReleaseRunResult {
   report?: ReleaseReport;
@@ -288,13 +291,14 @@ export async function runOldVersionReleaseWith(env: MigrationEnv, req: ReleaseRu
       },
       journal: async (e) => {
         journal.push(e);
-        if (e.event === 'released') released++;
+        if (e.event === 'released' || e.event === 'released_media') released++;
         await log(e as unknown as Record<string, unknown>);
       },
       now,
     }, {
       mode: req.mode, batchSize: req.batchSize,
       onlyBlobIds: req.onlyBlobIds ? new Set(req.onlyBlobIds) : undefined,
+      includeDeadMedia: req.includeDeadMedia, onlyMediaIds: req.onlyMediaIds ? new Set(req.onlyMediaIds) : undefined,
       shouldStop: () => relUi.stopRequested || (req.stopAfter != null && released >= req.stopAfter),
     });
     await log({ at: now(), runId: report.runId, event: 'report', report: { ...report, errors: report.errors.slice(0, 200) } });

@@ -310,3 +310,94 @@ fn a_generation_table_without_status_keeps_the_widest_answer() {
         .unwrap();
     assert_eq!(preserved_keys(&c).unwrap().len(), 1);
 }
+
+// ── BILDSPEICHER Phase 5B — a whole medium the owner released (`blob_status = 'gc_pending'`) ──────────
+
+/// The full shape the released-blob rule needs (security class, object deletion).
+fn db_full() -> Connection {
+    let c = Connection::open_in_memory().unwrap();
+    c.execute_batch(
+        "CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, deleted_at TEXT, security_class TEXT);
+         CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, current_generation_no INTEGER, deleted_at TEXT);
+         CREATE TABLE media_blob_generations (tenant_id TEXT, blob_id TEXT, generation_no INTEGER, storage_key TEXT,
+             stored_blob_hash TEXT, byte_size INTEGER, extension TEXT, gen_status TEXT, deleted_at TEXT);
+         CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, blob_id TEXT, variant_type TEXT, deleted_at TEXT);
+         CREATE TABLE media_links (tenant_id TEXT, media_id TEXT, media_role TEXT, entity_id TEXT, deleted_at TEXT);",
+    )
+    .unwrap();
+    c
+}
+
+/// The photo of a deleted item: object deleted, link deleted, master + thumbnail released.
+fn add_released_media(c: &Connection) {
+    c.execute("INSERT INTO media_objects VALUES ('t1','m1','b1','2026-11-17','internal')", []).unwrap();
+    c.execute("INSERT INTO media_blobs VALUES ('t1','b1','gc_pending',1,NULL)", []).unwrap();
+    add_generation(c, "b1", 1, H1, "available");
+    c.execute("INSERT INTO media_blobs VALUES ('t1','bv','gc_pending',1,NULL)", []).unwrap();
+    add_generation(c, "bv", 1, H2, "available");
+    c.execute("INSERT INTO media_variants VALUES ('t1','m1','bv','thumbnail','2026-11-17')", []).unwrap();
+    c.execute("INSERT INTO media_links VALUES ('t1','m1','stock_image','p-gone','2026-11-01')", []).unwrap();
+}
+
+#[test]
+fn a_released_medium_of_a_deleted_item_becomes_collectable_master_and_thumbnail() {
+    let c = db_full();
+    add_released_media(&c);
+    add_orphan_generation_full(&c);
+    let pres = preserved_keys(&c).unwrap();
+    assert!(!pres.contains(&key(H1)) && !pres.contains(&key(H2)), "released master and thumbnail leave the preserved set");
+    assert!(pres.contains(&key(ORPH)), "an unreleased medium stays protected");
+    assert!(required_keys(&c).unwrap().is_empty(), "nothing released is required");
+}
+
+fn add_orphan_generation_full(c: &Connection) {
+    c.execute("INSERT INTO media_objects VALUES ('t1','m-orph','b-orph',NULL,'internal')", []).unwrap();
+    c.execute("INSERT INTO media_blobs VALUES ('t1','b-orph','present',1,NULL)", []).unwrap();
+    add_generation(c, "b-orph", 1, ORPH, "available");
+}
+
+#[test]
+fn a_released_blob_that_a_living_object_still_uses_stays_protected() {
+    let c = db_full();
+    add_released_media(&c);
+    // shared content: a second, living object uses the same master blob and the same thumbnail blob
+    c.execute("INSERT INTO media_objects VALUES ('t1','m2','b1',NULL,'internal')", []).unwrap();
+    c.execute("INSERT INTO media_objects VALUES ('t1','m3','b-other',NULL,'internal')", []).unwrap();
+    c.execute("INSERT INTO media_variants VALUES ('t1','m3','bv','thumbnail',NULL)", []).unwrap();
+    let pres = preserved_keys(&c).unwrap();
+    assert!(pres.contains(&key(H1)), "master still used by a living object");
+    assert!(pres.contains(&key(H2)), "thumbnail still used by a living object's variant");
+}
+
+#[test]
+fn a_released_blob_of_an_identity_document_is_never_collectable() {
+    let c = db_full();
+    add_released_media(&c);
+    c.execute("UPDATE media_objects SET security_class='sensitive' WHERE media_id='m1'", []).unwrap();
+    let pres = preserved_keys(&c).unwrap();
+    assert!(pres.contains(&key(H1)) && pres.contains(&key(H2)), "identity class outranks the release, even when deleted");
+}
+
+#[test]
+fn a_released_blob_that_a_backup_pins_stays_protected() {
+    let c = db_full();
+    c.execute_batch("CREATE TABLE media_backup_generation_pins (tenant_id TEXT, backup_id TEXT, blob_id TEXT, generation_no INTEGER);").unwrap();
+    add_released_media(&c);
+    c.execute("INSERT INTO media_backup_generation_pins VALUES ('t1','bk1','b1',1)", []).unwrap();
+    let pres = preserved_keys(&c).unwrap();
+    assert!(pres.contains(&key(H1)), "a pin outranks the release");
+    assert!(!pres.contains(&key(H2)), "the unpinned thumbnail is still collectable");
+}
+
+#[test]
+fn a_revived_or_never_released_blob_stays_protected() {
+    let c = db_full();
+    add_released_media(&c);
+    // the same picture uploaded again: the coordinator sets the blob back to `present`
+    c.execute("UPDATE media_blobs SET blob_status='present' WHERE blob_id='b1'", []).unwrap();
+    let pres = preserved_keys(&c).unwrap();
+    assert!(pres.contains(&key(H1)), "revived = protected again");
+    // a deleted object alone (no release) never frees anything
+    c.execute("UPDATE media_blobs SET blob_status='present' WHERE blob_id='bv'", []).unwrap();
+    assert!(preserved_keys(&c).unwrap().contains(&key(H2)), "deleting an object does not release its file");
+}

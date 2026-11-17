@@ -126,16 +126,28 @@ Stand 17.11.2026, Primary nach der Migration:
     - Es ist der Idempotenz- und Konfliktanker je Aufnahme-Anfrage.
     - Der Code kennt kein Löschen veröffentlichter Einträge.
     - Der GC betritt Steuerordner nie.
+- **Zweiter Abschnitt — Fotos endgültig gelöschter Einträge (seit 17.11.2026):**
+  - **Kandidat** ist ein ganzes Medium nur, wenn jede Verknüpfung entfernt ist und jeder Besitzer gelöscht ist. Die Besitzer-Zeile muss fehlen, und das Löschen muss im Änderungs- oder Audit-Protokoll stehen.
+  - Zusätzlich darf kein anderes Medium denselben Blob nutzen, und es gibt keinen Ausweis, keinen Einkaufs-Nachweis, keinen Backup-Pin und keine offene Aufnahme.
+  - **Stand 17.11.:** 42 Fotos gelöschter Artikel, 84 Dateien, 4,46 MB.
+  - **Bleibt:** alles, dessen Besitzer noch existiert (aus der Galerie entfernt, darunter Reparaturfotos, die PC2 per Kennung wieder verknüpfen kann).
+  - **Ebenfalls bleibt:** Fotos gelöschter Reparaturen, Aufträge, Kunden, Lieferanten und Altgold-Geschäfte sowie verworfener Inbox-Einträge. Deren Löschweg lässt die Verknüpfung aktiv; Reparaturen und Aufträge kann ein veralteter Sync wieder anlegen.
+  - **Freigabe:** Das Medium und seine Varianten bekommen `deleted_at` und sind damit nicht mehr verknüpfbar; die Blobs gehen auf `blob_status = 'gc_pending'`.
+  - **Umkehrbar:** Lädt jemand genau dasselbe Bild wieder hoch, setzt der Coordinator den Blob zurück auf `present`. Ein Abgleich beim Start holt die Datei dann aus der Quarantäne zurück.
+  - **Rust:** `reachability::RELEASED_BLOB_EXCLUSION` gibt einen solchen Blob nur frei, wenn kein lebendes Medium und kein Ausweis-Medium ihn nutzt. Ein Pin schützt jede Fassung.
+- **Künftiges Löschen:**
+  - Ein gelöschter Artikel (einzeln, mehrfach, Zusammenführen, Fertigung, Einkauf ändern) erscheint ab dann automatisch im nächsten Probelauf. Freigegeben wird aber nur durch den Owner, nie nach Alter.
+  - Andere Module behalten ihre Fotos, bis ihre Löschwege die Verknüpfungen entfernen. Dafür braucht es eine eigene Entscheidung (Sync-Wiederkehr, Nachweispflichten).
 - **Bausteine:** `src/core/media/old-version-release.ts` (Kern) und `runOldVersionReleaseWith` in `image-store-migration-wiring.ts`. Die Karte „Release old image versions" in Settings → Data Repairs, Test `test/image-store/old-version-release.test.ts`.
 - **Ablauf:**
   1. PC2 schließen, Handy ruhig.
   2. Frische Vollsicherung `<Datum>_vor-bildbereinigung` auf E: und F: (`manuelle-sicherung.mjs`), prüfen und dauerhaft behalten.
-  3. Data Repairs: Grund eintragen, dann „Dry run (changes nothing)". Erwartet: 869 freigebbar, 55,7 MB, „Stay“ mit aktuellen Bildern, Ausweisen, entfernten Fotos und Journal.
+  3. Data Repairs: Grund eintragen, dann „Dry run (changes nothing)". Erwartet: 869 alte Fassungen (55,7 MB) und, getrennt, 42 Fotos gelöschter Artikel (84 Dateien, 4,5 MB).
   4. Sicherungsname eintragen, „Release old versions“, Rückfrage bestätigen. Wartungsmodus und Pakete zu 25 Bildern; jede aktuelle Datei wird vorher von Rust verifiziert. „Stop“ hält sauber an; ein neuer Start setzt fort.
   5. Settings → Backup & Restore → Unused media cleanup:
-     - **Scan:** erwartet 869 unbenutzte Dateien und 55,7 MB.
+     - **Scan:** erwartet 953 unbenutzte Dateien und 60,2 MB.
      - **Schedule:** Die App startet neu, beim Start werden die Dateien in die Quarantäne `.gc-quarantine` verschoben.
-     - **Nach dem Neustart:** Der Scan zeigt 869 in Quarantäne.
+     - **Nach dem Neustart:** Der Scan zeigt 953 in Quarantäne.
      - **Finalize:** löscht endgültig.
   6. Nachweis gegen die Sicherung, danach PC2 öffnen.
 - **Rückweg:**

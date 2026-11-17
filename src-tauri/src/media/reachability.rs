@@ -188,9 +188,48 @@ pub fn required_keys_from_db(db: &std::path::Path) -> Result<BTreeSet<String>, M
 /// deleted generation still goes through the normal GC run: dry run → boot-time quarantine → explicit
 /// owner finalize, and reconcile moves it back if it became referenced again.
 const PRESERVED_GENERATIONS_SQL: &str = "SELECT g.storage_key FROM media_blob_generations g WHERE g.gen_status <> 'deleted'";
+/// A pinned generation stays protected whatever its own or its blob's state (a backup still names it).
 const PRESERVED_PINNED_DELETED_SQL: &str = "SELECT g.storage_key FROM media_blob_generations g \
-     JOIN media_backup_generation_pins p ON p.tenant_id=g.tenant_id AND p.blob_id=g.blob_id AND p.generation_no=g.generation_no \
-     WHERE g.gen_status = 'deleted'";
+     JOIN media_backup_generation_pins p ON p.tenant_id=g.tenant_id AND p.blob_id=g.blob_id AND p.generation_no=g.generation_no";
+
+/// BILDSPEICHER Phase 5B — a whole medium the owner released (photos of a permanently deleted item).
+///
+/// Its CURRENT generation can never leave `available` (`trg_mbg_current_status_lock`), and marking it
+/// `deleted` would be wrong anyway: storage is content-addressed, so a later upload of exactly the same
+/// picture must be able to use the same key again. So the release is on the BLOB: `blob_status =
+/// 'gc_pending'`, reversible — the coordinator sets it back to `present` when the same bytes are uploaded
+/// again. Its generations leave the preserved set only while NOTHING alive can reach the blob: no media
+/// object that is not deleted uses it (as master or through a variant), and no identity-class object uses
+/// it at all. Otherwise it stays protected, whatever the blob status says (fail-closed).
+const RELEASED_BLOB_EXCLUSION: &str = " AND NOT EXISTS (SELECT 1 FROM media_blobs rb \
+     WHERE rb.tenant_id=g.tenant_id AND rb.blob_id=g.blob_id AND rb.blob_status='gc_pending' \
+       AND NOT EXISTS (SELECT 1 FROM media_objects ro WHERE ro.tenant_id=rb.tenant_id AND ro.master_blob_id=rb.blob_id \
+                         AND (ro.deleted_at IS NULL OR ro.security_class NOT IN ('internal','public'))) \
+       AND NOT EXISTS (SELECT 1 FROM media_variants rv JOIN media_objects ro ON ro.tenant_id=rv.tenant_id AND ro.media_id=rv.media_id \
+                        WHERE rv.tenant_id=rb.tenant_id AND rv.blob_id=rb.blob_id \
+                          AND (ro.deleted_at IS NULL OR ro.security_class NOT IN ('internal','public'))))";
+
+fn table_has_columns(conn: &Connection, table: &str, cols: &[&str]) -> Result<bool, MediaError> {
+    if !table_exists(conn, table)? {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| MediaError::Io(format!("column probe: {e}")))?;
+    let names: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| MediaError::Io(format!("column probe: {e}")))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| MediaError::Io(format!("column probe: {e}")))?;
+    Ok(cols.iter().all(|c| names.iter().any(|n| n == c)))
+}
+
+/// The released-blob rule needs the full shape; a hand-built fixture without it keeps the wider answer.
+fn released_blob_rule_applies(conn: &Connection) -> Result<bool, MediaError> {
+    Ok(table_has_columns(conn, "media_blobs", &["tenant_id", "blob_id", "blob_status"])?
+        && table_has_columns(conn, "media_objects", &["tenant_id", "master_blob_id", "media_id", "deleted_at", "security_class"])?
+        && table_has_columns(conn, "media_variants", &["tenant_id", "media_id", "blob_id"])?)
+}
 
 fn generations_have_status(conn: &Connection) -> Result<bool, MediaError> {
     let mut stmt = conn
@@ -214,10 +253,17 @@ pub fn preserved_keys(conn: &Connection) -> Result<BTreeSet<String>, MediaError>
     // A hand-built table without a status column (old fixtures) keeps the old, widest answer.
     let sql = if !generations_have_status(conn)? {
         "SELECT storage_key FROM media_blob_generations".to_string()
-    } else if table_exists(conn, "media_backup_generation_pins")? {
-        format!("{PRESERVED_GENERATIONS_SQL} UNION {PRESERVED_PINNED_DELETED_SQL}")
     } else {
-        PRESERVED_GENERATIONS_SQL.to_string()
+        let base = if released_blob_rule_applies(conn)? {
+            format!("{PRESERVED_GENERATIONS_SQL}{RELEASED_BLOB_EXCLUSION}")
+        } else {
+            PRESERVED_GENERATIONS_SQL.to_string()
+        };
+        if table_exists(conn, "media_backup_generation_pins")? {
+            format!("{base} UNION {PRESERVED_PINNED_DELETED_SQL}")
+        } else {
+            base
+        }
     };
     let mut stmt = conn
         .prepare(&sql)

@@ -10,7 +10,7 @@ import { useEffect, useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
-import type { ReleaseReport, ReleaseSkipReason } from '@/core/media/old-version-release';
+import type { DeadMediaKeepReason, ReleaseReport, ReleaseSkipReason } from '@/core/media/old-version-release';
 import {
   oldVersionReleaseUiState, requestOldVersionReleaseStop, runOldVersionReleaseOnPrimary, subscribeOldVersionRelease,
   type ReleaseUiState,
@@ -28,6 +28,20 @@ const SKIP_LABEL: Record<ReleaseSkipReason, string> = {
   storage_key_form: 'unexpected file name',
   current_unverified: 'current file could not be verified',
 };
+const KEEP_LABEL: Record<DeadMediaKeepReason, string> = {
+  owner_exists: 'the item, repair, order or inbox entry still exists (photo only removed from its gallery, or still linked)',
+  owner_type_unknown: 'owner type not supported',
+  owner_without_delete_record: 'deleted, but the deletion is not recorded',
+  no_link: 'never linked to anything',
+  shared_blob: 'the same picture is used elsewhere',
+  security_class: 'identity document',
+  purchase_identity: 'kept as purchase evidence',
+  open_ingest_job: 'an upload is still open',
+  backup_pinned: 'held by a backup',
+  blob_not_present: 'file already missing',
+  storage_key_form: 'unexpected file name',
+};
+const OWNER_LABEL: Record<string, string> = { product: 'items', repair: 'repairs', order: 'orders', purchase_inbox: 'inbox entries' };
 
 export function OldImageVersionsCard({ reason }: { reason: string }) {
   const [ui, setUi] = useState<ReleaseUiState>(oldVersionReleaseUiState());
@@ -48,8 +62,10 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
 
   async function start(): Promise<void> {
     if (!dry) return;
-    const text = `Release ${dry.planned} old image version(s) (${MB(dry.bytesPlanned)} MB) for the unused media cleanup?\n`
-      + 'Nothing is deleted now. The current images, removed photos, identity documents and the media journal stay.\n'
+    const text = `Release for the unused media cleanup:\n`
+      + `• ${dry.planned} old image version(s) (${MB(dry.bytesPlanned)} MB)\n`
+      + `• ${dry.deadMedia.media} photo(s) of permanently deleted items (${dry.deadMedia.files} file(s), ${MB(dry.deadMedia.bytes)} MB)\n`
+      + 'Nothing is deleted now. Current images, photos that may still be needed, identity documents and the media journal stay.\n'
       + 'While it runs, the second computer and the phone cannot save anything.\n'
       + 'This step cannot be undone in the app — only by restoring the full backup.\n'
       + `Verified full backup: ${backupRef.trim()}`;
@@ -59,7 +75,7 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
       const r = await runOldVersionReleaseOnPrimary({ mode: 'apply', reason: reason.trim(), backupRef: backupRef.trim() });
       if (r.refused) setMsg({ text: r.refused.detail, ok: false });
       else if (r.report?.stoppedEarly) setMsg({ text: `Stopped (${r.report.stopCode ?? 'stopped'}). Everything done so far is saved. Start again to continue.`, ok: false });
-      else if (r.report) setMsg({ text: `Done. ${r.report.released} old version(s) released (${MB(r.report.bytesReleased)} MB), ${r.report.failed} error(s). Next: Settings → Backup & Restore → Unused media cleanup → Scan, then schedule (restart) and confirm.`, ok: r.report.failed === 0 });
+      else if (r.report) setMsg({ text: `Done. ${r.report.released} old version(s) (${MB(r.report.bytesReleased)} MB) and ${r.report.deadMedia.media} photo(s) of deleted items (${MB(r.report.deadMedia.bytes)} MB) released, ${r.report.failed + r.report.deadMedia.failed} error(s). Next: Settings → Backup & Restore → Unused media cleanup → Scan, then schedule (restart) and confirm.`, ok: r.report.failed + r.report.deadMedia.failed === 0 });
       setDry(null);
     } catch (e) { setMsg({ text: e instanceof Error ? e.message : String(e), ok: false }); } finally { setBusy(false); }
   }
@@ -72,11 +88,13 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
       <div data-oldver-card>
         <span className="text-overline">RELEASE OLD IMAGE VERSIONS (OWNER MAINTENANCE)</span>
         <p style={{ fontSize: 13, color: '#6B7280', marginTop: 6, maxWidth: 760 }}>
-          After making the stored images smaller, the old, larger versions are still on the disk. This step releases them
-          for the unused media cleanup — it deletes nothing itself. Only old versions whose current, smaller version has
-          been checked are released. Current images, photos removed from a gallery, identity documents and the media journal
-          always stay. Before you start: close the second computer, stop using the phone, and make a full backup on E: and F:
-          — keep it permanently. Then delete the files in Settings → Backup &amp; Restore → Unused media cleanup.
+          Releases files that nothing needs any more for the unused media cleanup — it deletes nothing itself. Two parts:
+          the old, larger image versions left after making the stored images smaller (only when the current, smaller version
+          has been checked), and the photos of permanently deleted items (the item is gone and its deletion is recorded, and
+          no other record uses the picture). Current images, photos of items, repairs, orders and inbox entries that still
+          exist, identity documents and the media journal always stay. Uploading exactly the same picture again later brings
+          a released photo back. Before you start: close the second computer, stop using the phone, and make a full backup on
+          E: and F: — keep it permanently. Then delete the files in Settings → Backup &amp; Restore → Unused media cleanup.
         </p>
 
         <div className="flex gap-3" style={{ marginTop: 10, flexWrap: 'wrap' }}>
@@ -88,18 +106,26 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
             data-unverified={dry.skipped.current_unverified ?? 0} style={{ marginTop: 10, fontSize: 12, color: '#374151' }}>
             <div>Can be released: <b>{dry.planned}</b> old version(s), {MB(dry.bytesPlanned)} MB — main images {dry.byRendition.main.files} ({MB(dry.byRendition.main.bytes)} MB),
               previews {dry.byRendition.thumbnail.files} ({MB(dry.byRendition.thumbnail.bytes)} MB).</div>
-            <div>Stay: current images in use {dry.kept.currentInUse.files} ({MB(dry.kept.currentInUse.bytes)} MB), identity documents {dry.kept.currentIdentity.files},
-              photos removed from a gallery {dry.kept.currentRemovedPhotos.files} ({MB(dry.kept.currentRemovedPhotos.bytes)} MB), media journal (not touched).</div>
             {skipped.length > 0 && (
               <div data-oldver-skipped>Old versions kept: {skipped.map(([k, n]) => `${n} ${SKIP_LABEL[k as ReleaseSkipReason] ?? k}`).join(', ')}.</div>
             )}
+            <div data-oldver-dead data-media={dry.deadMedia.media} data-files={dry.deadMedia.files} data-bytes={dry.deadMedia.bytes}
+              style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
+              <div>Photos of permanently deleted items — can be released: <b>{dry.deadMedia.media}</b> photo(s), {dry.deadMedia.files} file(s), {MB(dry.deadMedia.bytes)} MB
+                {Object.keys(dry.deadMedia.ownerTypes).length > 0 ? ` (${Object.entries(dry.deadMedia.ownerTypes).map(([t, n]) => `${n} from deleted ${OWNER_LABEL[t] ?? t}`).join(', ')})` : ''}.</div>
+              {Object.entries(dry.deadMedia.kept).filter(([, v]) => v && v.media > 0).length > 0 && (
+                <div data-oldver-dead-kept>Photos without a gallery that stay: {Object.entries(dry.deadMedia.kept).filter(([, v]) => v && v.media > 0)
+                  .map(([k, v]) => `${v!.media} — ${KEEP_LABEL[k as DeadMediaKeepReason] ?? k}`).join('; ')}.</div>
+              )}
+            </div>
+            <div style={{ marginTop: 8 }}>Always stay: current images in use {dry.kept.currentInUse.files} ({MB(dry.kept.currentInUse.bytes)} MB), identity documents {dry.kept.currentIdentity.files}, media journal (not touched).</div>
           </div>
         )}
 
         {!ui.running && (
           <div className="flex flex-col gap-3" style={{ marginTop: 12, maxWidth: 520 }}>
             <Input label="Name of the verified full backup (E: and F:)" value={backupRef} onChange={(e) => setBackupRef(e.target.value)} data-oldver-backup />
-            <Button variant="primary" disabled={busy || !dry || dry.planned === 0 || !reason.trim() || backupRef.trim().length < 8}
+            <Button variant="primary" disabled={busy || !dry || dry.planned + dry.deadMedia.media === 0 || !reason.trim() || backupRef.trim().length < 8}
               onClick={() => void start()} data-oldver-start>Release old versions</Button>
             {!dry && <span style={{ fontSize: 12, color: '#6B7280' }}>Run the dry run first.</span>}
             {dry && !reason.trim() && <span style={{ fontSize: 12, color: '#6B7280' }}>Enter a reason above first.</span>}
@@ -127,7 +153,7 @@ export function OldImageVersionsCard({ reason }: { reason: string }) {
         {last && last.mode === 'apply' && !ui.running && (
           <div data-oldver-result data-released={last.released} data-failed={last.failed} data-stopped={String(last.stoppedEarly)}
             style={{ marginTop: 10, fontSize: 12, color: '#374151' }}>
-            Last run: {last.released} released ({MB(last.bytesReleased)} MB), {last.failed} error(s)
+            Last run: {last.released} old version(s) ({MB(last.bytesReleased)} MB) and {last.deadMedia.media} photo(s) of deleted items ({MB(last.deadMedia.bytes)} MB) released, {last.failed + last.deadMedia.failed} error(s)
             {last.stoppedEarly ? `, stopped early (${last.stopCode ?? ''}) — start again to continue` : ''}.
             {ui.logName && <> Log: <span className="font-mono">maintenance-logs/{ui.logName}.jsonl</span> in the data folder.</>}
           </div>
