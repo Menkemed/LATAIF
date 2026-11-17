@@ -27,6 +27,18 @@ export const CHANGELOG_OMIT: Readonly<Record<string, readonly string[]>> = {
   products: ['image_embedding'],
 };
 
+/**
+ * A2-STUFE-1 — dieselben Spalten sind beim EINSPIELEN rein lokal: ein Eintrag aus dem Abgleich (auch ein
+ * ALTER von vor Weg A, der noch einen Vektor oder `null` trägt) setzt sie nie. Sonst könnte ein Wieder-
+ * Einspielen — normaler Pull eines noch offenen Eintrags oder Neuaufbau nach Cursor-Verlust, der ab dem
+ * ersten fremden Eintrag alles erneut anwendet — ein neueres Embedding durch ein altes ersetzen oder auf NULL
+ * setzen. Das Embedding ist abgeleitet; der Rechner, der es braucht, rechnet es selbst. Alle übrigen Felder
+ * wirken wie bisher.
+ */
+export function inboundPayload(table: string, data: Record<string, unknown>): Record<string, unknown> {
+  return changelogPayload(table, data);
+}
+
 /** Die Zeile, wie sie in den Changelog geht. Ohne betroffene Spalte unverändert (kein Kopieren). */
 export function changelogPayload(table: string, row: Record<string, unknown>): Record<string, unknown> {
   const omit = CHANGELOG_OMIT[table];

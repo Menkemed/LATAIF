@@ -3,9 +3,14 @@
 // Run: node test/storage-perf/sync-payload-contract.test.ts
 //
 // §11 measures what a product save actually costs in `sync_changelog`, using the
-// EXACT statement the producer runs (`trackChange` re-reads the whole row with
+// statement the producer runs (`trackChange` re-reads the whole row with
 // `SELECT * FROM products WHERE id = ?` and stores it as JSON), against a real
 // sql.js database holding a legacy product and a migrated one.
+// SYNC-SLIM (Weg A): the producer then passes the row through `changelogPayload()`,
+// which drops ONLY `products.image_embedding` (the receiver never applies it, see
+// `inboundPayload`). Every other column — `images` included — is still the full row,
+// so everything this gate pins about `images` holds unchanged. The test tables
+// below carry no embedding value, so this copy of the producer stays exact for them.
 //
 // §12 fixes the contract that follows from it. The measured answer is that the
 // payload is blob-free BY CONSTRUCTION once the product is migrated — `images` is
@@ -44,7 +49,7 @@ function bigDataUrl(seed: number): string {
 
 type AnyDb = { run(s: string, p?: unknown[]): void; exec(s: string, p?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> };
 
-/** The producer, verbatim: sync-service.ts trackChange re-reads the FULL row. */
+/** The producer: sync-service.ts trackChange re-reads the FULL row (then drops only `image_embedding`, absent here). */
 function trackChangePayload(db: AnyDb, table: string, id: string): string {
   const res = db.exec(`SELECT * FROM ${table} WHERE id = ?`, [id]);
   const row: Record<string, unknown> = {};

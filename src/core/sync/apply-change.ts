@@ -25,6 +25,7 @@
 // frontend schema and compares. Imported with an explicit JSON attribute so the SAME import line
 // resolves under Vite (production bundle) AND `node` (the behavioral gate strips types).
 import SYNC_BUSINESS_SCHEMA from './sync-business-schema.json' with { type: 'json' };
+import { inboundPayload } from './changelog-payload.ts';
 
 // The minimal shape of the sql.js database handle the apply path uses. Kept structural so a
 // test can pass a real sql.js `Database` (production) without a dependency on this module.
@@ -450,7 +451,9 @@ export function applySyncChange(db: SqlDb, change: ApplyChange): void {
   if (change.action === 'insert' || change.action === 'update') {
     // change.data kann ein base64-Foto (~1 MB) sein — NIE das ganze Objekt loggen.
     const data = validateBusinessPayload(contract, change.data);
-    applyUpsert(db, change.table_name, change.record_id, data);
+    // A2-STUFE-1 — rein lokale Spalten (Artikel: KI-Vektor) werden nie aus dem Abgleich übernommen: kein altes
+    // Echo kann ein neueres Embedding überschreiben oder löschen. Der Vertrag oben bleibt unverändert geprüft.
+    applyUpsert(db, change.table_name, change.record_id, inboundPayload(change.table_name, data));
   } else if (change.action === 'delete') {
     // §5 — DELETE carries no data contract: the canonical, allow-listed table is validated above
     // and `record_id` is a bound parameter. Nothing else is required.
