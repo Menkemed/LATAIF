@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Wrench, FileText } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -11,6 +12,8 @@ import { repairCostDatePrompt } from '@/core/repairs/repair-cost-date';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
+import { RepairHoverCard } from '@/components/repairs/RepairHoverCard';
+import { hoverCardPosition } from '@/core/repairs/repair-hover';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { useRepairStore } from '@/stores/repairStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -122,6 +125,12 @@ export function RepairList() {
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
   const { categories, loadCategories, products, loadProducts } = useProductStore();
+  // REPAIR-HOVER — große Karte am Mauszeiger (Muster der Collections-Inventur); erscheint nach kurzem Verweilen,
+  // erst dann wird das Bild geladen.
+  const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null);
+  const hoverTimer = useRef<number | null>(null);
+  const hoverPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  useEffect(() => () => { if (hoverTimer.current) window.clearTimeout(hoverTimer.current); }, []);
   // v0.6.9 — Soft-Reservation: OWN-Repair greift ein eigenes Stueck ab — wenn es
   // auf einer offenen Order liegt, Hinweis im Picker.
   const { orders, loadOrders, getAllProductReservations } = useOrderStore();
@@ -749,6 +758,18 @@ export function RepairList() {
         </div>
       )}
 
+      {hover && (() => {
+        const r = filtered.find((x) => x.id === hover.id);
+        if (!r) return null;
+        const pos = hoverCardPosition(hover.x, hover.y, window.innerWidth, window.innerHeight);
+        return createPortal(
+          <div style={{ position: 'fixed', left: pos.left, top: pos.top, zIndex: 1000, pointerEvents: 'none' }}>
+            <RepairHoverCard repair={r} product={r.productId ? products.find((p) => p.id === r.productId) : undefined} />
+          </div>,
+          document.body,
+        );
+      })()}
+
       {filtered.map(rep => {
         const next = quickRepairNext(rep.status, rep.repairScope);
         const itemLabel = repairItemDisplayName(rep);
@@ -785,8 +806,22 @@ export function RepairList() {
               background: checked ? 'rgba(113,93,227,0.04)' : undefined,
             }}
             onClick={() => navigate(`/repairs/${rep.id}`)}
-            onMouseEnter={e => (e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.08)' : 'rgba(15,15,16,0.03)')}
-            onMouseLeave={e => (e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.04)' : 'transparent')}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.08)' : 'rgba(15,15,16,0.03)';
+              hoverPos.current = { x: e.clientX, y: e.clientY };
+              if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
+              hoverTimer.current = window.setTimeout(() => setHover({ id: rep.id, ...hoverPos.current }), 350);
+            }}
+            onMouseMove={e => {
+              hoverPos.current = { x: e.clientX, y: e.clientY };
+              setHover(h => (h && h.id === rep.id ? { id: rep.id, x: e.clientX, y: e.clientY } : h));
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = checked ? 'rgba(113,93,227,0.04)' : 'transparent';
+              if (hoverTimer.current) { window.clearTimeout(hoverTimer.current); hoverTimer.current = null; }
+              setHover(h => (h && h.id === rep.id ? null : h));
+            }}
+            data-repair-row={rep.id}
           >
             {/* Bulk-select checkbox */}
             <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
