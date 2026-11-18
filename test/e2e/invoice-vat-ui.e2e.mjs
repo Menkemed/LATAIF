@@ -181,14 +181,18 @@ async function fotoWaehlen(c, file) {
 const fehlerText = (c) => c.ev(`const e=[...document.querySelectorAll('[data-save-error],[role=alert]')].map(x=>x.textContent.trim()).filter(Boolean); const red=[...document.querySelectorAll('div')].filter(d=>d.children.length<=2 && /rgb\\(220, 38, 38\\)|#DC2626/i.test(getComputedStyle(d).color) && (d.textContent||'').length>20).map(d=>d.textContent.trim()); return [...e, ...red].join(' | ').slice(0, 400);`);
 
 // ── Rechnung über die Maske ─────────────────────────────────────────────────
-async function rechnungMaske(c, kunde, pid, menge, zahlung) {
+async function rechnungMaske(c, kunde, pid, menge, zahlung, datum) {
   await gehFrisch(c, '/invoices/new');
   if (!(await warteBis(c, q('[data-ss-trigger="Search clients..."]'), 20000))) return 'KEINE-MASKE';
   const r = [await ssPick(c, 'Search clients...', kunde), await ssPick(c, 'Pick product...', pid)];
   await sleep(500);
   if (menge !== 1) r.push(await setVal(c, 'input[type=number][min="1"][step="1"]', String(menge)));
+  // Rückdatierte Rechnung: Rechnungsdatum und tatsächliches Zahlungsdatum schon beim Anlegen (FINAL-INVOICE-DATE:
+  // das Endrechnungsdatum ist das Zahlungsdatum der ersten Vollzahlung und bleibt danach fest).
+  if (datum?.rechnung) { r.push(await setVal(c, 'input[type=date][title^="Default = today"]', datum.rechnung)); await sleep(300); }
   if (zahlung === 'later') r.push(await klick(c, '[data-invoice-pay-later]'));
   else { r.push(await klick(c, '[data-invoice-pay-method="cash"]')); r.push(await klick(c, '[data-invoice-pay-full]')); }
+  if (datum?.zahlung) { await sleep(300); r.push(await setVal(c, 'input[data-invoice-pay-date], [data-invoice-pay-date] input', datum.zahlung)); }
   await sleep(400);
   r.push(await klick(c, '[data-invoice-save]'));
   if (zahlung === 'full' && r.every((x) => x === 'OK')) {
@@ -342,8 +346,9 @@ try {
   // ── Sitzung 2: vier Rechnungen über die Maske, alle voll bezahlt ─────────────
   c = await startApp(); await waitInvoke(c); await ensureSignedIn(c); await sleep(1500);
   const ids = {};
-  for (const [key, kunde, pid] of [['s2', 'e2e-k2', 's2-a'], ['s3', 'e2e-k1', 's3-a'], ['s4', 'e2e-k2', 's4-a'], ['vt', 'e2e-k2', 'vt-a']]) {
-    const m = await rechnungMaske(c, kunde, pid, 1, 'full');
+  for (const [key, kunde, pid, datum] of [['s2', 'e2e-k2', 's2-a'], ['s3', 'e2e-k1', 's3-a'], ['s4', 'e2e-k2', 's4-a'],
+    ['vt', 'e2e-k2', 'vt-a', { rechnung: '2026-05-10', zahlung: '2026-05-12' }]]) {
+    const m = await rechnungMaske(c, kunde, pid, 1, 'full', datum);
     await warteAuf(() => one('SELECT status FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE il.product_id = ?', [pid]).status === 'FINAL');
     ids[key] = lineOf(pid).invoice_id;
     ok(!!ids[key] && inv(ids[key]).status === 'FINAL' && /^S?INV-/.test(String(inv(ids[key]).invoice_number)),
@@ -357,21 +362,15 @@ try {
   // ── Sitzung 3: die eigentlichen Prüfungen ────────────────────────────────────
   c = await startApp(); await waitInvoke(c); await ensureSignedIn(c); await sleep(1500);
   await antwort(c, true);
-  // Die VAT-Rechnung über die Oberfläche in den Mai legen, solange Q2 noch offen ist (Lauf 1/2: ein
-  // direktes Schreiben in die Datei überschreibt die App beim Start — es fehlt im Changelog).
+  // Die VAT-Rechnung liegt im Mai: über die Maske mit Rechnungsdatum 10.05. und Zahlungsdatum 12.05. angelegt
+  // (Sitzung 2). Seit FINAL-INVOICE-DATE ist ihr Endrechnungsdatum der Tag der ersten Vollzahlung und bleibt fest —
+  // ein späteres Umdatieren der Zahlung verschiebt das Quartal nicht mehr (Unit-Test F4).
   {
     const id = ids.vt;
-    const r = [await editOeffnen(c, id), await setVal(c, 'input[type=date]', '2026-05-10'), await grund(c, 'E2E Rechnungsdatum Mai')];
-    r.push(await speichern(c));
-    await warteAuf(() => String(inv(id).issued_at).startsWith('2026-05-10'));
-    await gehFrisch(c, `/invoices/${id}`);
-    await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.includes('Manage payments'))", 20000);
-    r.push(await clickIncludes(c, 'Manage payments'));
-    await warteBis(c, "document.querySelectorAll('input[type=date]').length > 0", 10000);
-    r.push(await c.ev(`const e=[...document.querySelectorAll('input[type=date]')].pop(); if(!e) return 'NO-DATUM'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'2026-05-12'); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); e.dispatchEvent(new FocusEvent('blur')); e.dispatchEvent(new FocusEvent('focusout',{bubbles:true})); return 'OK';`));
-    await warteAuf(() => String(dbQ('SELECT received_at FROM payments WHERE invoice_id = ?', [id])[0]?.received_at).startsWith('2026-05-12'));
-    ok(String(inv(id).issued_at).startsWith('2026-05-10') && String(dbQ('SELECT received_at FROM payments WHERE invoice_id = ?', [id])[0]?.received_at).startsWith('2026-05-12'),
-      `SETUP VAT-Rechnung über Maske + „Manage payments" in den Mai gelegt, Q2 noch offen (${alleOk(r)}; ${inv(id).issued_at} / ${dbQ('SELECT received_at FROM payments WHERE invoice_id = ?', [id])[0]?.received_at})`);
+    const zahlTag = String(dbQ('SELECT received_at FROM payments WHERE invoice_id = ?', [id])[0]?.received_at);
+    const endTag = String(one('SELECT final_issued_at FROM invoices WHERE id = ?', [id]).final_issued_at);
+    ok(String(inv(id).issued_at).startsWith('2026-05-10') && zahlTag.startsWith('2026-05-12') && endTag.startsWith('2026-05-12'),
+      `SETUP VAT-Rechnung über die Maske im Mai angelegt, Endrechnungsdatum 12.05., Q2 noch offen (${inv(id).issued_at} / ${zahlTag} / ${endTag})`);
   }
 
   // ══ S2 — Bearbeiten: festes Los, Mengenerhöhung ohne Bestand, reine Notiz ══
@@ -480,7 +479,9 @@ try {
     const vor = S([inv(id), lineRow(id), pays(id)]);
     const m = await aendernMaske(c, id, Number(inv(id).gross_amount) + 100);
     const err = await fehlerText(c);
-    ok(S([inv(id), lineRow(id), pays(id)]) === vor && /already filed/.test(err),
+    // Q2/2026 liegt zugleich vor dem Eröffnungsstichtag (15.10.2026, seit v0.8.99 zuerst geprüft) — beide Sperren
+    // weisen ab; welcher Satz kommt, hängt an der Prüfreihenfolge. Entscheidend: abgewiesen, nichts geändert.
+    ok(S([inv(id), lineRow(id), pays(id)]) === vor && /already filed|before the opening cut-off/.test(err),
       `VAT2 Preisänderung an der gemeldeten Rechnung: abgewiesen, nichts geändert (${m}) — „${err.slice(0, 130)}"`);
     MSG.push('VAT2 ' + err.slice(0, 220));
     ok((await editOeffnen(c, id)) === 'OK', 'VAT3 Maske neu geöffnet');
@@ -497,6 +498,8 @@ try {
       const rr = [await clickText(c, 'Edit')];
       await warteBis(c, q('#field-name input'), 10000);
       rr.push(await setVal(c, '#field-name input', name));
+      // Seit v0.8.87 verlangt ein schon verkaufter Artikel einen Änderungsgrund.
+      if (await exists(c, '[data-testid="product-edit-reason"] input')) rr.push(await setVal(c, '[data-testid="product-edit-reason"] input', 'E2E Umbenennung'));
       await sleep(300);
       rr.push(await klick(c, '[data-save-product]'));
       await sleep(2000);
