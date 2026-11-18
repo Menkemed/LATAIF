@@ -217,6 +217,20 @@ try {
     const rf = weiter(X);
     ok(rf.code === 0 && rf.out.fortgesetzt && !sperre(X) && [...cl(pP(X)), ...cl(pS(X))].filter((x) => x.record_id !== 'p3').every((x) => !String(x.data).includes('data:')),
       'fortsetzen: Stufe 3 abgeschlossen mit dem vorhandenen Export');
+    // Ein Inline-Foto in einer Form, die der Export nicht als Liste liest (roher Text statt JSON-Liste) → kein Lauf.
+    const U = welt('s3u');
+    for (const [file, sql] of [[pP(U), "INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at) VALUES ('products','p8','branch-main','insert',?,1,'2026-11-01')"],
+      [pS(U), "INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at) VALUES ('tenant-1','branch-main','products','p8','insert',?,'self-desktop','2026-11-01')"]] as const) {
+      const d = new DatabaseSync(file); d.prepare(sql).run(JSON.stringify({ id: 'p8', sku: 'SKU-8', images: FOTO1 })); d.close();
+    }
+    { const d = new DatabaseSync(pP(U)); const s = new DatabaseSync(pS(U));
+      d.prepare('UPDATE sync_cursor SET last_sync_id = ?').run(Number((s.prepare('SELECT MAX(id) AS m FROM sync_changelog').get() as { m: number }).m)); d.close(); s.close(); }
+    sichern(U, '2026-11-18_s3u');
+    const vorU = [sha(pP(U)), sha(pS(U))];
+    const ru = aus(U, '3', '2026-11-18_s3u');
+    ok(ru.code !== 0 && /nicht vollständig liest/.test(JSON.stringify(ru.out)) && sha(pP(U)) === vorU[0] && sha(pS(U)) === vorU[1] && !sperre(U)
+      && !(existsSync(join(U.DATA, 'maintenance-logs')) && readdirSync(join(U.DATA, 'maintenance-logs')).some((f) => f.startsWith('a2-stufe3-fotos-'))),
+    `Inline-Foto als roher Text (vom Export nicht lesbar): Stufe 3 abgewiesen vor jedem Schreiben, kein Export, Sperre weg (${JSON.stringify(ru.out).slice(0, 160)})`);
   }
 
   // ══ Verdichten ═══════════════════════════════════════════════════════════════════════════

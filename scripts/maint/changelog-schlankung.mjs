@@ -272,6 +272,12 @@ function lage(daten, dbs, erlaubtNurPrimary = [], regel = RULE_EMBEDDING) {
   if (!eigenerCursor) probleme.push('Primary hat keinen Cursor für GENAU diesen Server (Fingerabdruck) — Zugehörigkeit nicht belegt');
   else if (Number(eigenerCursor.last_sync_id) !== serverMax) probleme.push(`Cursor ${eigenerCursor.last_sync_id} ≠ letzte Server-Nummer ${serverMax} — Abgleich nicht vollständig`);
   if (pPlan.refused.length || sPlan.refused.length) probleme.push(`nicht byte-treu umwandelbare Einträge: Primary ${pPlan.refused.length}, Server ${sPlan.refused.length}`);
+  // Stufe 3: jedes Inline-Foto, das ein Eintrag verliert, muss der Export lesen können. Trägt `images` ein `data:` in einer
+  // Form, die keine Liste von Foto-Texten ist, würde es entfernt, ohne exportiert zu sein — dann kein Lauf.
+  if (regel.key === 'images') {
+    const unlesbar = [...pPlan.changes, ...sPlan.changes].filter((c) => !fotosVollstaendigLesbar(JSON.parse(c.from).images)).map((c) => c.id);
+    if (unlesbar.length) probleme.push(`Inline-Fotos in einer Form, die der Export nicht vollständig liest (Einträge #${unlesbar.slice(0, 20).join(', #')}) — Abbruch vor jedem Schreiben`);
+  }
   if (!abgleich.ok) probleme.push(...abgleich.problems.map((x) => `Abgleich: ${x}`));
   // Schon bestehende Abweichung: gesendete eigene Einträge ohne Gegenstück auf dem Server. Sie werden nie
   // verändert (sonst Abbruch) und laufen nur durch, wenn der Owner GENAU diese Nummern bestätigt.
@@ -353,6 +359,11 @@ const fotoListe = (images) => {
   let v = images;
   if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return []; } }
   return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.startsWith('data:')) : [];
+};
+/** Liest der Export ALLE `data:` dieses Werts? (Jedes Vorkommen im Text muss ein Listeneintrag sein, der damit beginnt.) */
+const fotosVollstaendigLesbar = (images) => {
+  const text = typeof images === 'string' ? images : JSON.stringify(images ?? null);
+  return fotoListe(images).length === text.split('data:').length - 1;
 };
 const ENDUNG = { 'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif', 'image/heic': 'heic' };
 /** Die Bytes, die eine Fotodatei trägt, und ob daraus exakt dieselbe data:-URL entsteht. */
