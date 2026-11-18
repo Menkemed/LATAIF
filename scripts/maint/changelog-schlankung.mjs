@@ -505,6 +505,9 @@ function freigeben(o) {
     seiteNachweisen(l.pRows, j.inhalt.primary, 'Primary');
     seiteNachweisen(l.sRows, j.inhalt.server, 'Server');
     if (l.cursor !== j.inhalt.cursor || l.serverMax !== j.inhalt.serverMax) fail('Cursor oder letzte Server-Nummer verändert');
+    // Primary ↔ Server: dieselben Paare Byte für Byte, und der Cursor-Neuaufbau entschiede wie beim Abschluss.
+    if (l.abgleich.paired !== j.inhalt.gepaart) fail(`Primary und Server passen nicht mehr zusammen (${j.inhalt.gepaart} → ${l.abgleich.paired} Paare)`);
+    if (l.eigenerAnfang !== j.inhalt.eigenerAnfang) fail(`Cursor-Neuaufbau entschiede anders (${j.inhalt.eigenerAnfang} → ${l.eigenerAnfang})`);
     for (const [db, key] of [[dbs.p, 'primaryUnberuehrt'], [dbs.s, 'serverUnberuehrt']]) {
       if (JSON.stringify(unberuehrtDigests(db)) !== JSON.stringify(j.inhalt[key])) fail(`seit dem Abschluss wurde geschrieben (${key})`);
     }

@@ -78,6 +78,14 @@ export class SyncPoisonError extends Error {
   }
 }
 
+/** A2-RECOVERY — ein Eintrag verletzt eine Eindeutigkeitsregel der Zieltabelle (deterministisch → Quarantäne). */
+export const SYNC_UNIQUE_CONFLICT = 'SYNC_UNIQUE_CONFLICT';
+/** SQLite meldet „UNIQUE constraint failed: <tabelle>.<spalten>" — nur diese Klasse, keine andere DB-Störung. */
+export function isUniqueConstraintFailure(err: unknown): boolean {
+  const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : String(err ?? '');
+  return /\bUNIQUE constraint failed\b/.test(msg);
+}
+
 /** Is this a deterministic policy rejection (→ quarantine) rather than a transient DB fault
  *  (→ rollback)? Checked structurally so durable-cursor need not import the class. */
 export function isSyncPoisonError(e: unknown): e is SyncPoisonError {
@@ -453,7 +461,24 @@ export function applySyncChange(db: SqlDb, change: ApplyChange): void {
     const data = validateBusinessPayload(contract, change.data);
     // A2-STUFE-1 — rein lokale Spalten (Artikel: KI-Vektor) werden nie aus dem Abgleich übernommen: kein altes
     // Echo kann ein neueres Embedding überschreiben oder löschen. Der Vertrag oben bleibt unverändert geprüft.
-    applyUpsert(db, change.table_name, change.record_id, inboundPayload(change.table_name, data));
+    try {
+      applyUpsert(db, change.table_name, change.record_id, inboundPayload(change.table_name, data));
+    } catch (err) {
+      // A2-RECOVERY — eine verletzte Eindeutigkeitsregel ist DETERMINISTISCH: derselbe Eintrag scheitert bei
+      // jedem Versuch gleich. Als „vorübergehend" behandelt, rollte sie jedes Mal den ganzen Stapel zurück —
+      // der Abgleich hinge für immer, und nach einem Cursor-Neuaufbau blieben die bis dahin wieder eingespielten
+      // ÄLTEREN Stände stehen, ohne dass die jüngeren je folgen (nachgestellt mit dem echten Bestand: eine alte,
+      // später gelöschte Reparaturzeile auf einer heute belegten Position). Also: Quarantäne dieses einen
+      // Eintrags, der Stapel läuft weiter. Der Eintrag ist an der Stelle, die er belegen will, nie der heutige
+      // Stand — den hält die Zeile, die die Regel verletzt sähe.
+      if (isUniqueConstraintFailure(err)) {
+        throw new SyncPoisonError(
+          SYNC_UNIQUE_CONFLICT,
+          `[Sync] ${SYNC_UNIQUE_CONFLICT}: ${redactIdentifier(change.table_name)} ${change.action} would break a uniqueness rule — quarantined, the batch continues.`,
+        );
+      }
+      throw err;
+    }
   } else if (change.action === 'delete') {
     // §5 — DELETE carries no data contract: the canonical, allow-listed table is validated above
     // and `record_id` is a bound parameter. Nothing else is required.

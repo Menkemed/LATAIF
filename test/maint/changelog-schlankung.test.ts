@@ -5,7 +5,7 @@
 // (`--nur-pfad`), damit eine laufende echte App die Probe weder stört noch berührt.
 // Run: node test/maint/changelog-schlankung.test.ts
 // ════════════════════════════════════════════════════════════════════════════
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, parse } from 'node:path';
@@ -304,6 +304,73 @@ try {
     `Windows: Tausch scheitert am fremden Griff — lataif.db unverändert, Sperre liegt (${String(r16.out.abbruch).slice(0, 70)})`);
   const r17 = run(TOOL, ['fortsetzen', '--daten', H.DATA, '--nur-pfad', DECOY]);
   ok(r17.code === 0 && sperre(H) === null && JSON.stringify(cl(pP(H))) === JSON.stringify(pNach), 'Griff geschlossen → fortsetzen: abgeschlossen, Sperre entfernt');
+
+  // ── 11) App startet gleichzeitig mit dem Wartungsbeginn (Köder-lataif.exe läuft) ─────────────
+  // Reihenfolge im Werkzeug: Sperre ZUERST, dann Prozessprüfung. Eine App, die vor der Sperre startete, läuft
+  // jetzt → Abbruch ohne Schreiben, eigene Sperre wieder weg. Jede App, die NACH der Sperre startet, findet sie
+  // beim Start (Rust, maintenance_lock.rs) und öffnet nichts. Nur die eigene Köder-PID wird beendet.
+  const K = welt('k');
+  sichern(K, '2026-11-18_a2-test-k');
+  const vorK = treeHash(K.DATA);
+  mkdirSync(dirname(DECOY), { recursive: true });
+  copyFileSync(process.execPath, DECOY);
+  const koeder = spawn(DECOY, ['-e', 'setTimeout(()=>{}, 30000)'], { stdio: 'ignore' });
+  await new Promise((r) => setTimeout(r, 900));
+  try {
+    const r18 = ausfuehren(K, '2026-11-18_a2-test-k');
+    ok(r18.code !== 0 && /App läuft/.test(String(r18.out.abbruch)) && sperre(K) === null && treeHash(K.DATA) === vorK,
+      'App läuft beim Wartungsbeginn: Abbruch vor jedem Schreiben, eigene Sperre wieder entfernt, Datenordner byte-gleich');
+    const r19 = ausfuehren(X, '2026-11-18_a2-test-x');
+    ok(r19.code !== 0, 'auch ein anderer Lauf startet nicht, solange die App läuft');
+  } finally { koeder.kill(); }
+  await new Promise((r) => setTimeout(r, 500));
+  ok(ausfuehren(K, '2026-11-18_a2-test-k').code === 0 && sperre(K) === null, 'App beendet → die Wartung läuft');
+
+  // ── 12) Historische Bereinigung wie am 20.10. (#1350/#1352): Beleg-Zeilen nur im Primary, Server-Lücke ──
+  const G = welt('g');
+  {
+    const pdb = new DatabaseSync(pP(G)); const sdb = new DatabaseSync(pS(G));
+    const adj = (a: string, st: string) => JSON.stringify({ id: 'adj-x', adjustment_number: 'ADJ-2026-000002', status: st, product_id: 'p-weg', quantity: 1 });
+    for (const [a, st] of [['insert', 'POSTED'], ['update', 'CANCELLED']]) {
+      pdb.prepare("INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at) VALUES ('stock_adjustments','adj-x','branch-main',?,?,1,'2026-10-20')").run(a, adj(a, st));
+      sdb.prepare("INSERT INTO sync_changelog (tenant_id, branch_id, table_name, record_id, action, data, user_id, created_at) VALUES ('tenant-1','branch-main','stock_adjustments','adj-x',?,?,'self-desktop','2026-10-20')").run(a, adj(a, st));
+    }
+    // Die Bereinigung von damals: die beiden Server-Zeilen entfernt (Lücke bleibt), der Cursor zeigt aufs Ende.
+    sdb.exec("DELETE FROM sync_changelog WHERE table_name = 'stock_adjustments' AND record_id = 'adj-x'");
+    const ende = Number((sdb.prepare('SELECT MAX(id) AS m FROM sync_changelog').get() as { m: number }).m);
+    pdb.prepare('UPDATE sync_cursor SET last_sync_id = ?').run(ende);
+    pdb.close(); sdb.close();
+  }
+  const gIds = cl(pP(G)).filter((r) => r.table_name === 'stock_adjustments').map((r) => Number(r.id));
+  const gAlt = cl(pP(G)).filter((r) => r.table_name === 'stock_adjustments').map((r) => r.data);
+  const sIdsVor = cl(pS(G)).map((r) => Number(r.id));
+  sichern(G, '2026-11-18_a2-test-g');
+  const vorG = treeHash(G.DATA);
+  const pg = run(TOOL, ['pruefen', '--daten', G.DATA, '--nur-pfad', DECOY]);
+  ok(pg.code !== 0 && JSON.stringify((pg.out.nurPrimary as Array<{ id: number }>).map((x) => x.id)) === JSON.stringify(gIds)
+    && pg.out.probleme.some((x: string) => x.includes(`--erlaube-nur-primary ${gIds.join(',')}`)),
+  `prüfen benennt genau die beiden Beleg-Zeilen und die nötige Bestätigung (${gIds.join(',')})`);
+  const rG1 = ausfuehren(G, '2026-11-18_a2-test-g');
+  ok(rG1.code !== 0 && treeHash(G.DATA) === vorG && sperre(G) === null, 'ohne Bestätigung: abgelehnt, nichts geschrieben, keine Sperre');
+  const mitG = (ids: string) => run(TOOL, ['ausfuehren', '--daten', G.DATA, '--sicherung', join(G.C, '2026-11-18_a2-test-g'), '--sicherung', join(G.E, '2026-11-18_a2-test-g'),
+    '--bestaetigen', '2026-11-18_a2-test-g', '--erlaube-nur-primary', ids, '--nur-pfad', DECOY]);
+  ok(mitG(String(gIds[0])).code !== 0 && treeHash(G.DATA) === vorG, 'nur eine der beiden bestätigt: abgelehnt, nichts geschrieben');
+  const rG2 = mitG(gIds.join(','));
+  ok(rG2.code === 0 && rG2.out.stand === 'abgeschlossen' && sperre(G) === null, `genau beide bestätigt: Lauf abgeschlossen (${String(rG2.out.abbruch ?? '').slice(0, 60)})`);
+  ok(JSON.stringify(cl(pP(G)).filter((r) => r.table_name === 'stock_adjustments').map((r) => r.data)) === JSON.stringify(gAlt)
+    && JSON.stringify(cl(pS(G)).map((r) => Number(r.id))) === JSON.stringify(sIdsVor),
+  'die beiden Beleg-Zeilen byte-gleich, Server-Lücke und alle Server-Nummern unverändert');
+  ok(run(TOOL, ['freigeben', '--daten', G.DATA, '--nur-pfad', DECOY]).code !== 0, 'freigeben ohne liegende Sperre: nichts zu tun (Abbruch)');
+  // Gegenprobe: ein bestätigter Nur-Primary-Eintrag, der VERÄNDERT würde (Artikel mit Vektor), wird trotzdem abgelehnt.
+  const N = welt('n');
+  { const pdb = new DatabaseSync(pP(N)); pdb.prepare("INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at) VALUES ('products','p-only','branch-main','update',?,1,'x')").run(JSON.stringify({ id: 'p-only', image_embedding: vec(5) })); pdb.close(); }
+  const nId = cl(pP(N)).filter((r) => r.record_id === 'p-only').map((r) => Number(r.id))[0];
+  sichern(N, '2026-11-18_a2-test-n');
+  const vorN = treeHash(N.DATA);
+  const rN = run(TOOL, ['ausfuehren', '--daten', N.DATA, '--sicherung', join(N.C, '2026-11-18_a2-test-n'), '--sicherung', join(N.E, '2026-11-18_a2-test-n'),
+    '--bestaetigen', '2026-11-18_a2-test-n', '--erlaube-nur-primary', String(nId), '--nur-pfad', DECOY]);
+  ok(rN.code !== 0 && /würden verändert/.test(String(rN.out.abbruch)) && treeHash(N.DATA) === vorN,
+    'bestätigter Nur-Primary-Eintrag, der verändert würde: trotzdem abgelehnt, nichts geschrieben');
 } finally {
   rmSync(boxC, { recursive: true, force: true });
   rmSync(boxE, { recursive: true, force: true });
