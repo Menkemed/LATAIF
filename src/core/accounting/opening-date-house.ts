@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════════════════
-// ACCOUNTING-OPENING-DATE — den Buchungsstichtag DIESER Datenbank ändern (nur Owner, nur am Primary).
+// ACCOUNTING-OPENING-DATE — den Buchungsstichtag DIESER Datenbank ändern (nur ADMIN, nur am Primary).
 //
 // Was eine Änderung NIE tut: Rechnungen, Zahlungen, Buchungen oder andere historische Daten anfassen. Sie
 // verschiebt nur die Grenze, ab der Korrekturen buchen dürfen. Eingereichte/bezahlte VAT-Quartale und alle
@@ -12,12 +12,12 @@
 //     oder Belege (Rechnungen, Einkäufe), wird abgelehnt.
 //   • Kein Tag in der Zukunft (er sperrte das laufende Geschäft), kein Tag, den es nicht gibt.
 // Berechtigung: die Rolle wird in der Hausfunktion geprüft — aus dem Ausweis UND aus `user_branches` dieser
-// Datenbank (Owner). Am zweiten Rechner gibt es diesen Weg nicht (`PRIMARY_ONLY`).
+// Datenbank (ADMIN; „owner" ist der alte Name derselben Rolle). Am zweiten Rechner gibt es diesen Weg nicht (`PRIMARY_ONLY`).
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
-import { canonicalRole } from '@/core/models/types';
+import { isAdminRole } from '@/core/auth/role-permissions';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { useAuthStore } from '@/stores/authStore';
@@ -62,11 +62,16 @@ export function checkOpeningDateChange(newDate: unknown, nowIso: string = new Da
     // Eröffnungsposten tragen „Saldo am Stichtag" — sie gelten nur für den Tag, für den sie erfasst sind.
     const parteien = query(`SELECT cutoff_date AS d, COUNT(*) AS n FROM opening_balance_items WHERE status = 'RECORDED' GROUP BY cutoff_date`);
     const konten = query(`SELECT cutoff_date AS d, COUNT(*) AS n FROM opening_account_items WHERE status = 'RECORDED' GROUP BY cutoff_date`);
-    for (const [was, rows] of [['party opening balances', parteien], ['opening account balances', konten]] as const) {
+    for (const [was, wo, rows] of [
+      ['party opening balance', 'customer or supplier page → Edit → Opening balances', parteien],
+      ['opening account balance', 'Settings → Opening Balances', konten],
+    ] as const) {
       const fremd = rows.filter((r) => String(r.d) !== newDate);
       const anzahl = fremd.reduce((s, r) => s + Number(r.n ?? 0), 0);
       if (anzahl > 0) {
-        problems.push(`${anzahl} ${was} are recorded as of ${fremd.map((r) => String(r.d)).join(', ')}. They describe the balance on that date — cancel them first, or keep the opening date.`);
+        const eins = anzahl === 1;
+        problems.push(`${eins ? `1 ${was} is` : `${anzahl} ${was}s are`} recorded as of ${fremd.map((r) => String(r.d)).join(', ')} (${wo}). `
+          + `${eins ? 'It describes' : 'They describe'} the balance on that day — cancel ${eins ? 'it' : 'them'} first, or keep the opening date ${current}. Nothing was changed.`);
       }
     }
     if (direction === 'later') {
@@ -76,26 +81,30 @@ export function checkOpeningDateChange(newDate: unknown, nowIso: string = new Da
       const rechnungen = n('SELECT COUNT(*) AS n FROM invoices WHERE substr(COALESCE(issued_at, created_at), 1, 10) >= ? AND substr(COALESCE(issued_at, created_at), 1, 10) < ?', [current, newDate]);
       const einkaeufe = n('SELECT COUNT(*) AS n FROM purchases WHERE substr(COALESCE(purchase_date, created_at), 1, 10) >= ? AND substr(COALESCE(purchase_date, created_at), 1, 10) < ?', [current, newDate]);
       if (buchungen + rechnungen + einkaeufe > 0) {
-        problems.push(`Between ${current} and ${newDate} there are already ${buchungen} bookings, ${rechnungen} invoices and ${einkaeufe} purchases. `
-          + 'A later opening date would lock them retroactively — they could no longer be corrected.');
+        const anz = (k: number, eins: string, viele: string): string => `${k} ${k === 1 ? eins : viele}`;
+        problems.push(`Between ${current} and ${newDate} there are already ${anz(buchungen, 'booking', 'bookings')}, ${anz(rechnungen, 'invoice', 'invoices')} and ${anz(einkaeufe, 'purchase', 'purchases')}. `
+          + 'A later opening date would lock them retroactively — they could no longer be corrected. Nothing was changed.');
       }
     }
   }
   return { ok: problems.length === 0, current, unchanged: direction === 'same', direction, problems };
 }
 
-/** Die Rolle aus der Datenbank (nicht aus dem Fenster): Owner dieser Filiale? */
-function istOwner(ctx: OpeningDateCtx): boolean {
-  if (canonicalRole(ctx.role) !== 'ADMIN') return false;
+/**
+ * Die Rolle aus der Datenbank (nicht aus dem Fenster): Administrator dieser Filiale? „Owner" ist der alte
+ * Name derselben Rolle (`canonicalRole('owner') === 'ADMIN'`) — JEDER ADMIN darf, MANAGER/SALES/ACCOUNTANT nicht.
+ */
+function istAdmin(ctx: OpeningDateCtx): boolean {
+  if (!isAdminRole(ctx.role)) return false;
   const r = query('SELECT role FROM user_branches WHERE user_id = ? AND branch_id = ?', [ctx.userId, ctx.branchId])[0]?.role;
-  return canonicalRole(r as string | undefined) === 'ADMIN' && r !== undefined && r !== null;
+  return isAdminRole(typeof r === 'string' ? r : null);
 }
 
 export interface OpeningDateResult { date: string; previous: string; previousSource: 'database' | 'default'; changed: boolean }
 
 /** Den Stichtag DIESER Datenbank setzen — prüft Berechtigung und Konflikte vor jedem Schreiben. */
 export function setAccountingOpeningDateInHouse(input: { date: unknown }, ctx: OpeningDateCtx): OpeningDateResult {
-  if (!istOwner(ctx)) throw new OpeningDateRejected('PERMISSION_DENIED', 'only the owner (admin) may change the accounting opening date');
+  if (!istAdmin(ctx)) throw new OpeningDateRejected('PERMISSION_DENIED', 'only an administrator (ADMIN) may change the accounting opening date');
   const check = checkOpeningDateChange(input.date, ctx.now);
   if (!check.ok) throw new OpeningDateRejected('OPENING_DATE_UNSAFE', check.problems.join(' '));
   const date = input.date as string;

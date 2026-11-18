@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 // ACCOUNTING-OPENING-DATE — „Settings → Accounting": der Buchungsstichtag DIESER Datenbank.
 //
-// Anzeigen kann jeder, der Settings sieht; ändern nur der Owner und nur am Primary (die Hausfunktion prüft die Rolle
+// Anzeigen kann jeder, der Settings sieht; ändern nur ADMIN (alter Name „owner") und nur am Primary (die Hausfunktion prüft die Rolle
 // selbst noch einmal aus der Datenbank). Erst „Check", dann „Save": die Prüfung ist dieselbe, die vor dem Schreiben
 // läuft — Eröffnungsposten auf dem alten Tag und rückwirkend gesperrte Vorgänge werden abgelehnt.
 // ════════════════════════════════════════════════════════════════════════════
@@ -61,7 +61,7 @@ export function AccountingOpeningDatePanel() {
       {client ? (
         <div style={box} data-accounting-opening-date-client>The opening date belongs to the main computer's database and is set there.</div>
       ) : !perm.isOwner ? (
-        <div style={box} data-accounting-opening-date-no-access>Only the owner can change the accounting opening date.</div>
+        <div style={box} data-accounting-opening-date-no-access>Only an administrator (ADMIN) can change the accounting opening date.</div>
       ) : (
         <Card>
           <span className="text-overline">CHANGE</span>

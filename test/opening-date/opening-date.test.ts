@@ -87,6 +87,9 @@ function freshDb(): Db {
   db.run("INSERT INTO branches (id, tenant_id, name, created_at, updated_at) VALUES ('branch-main','tenant-1','Haupt',?,?)", [NOW, NOW]);
   db.run("INSERT INTO user_branches (user_id, branch_id, role, created_at) VALUES ('user-owner','branch-main','owner',?)", [NOW]);
   db.run("INSERT INTO user_branches (user_id, branch_id, role, created_at) VALUES ('user-sales','branch-main','sales',?)", [NOW]);
+  db.run("INSERT INTO user_branches (user_id, branch_id, role, created_at) VALUES ('user-admin2','branch-main','ADMIN',?)", [NOW]);
+  db.run("INSERT INTO user_branches (user_id, branch_id, role, created_at) VALUES ('user-manager','branch-main','MANAGER',?)", [NOW]);
+  db.run("INSERT INTO user_branches (user_id, branch_id, role, created_at) VALUES ('user-acc','branch-main','ACCOUNTANT',?)", [NOW]);
   applyMediaSchema(db as never);
   setTestDatabase(db as never);
   return db;
@@ -175,6 +178,11 @@ const dbB = freshDb();
   const m3 = meldung(() => setze('2026-05-01', { ...OWNER, role: 'owner', userId: 'user-unbekannt' }));
   ok(code(m1) === 'PERMISSION_DENIED' && code(m2) === 'PERMISSION_DENIED' && code(m3) === 'PERMISSION_DENIED',
     `D7 Verkäufer, gefälschte Owner-Rolle, unbekannter Benutzer: abgelehnt (${code(m1)}/${code(m2)}/${code(m3)})`);
+  const m5 = meldung(() => setze('2026-05-01', { ...OWNER, role: 'MANAGER', userId: 'user-manager' }));
+  const m6 = meldung(() => setze('2026-05-01', { ...OWNER, role: 'ACCOUNTANT', userId: 'user-acc' }));
+  const m7 = meldung(() => setze('2026-05-01', { ...OWNER, role: 'ADMIN', userId: 'user-manager' }));   // ADMIN im Ausweis, MANAGER in der DB
+  ok(code(m5) === 'PERMISSION_DENIED' && code(m6) === 'PERMISSION_DENIED' && code(m7) === 'PERMISSION_DENIED',
+    `D7 …Manager, Buchhaltung, gefälschte ADMIN-Rolle: abgelehnt (${code(m5)}/${code(m6)}/${code(m7)})`);
   store.set('lataif_runtime_mode', 'client');
   let m4 = '';
   try { await house.setAccountingOpeningDateOnPrimary('2026-05-01'); } catch (e) { m4 = String((e as { code?: unknown }).code); }
@@ -182,6 +190,12 @@ const dbB = freshDb();
   ok(m4 === 'PRIMARY_ONLY', `D7 …am zweiten Rechner gibt es den Weg nicht (${m4})`);
   ok(S(dbB.exec("SELECT * FROM settings WHERE key = 'accounting.opening_date'")) === vorher && od.accountingOpeningDate() === '2026-07-01',
     'D7 …nichts geändert');
+  // Ein ZWEITER Administrator (Rolle 'ADMIN', nicht der ursprüngliche Owner) darf ändern — „owner" ist nur der alte Name.
+  const rA = setze('2026-06-15', { ...OWNER, role: 'ADMIN', userId: 'user-admin2' });
+  const aA = dbB.exec("SELECT changed_by, old_value, new_value FROM audit_log WHERE field_name = 'accounting.opening_date' ORDER BY rowid DESC LIMIT 1")[0]?.values?.[0] ?? [];
+  ok(rA.changed && od.accountingOpeningDate() === '2026-06-15' && aA[0] === 'user-admin2' && aA[1] === '2026-07-01' && aA[2] === '2026-06-15',
+    `D7 …ein zweiter ADMIN ändert 07-01 → 06-15, Audit nennt ihn (${S(aA)})`);
+  setze('2026-07-01');   // zurück, für die folgenden Fälle
 }
 
 // ── D8 PC2 nutzt den Stichtag des Primary ──
@@ -209,7 +223,8 @@ const dbB = freshDb();
   dbK.run(`INSERT INTO opening_balance_items (id, branch_id, item_number, party_type, party_id, kind, scope, amount, cutoff_date, action_id, payload_hash, created_at)
     VALUES ('ob1','branch-main','OB-1','CUSTOMER','c1','CUSTOMER_RECEIVABLE','REMAINDER',100,'2026-10-15','a1','h1',?)`, [NOW]);
   const k1 = meldung(() => setze('2026-01-01'));
-  ok(code(k1) === 'OPENING_DATE_UNSAFE' && /party opening balances are recorded as of 2026-10-15/.test(k1) && od.accountingOpeningDate() === '2026-10-15',
+  ok(code(k1) === 'OPENING_DATE_UNSAFE' && /1 party opening balance is recorded as of 2026-10-15 \(customer or supplier page/.test(k1)
+    && /cancel it first, or keep the opening date 2026-10-15\. Nothing was changed\./.test(k1) && od.accountingOpeningDate() === '2026-10-15',
     `K1 Eröffnungsposten zum 15.10. vorhanden: Stichtag nicht verschiebbar („${k1.slice(0, 110)}…")`);
   dbK.run("UPDATE opening_balance_items SET status = 'CANCELLED' WHERE id = 'ob1'");
   ok(meldung(() => setze('2026-01-01')) === '' && od.accountingOpeningDate() === '2026-01-01', 'K1 …nach dem Storno des Postens geht es');
