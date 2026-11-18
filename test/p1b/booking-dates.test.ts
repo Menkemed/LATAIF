@@ -77,7 +77,7 @@ const { editInvoiceOnPrimary } = await import('../../src/core/invoices/invoice-e
 const { runInvoiceUpdate } = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 const { trialBalanceAt } = await import('../../src/core/accounting/ledger-statements.ts');
 const { runCounterpartyAudit } = await import('../../src/core/ledger/counterpartyAudit.ts');
-const { OPENING_CUTOFF_DATE } = await import('../../src/core/parties/opening-balances.ts');
+const { accountingOpeningDate, DEFAULT_ACCOUNTING_OPENING_DATE } = await import('../../src/core/accounting/opening-date.ts');
 const { CORRECTION_BEFORE_OPENING_CUTOFF } = await import('../../src/core/ledger/correction-dates.ts');
 
 let PASS = 0; const fails: string[] = [];
@@ -209,7 +209,8 @@ const filed = (db: Db, y: number, q: number): void => insert(db, 'vat_filings', 
 {
   heute('2026-11-05T10:00:00.000Z');
   const db = freshDb();
-  ok(OPENING_CUTOFF_DATE === '2026-10-15', `§3 Stichtag aus der Owner-Konstante (${OPENING_CUTOFF_DATE})`);
+  ok(accountingOpeningDate() === '2026-10-15' && DEFAULT_ACCOUNTING_OPENING_DATE === '2026-10-15',
+    `§3 Stichtag dieser Datenbank ohne Eintrag: der bisherige 2026-10-15 (${accountingOpeningDate()})`);
   const vorAlt = rechnung(db, 'p3', '2026-10-10');
   const z0 = zustand(db, vorAlt);
   const m = edit(vorAlt, { lines: [LINE('p3', 900, zeile(db, vorAlt))] });
@@ -423,8 +424,9 @@ const filed = (db: Db, y: number, q: number): void => insert(db, 'vat_filings', 
   ok(S(aufrufer) === S(['src/core/ledger/correction-dates.ts']), `§10 im Produktionscode ruft niemand den Test-Schalter (nur seine Definition: ${aufrufer.join(',')})`);
   ok(/const nurNodeTest = \(\): boolean => typeof import\.meta\.env === 'undefined';/.test(cd)
     && /if \(!nurNodeTest\(\)\) throw new Error\(/.test(cd)
-    && /nurNodeTest\(\) && cutoffForTest !== null \? cutoffForTest : OPENING_CUTOFF_DATE/.test(cd),
-    '§10 in der App (Vite setzt import.meta.env) wirft das Setzen, und gelesen wird immer die Owner-Konstante');
+    && /const openingCutoff = \(\): string => accountingOpeningDate\(\);/.test(cd)
+    && /if \(nurNodeTest\(\) && testWert !== null\) return testWert;/.test(src('src/core/accounting/opening-date.ts')),
+    '§10 in der App (Vite setzt import.meta.env) wirft das Setzen, und gelesen wird immer der Stichtag der Datenbank');
 }
 
 console.log(`\np1b-booking-dates: ${PASS} passed, ${fails.length} failed`);

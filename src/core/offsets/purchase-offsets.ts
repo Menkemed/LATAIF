@@ -31,7 +31,7 @@ import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { assertInvoiceHouse } from '@/core/invoices/invoice-house-guards';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import {
   INVOICE_PURCHASE_OFFSET_METHOD, PURCHASE_OFFSET_METHOD, purchaseSettlementOf, refreshPurchaseSettlementRow,
 } from '@/core/purchases/purchase-settled';
@@ -118,7 +118,7 @@ export function createPurchaseOffsetInHouse(input: PurchaseOffsetInput, ctx: Off
   if (issue || typeof tag !== 'string') throw nein('OFFSET_DATE_INVALID', issue || 'the offset date is not valid');
   const rechnungstag = String(inv.issued_at || inv.created_at || '').slice(0, 10);
   const einkaufstag = String(p.purchase_date || p.created_at || '').slice(0, 10);
-  const frueheste = [rechnungstag, einkaufstag, OPENING_CUTOFF_DATE].filter(Boolean).sort().pop() as string;
+  const frueheste = [rechnungstag, einkaufstag, accountingOpeningDate()].filter(Boolean).sort().pop() as string;
   if (tag < frueheste) throw nein('OFFSET_DATE_TOO_EARLY', `the offset date must be on or after ${frueheste} (invoice, purchase and opening cutoff)`);
 
   let userId = ctx.userId ?? '';

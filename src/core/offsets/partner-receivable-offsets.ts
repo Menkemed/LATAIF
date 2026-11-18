@@ -24,7 +24,7 @@ import { hasLedgerEntries } from '@/core/ledger/posting';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { assertInvoiceHouse } from '@/core/invoices/invoice-house-guards';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
 import { PURCHASE_OFFSET_METHOD, purchaseSettlementOf, refreshPurchaseSettlementRow } from '@/core/purchases/purchase-settled';
 import { PartnerItemRejected } from '@/core/partners/item-participation';
@@ -146,7 +146,7 @@ export function createPartnerReceivableOffsetInHouse(
   const tag = input.offsetDate ?? todayLocal();
   const issue = businessDateIssue(tag, 'Offset date');
   if (issue || typeof tag !== 'string') throw nein('OFFSET_DATE_INVALID', issue || 'the offset date is not valid');
-  const frueheste = [String(pl.purchase_date || pl.created_at || '').slice(0, 10), counterDate, OPENING_CUTOFF_DATE].filter(Boolean).sort().pop() as string;
+  const frueheste = [String(pl.purchase_date || pl.created_at || '').slice(0, 10), counterDate, accountingOpeningDate()].filter(Boolean).sort().pop() as string;
   if (tag < frueheste) throw nein('OFFSET_DATE_TOO_EARLY', `the offset date must be on or after ${frueheste}`);
 
   let userId = ctx.userId ?? '';

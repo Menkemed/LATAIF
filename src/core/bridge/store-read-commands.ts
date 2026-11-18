@@ -158,12 +158,16 @@ registerCommand(OP_SESSION_CONTEXT_GET, {
     const rows = query('SELECT id, name, country, currency FROM branches WHERE id = ?', [ctx.branchId]);
     const b = rows[0];
     if (!b) throw new BusinessError('BRANCH_NOT_FOUND', 'the authenticated branch does not exist');
+    // ACCOUNTING-OPENING-DATE — der Buchungsstichtag DIESES Primary (seine Datenbank). Am zweiten Rechner nur Anzeige
+    // (Mindestdatum, Hinweise); jede Sperre prüft die Hausfunktion hier am Primary mit genau diesem Wert.
+    const { accountingOpeningDate } = await import('@/core/accounting/opening-date');
     return {
       data: {
         branch: { id: String(b.id), name: String(b.name ?? ''), country: String(b.country ?? ''), currency: String(b.currency ?? '') },
         tenantId: ctx.tenantId,
         userId: ctx.userId,
         role: ctx.role,
+        accountingOpeningDate: accountingOpeningDate(),
       },
     };
   },

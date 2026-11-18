@@ -15,7 +15,7 @@ import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { WriteError } from '@/components/shared/WriteError';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import type { DebtOffsetChoice, OffsetRef } from '@/core/offsets/party-offset-reads';
 import { createDebtOffsetOnPrimary, debtOffsetBody, type DebtOffsetInput } from '@/core/offsets/party-offsets';
 
@@ -61,7 +61,7 @@ export function SettleBalanceDialog({ open, invoice, choice, onClose, onDone }: 
   const loanAfterF = loan ? fils(loan.open) - amtF : 0;
   const rechnungstag = String(invoice.issuedAt || invoice.createdAt || '').slice(0, 10);
   const fruehestens = useMemo(
-    () => [rechnungstag, loan?.date ?? '', OPENING_CUTOFF_DATE].filter(Boolean).sort().pop() as string,
+    () => [rechnungstag, loan?.date ?? '', accountingOpeningDate()].filter(Boolean).sort().pop() as string,
     [rechnungstag, loan?.date],
   );
   const schliesst = invAfterF <= 0 && invoice.status !== 'FINAL' && !invoice.numberFinalizedAt;

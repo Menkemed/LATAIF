@@ -108,8 +108,14 @@ export async function refreshClientSessionContext(): Promise<void> {
       data?: {
         branch?: { id: string; name: string; country: string; currency: string };
         userId?: string; role?: string;
+        accountingOpeningDate?: string;
       };
     }>('session.context.get', {});
+    // ACCOUNTING-OPENING-DATE — der Stichtag des Primary, nur zur Anzeige (die Sperren prüft der Primary selbst).
+    try {
+      const { setClientAccountingOpeningDate } = await import('@/core/accounting/opening-date');
+      setClientAccountingOpeningDate(ctx?.data?.accountingOpeningDate);
+    } catch { /* nur Anzeige */ }
     const branch = ctx?.data?.branch;
     if (!branch) return;
     const s = JSON.parse(raw) as Session;
@@ -130,4 +136,5 @@ export async function refreshClientSessionContext(): Promise<void> {
 /** Beim Trennen faellt sie wieder weg — es bleibt nichts stehen, was jemanden anmeldet. */
 export function clearClientSession(): void {
   try { window.localStorage.removeItem(KEY_SESSION); } catch { /* nichts zu raeumen */ }
+  try { window.localStorage.removeItem('lataif_client_primary_opening_date'); } catch { /* nichts zu raeumen */ }
 }

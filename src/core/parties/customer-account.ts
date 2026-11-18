@@ -30,7 +30,8 @@ import { query } from '@/core/db/helpers';
 import { paymentMethodLabel } from '@/core/utils/payment-method-label';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { customerOrderDepositsFor } from '@/core/data/page-reads';
-import { openingItemsFor, OPENING_CUTOFF_DATE, type OpeningItem } from './opening-balances';
+import { openingItemsFor, type OpeningItem } from './opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { partnerItemsOverview, type PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 import { partnerOpenRows, partnerItemHref, PARTNER_ORIGIN_LABEL } from '@/core/partners/partner-open-balances';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
@@ -588,7 +589,7 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
         : it.kind === 'SUPPLIER_PAYABLE' ? 'OPENING_SUPPLIER_PAYABLE' : 'OPENING_SUPPLIER_ADVANCE';
       const side: AccountSide = kind === 'OPENING_RECEIVABLE' || kind === 'OPENING_SUPPLIER_ADVANCE' ? 'OWES_US' : 'WE_OWE';
       docs.push({
-        key: `opening:${it.id}`, kind, side, number: it.itemNumber, date: it.documentDate || OPENING_CUTOFF_DATE,
+        key: `opening:${it.id}`, kind, side, number: it.itemNumber, date: it.documentDate || it.cutoffDate || accountingOpeningDate(),
         detail: it.reference ? `Opening position · ${it.reference}` : 'Opening position · summarised balance',
         totalF: F(it.amount), openF: F(it.amount), bound: 'opening position — recorded, not booked yet (waits for the accountant)',
         href: `/clients/${customerId}`, events: [],

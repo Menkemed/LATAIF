@@ -13,7 +13,7 @@
 import { query } from '@/core/db/helpers';
 import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
 import { openingCutoffDay } from '@/core/ledger/correction-dates';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { RepairActionRejected } from './repair-rules';
 
@@ -41,13 +41,13 @@ function tagText(d: string): string {
  * Eröffnungsstichtag liegt, ungültig ist oder in der Zukunft. Dann wählt der Nutzer den Tag ausdrücklich
  * (`repairCostDatePrompt`). Ein eingereichtes Quartal kennt erst der Primary (er lehnt dann verständlich ab).
  */
-export function defaultRepairCostDay(receivedDay: string, nowMs: number = Date.now(), cutoff: string = OPENING_CUTOFF_DATE): string {
+export function defaultRepairCostDay(receivedDay: string, nowMs: number = Date.now(), cutoff: string = accountingOpeningDate()): string {
   if (!TAG_RE.test(receivedDay) || receivedDay < cutoff || receivedDay > bahrainTodayIso(nowMs)) return '';
   return receivedDay;
 }
 
 /** Die Aufforderung der Maske, wenn es keine Vorgabe gibt — sonst null. */
-export function repairCostDatePrompt(receivedDay: string, nowMs: number = Date.now(), cutoff: string = OPENING_CUTOFF_DATE): string | null {
+export function repairCostDatePrompt(receivedDay: string, nowMs: number = Date.now(), cutoff: string = accountingOpeningDate()): string | null {
   if (defaultRepairCostDay(receivedDay, nowMs, cutoff)) return null;
   if (TAG_RE.test(receivedDay) && receivedDay < cutoff) {
     return `This repair was received on ${tagText(receivedDay)}, before the opening (${tagText(cutoff)}). `

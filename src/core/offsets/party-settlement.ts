@@ -31,7 +31,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from '@/core/invoices/invoice-house-guards';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED } from '@/core/finance/open-items-stamp';
 import { roleMayRunOp } from '@/core/bridge/command-permissions';
 import { createDebtOffsetInHouse } from './party-offsets';
@@ -178,7 +178,7 @@ export function settleBalanceInHouse(req: SettleBalanceRequest, ctx: { branchId:
   const beteiligt = [
     ...pairs.map((p) => read.invoices.find((i) => i.id === p.invoiceId)!.date),
     ...pairs.map((p) => read.sources.find((s) => s.id === p.sourceId)!.date),
-    OPENING_CUTOFF_DATE,
+    accountingOpeningDate(),
   ].filter(Boolean).sort();
   const frueheste = beteiligt[beteiligt.length - 1];
   if (tag < frueheste) throw nein('OFFSET_DATE_TOO_EARLY', `the settlement date must be on or after ${frueheste} (the documents it settles and the opening cutoff)`);

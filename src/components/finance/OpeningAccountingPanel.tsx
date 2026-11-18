@@ -18,10 +18,11 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { usePermission } from '@/hooks/usePermission';
 import { OP_PAGE_OPENING_ACCOUNTING_GET } from '@/core/bridge/store-read-ops';
 import {
-  OPENING_ACCOUNT_KINDS, OPENING_ACCOUNT_KIND_INFO, OPENING_CUTOFF_DATE,
+  OPENING_ACCOUNT_KINDS, OPENING_ACCOUNT_KIND_INFO,
   cancelOpeningAccountItemOnPrimary, openingAccountingFor, recordOpeningAccountItemOnPrimary,
   type CounterpartyType, type OpeningAccountItem, type OpeningAccountKind, type OpeningAccountingRead, type OverviewRow,
 } from '@/core/accounting/opening-accounting';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 
 const b3 = (n: number | null | undefined): string => (n === null || n === undefined ? '—' : n.toFixed(3));
 const STATUS_COLOR: Record<string, string> = { RECONCILED: '#2F6B3A', BOOKED: '#374151', PROVISIONAL: '#8A5A00', MISSING: '#7A3535', NOT_VERIFIED: '#7A3535', EMPTY: '#9CA3AF' };
@@ -34,7 +35,7 @@ export function OpeningAccountingPanel() {
   const w = useSharedWrites();
   const sending = useRef(false);
   const [refresh, setRefresh] = useState(0);
-  const [asOfDate, setAsOfDate] = useState(OPENING_CUTOFF_DATE);
+  const [asOfDate, setAsOfDate] = useState(accountingOpeningDate());
   const [showTx, setShowTx] = useState(false);
   const [kind, setKind] = useState<OpeningAccountKind>('CASH_BALANCE');
   const [amount, setAmount] = useState('');
@@ -86,7 +87,7 @@ export function OpeningAccountingPanel() {
     if (!plan || sending.current) return;
     sending.current = true;
     try {
-      const text = `${correcting ? `Replace ${correcting.number} with` : 'Record'} ${OPENING_ACCOUNT_KIND_INFO[plan.kind].label.toLowerCase()}: ${b3(plan.amount)} BHD as of ${OPENING_CUTOFF_DATE}?\n\n`
+      const text = `${correcting ? `Replace ${correcting.number} with` : 'Record'} ${OPENING_ACCOUNT_KIND_INFO[plan.kind].label.toLowerCase()}: ${b3(plan.amount)} BHD as of ${accountingOpeningDate()}?\n\n`
         + 'This creates an opening document only: nothing is booked — no cash, bank, Benefit, VAT or ledger entry.';
       if (!(await window.confirm(text))) return;
       const body = {
@@ -219,7 +220,7 @@ export function OpeningAccountingPanel() {
               {OPENING_ACCOUNT_KINDS.map((k) => <option key={k} value={k}>{OPENING_ACCOUNT_KIND_INFO[k].label}</option>)}
             </select>
           </label>
-          <Input label={info.count ? `Balance on ${OPENING_CUTOFF_DATE} (BHD)` : 'Amount (BHD)'} value={amount} onChange={(e) => setAmount(e.target.value)} data-opening-doc-amount />
+          <Input label={info.count ? `Balance on ${accountingOpeningDate()} (BHD)` : 'Amount (BHD)'} value={amount} onChange={(e) => setAmount(e.target.value)} data-opening-doc-amount />
           <Input label="Reference (count, statement, contract, document)" value={reference} onChange={(e) => setReference(e.target.value)} data-opening-doc-reference />
           <Input label="Reason / basis (required)" value={reason} onChange={(e) => setReason(e.target.value)} data-opening-doc-reason />
           {info.counterparty !== 'NONE' && (
@@ -258,7 +259,7 @@ export function OpeningAccountingPanel() {
       <Card>
         <div className="flex justify-between items-center">
           <span className="text-overline">TRIAL BALANCE AND BALANCE SHEET PREVIEW (LEDGER BEFORE)</span>
-          <input type="date" value={asOfDate} onChange={(e) => setAsOfDate(e.target.value || OPENING_CUTOFF_DATE)} data-opening-as-of />
+          <input type="date" value={asOfDate} onChange={(e) => setAsOfDate(e.target.value || accountingOpeningDate())} data-opening-as-of />
         </div>
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 8 }} data-trial-balance>
           <thead><tr><th style={th}>Account</th><th style={th}>Class</th><th style={{ ...th, textAlign: 'right' }}>Debit</th><th style={{ ...th, textAlign: 'right' }}>Credit</th><th style={{ ...th, textAlign: 'right' }}>Balance</th></tr></thead>

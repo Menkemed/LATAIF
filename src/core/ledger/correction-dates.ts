@@ -4,35 +4,33 @@
 // Seit P1b bucht eine Korrektur periodengerecht: die Gegenbuchung auf den Tag ihres Originals, die
 // Neubuchung auf den fachlich richtigen Tag (Rechnungsdatum, Zahlungstag). Damit entstehen Buchungen in
 // der Vergangenheit — und die sind nur erlaubt, wo die Vergangenheit noch offen ist:
-//   • O1 — nicht vor dem Eröffnungsstichtag (`OPENING_CUTOFF_DATE`, die eine Owner-Konstante in
-//          `parties/opening-balances.ts`; hier nur gelesen, kein zweites Datum);
+//   • O1 — nicht vor dem Buchungsstichtag DIESER Datenbank (`accountingOpeningDate()`, Settings → Accounting;
+//          ohne Eintrag 2026-10-15; hier nur gelesen, kein zweites Datum);
 //   • O2 — nicht in einem VAT-Quartal, das eingereicht oder schon bezahlt ist (`closedVatQuarters`,
 //          dieselbe Quartalsregel wie der NBR-Export), auch wenn die Rechnung dort noch nicht exportiert ist.
 // Ein Tag zählt als Kalendertag in Ortszeit — wie Stichtagsliste und NBR-Export.
 // ════════════════════════════════════════════════════════════════════════════
 import { closedVatQuarters, nbrQuarterOfDate, VatPeriodFiled } from '@/core/tax/vat-period-lock';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate, setOpeningDateForTest } from '@/core/accounting/opening-date';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 
 export const CORRECTION_BEFORE_OPENING_CUTOFF = 'CORRECTION_BEFORE_OPENING_CUTOFF';
 
 /**
  * Nur für Node-Tests: Regressionstests anderer Regeln (VAT-Sperre, Kundenwechsel), deren Szenarien in Quartalen
- * VOR der Eröffnung spielen, setzen hier einen früheren Stichtag. `null` = die Owner-Konstante. Der O1-Test prüft
- * mit der echten Konstante.
+ * VOR der Eröffnung spielen, setzen hier einen früheren Stichtag. `null` = der Stichtag der Datenbank.
  *
  * In der App ist der Schalter TOT: dort setzt Vite `import.meta.env` (dev wie prod, beim Bauen ersetzt) — dann wirft
- * das Setzen, und gelesen wird immer die Owner-Konstante, auch wenn irgendetwas den Wert verändert hätte. Nur der
- * Node-Testlauf (ohne Vite) hat kein `import.meta.env`.
+ * das Setzen, und gelesen wird immer der Stichtag der Datenbank (Settings → Accounting). Nur der Node-Testlauf
+ * (ohne Vite) hat kein `import.meta.env`.
  */
 const nurNodeTest = (): boolean => typeof import.meta.env === 'undefined';
-let cutoffForTest: string | null = null;
 export function setOpeningCutoffForTest(day: string | null): void {
-  if (!nurNodeTest()) throw new Error('setOpeningCutoffForTest is only available in node tests — the opening cut-off is fixed in the app.');
-  cutoffForTest = day;
+  if (!nurNodeTest()) throw new Error('setOpeningCutoffForTest is only available in node tests — the opening cut-off is read from the database in the app.');
+  setOpeningDateForTest(day);
 }
-const openingCutoff = (): string => (nurNodeTest() && cutoffForTest !== null ? cutoffForTest : OPENING_CUTOFF_DATE);
-/** Der gültige Eröffnungsstichtag (in der App immer die Owner-Konstante) — auch für einen gewählten Zahlungstag. */
+const openingCutoff = (): string => accountingOpeningDate();
+/** Der gültige Buchungsstichtag dieser Datenbank — auch für einen gewählten Zahlungstag. */
 export function openingCutoffDay(): string { return openingCutoff(); }
 
 export interface CorrectionDate {

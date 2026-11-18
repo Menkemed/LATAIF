@@ -56,7 +56,7 @@ import {
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { businessDateIssue } from '@/core/utils/business-date';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
 import {
   applyIdentityDocument, identityDocumentFor, identitySourceOf, supplierLegacyIdPhoto, IdentityMediaError,
@@ -319,7 +319,7 @@ function kontext(purchaseId: string, branchId: string, now: string): Kontext {
     p, lines, consumption, partnerLines, hasReturn,
     consignment: byColumn || byNote, consignmentByNoteOnly: byNote,
     bulk, needsLedger, hasLedger,
-    beforeCutover: purchaseDate < OPENING_CUTOFF_DATE,
+    beforeCutover: purchaseDate < accountingOpeningDate(),
     vat10,
     currentQuarter: nbrQuarterOfDate(dayOf(now))?.key ?? '',
     purchaseQuarter: nbrQuarterOfDate(purchaseDate)?.key ?? '',
@@ -361,7 +361,7 @@ function vorsteuerSperre(k: Kontext): EditLock {
 }
 
 const vorStichtag = (): EditLock => zu('PURCHASE_EDIT_BEFORE_CUTOVER',
-  `This purchase is dated before the opening cut-off (${OPENING_CUTOFF_DATE}). Its amounts wait for the accountant to confirm the opening balances.`);
+  `This purchase is dated before the opening cut-off (${accountingOpeningDate()}). Its amounts wait for the accountant to confirm the opening balances.`);
 
 /** Darf der Stückpreis dieser Zeile sich ändern — auch wenn schon verkauft wurde (D1)? */
 function preisSperre(k: Kontext, line: Record<string, unknown>): EditLock {
@@ -383,8 +383,8 @@ function preisSperre(k: Kontext, line: Record<string, unknown>): EditLock {
       if (s.unitsInCogs <= 0) continue;
       if (s.viaAgent) return zu('PURCHASE_EDIT_SOLD_VIA_AGENT', `An item from this line was sold through an agent (${s.invoiceNumber}).`);
       if (!s.hasCogs) return zu('PURCHASE_EDIT_SALE_WITHOUT_COGS', `The sale ${s.invoiceNumber} has no cost-of-sales entry — it has to be reconciled first.`);
-      if (s.issuedDate < OPENING_CUTOFF_DATE) {
-        return zu('PURCHASE_EDIT_SALE_BEFORE_CUTOVER', `The sale ${s.invoiceNumber} is dated before the opening cut-off (${OPENING_CUTOFF_DATE}).`);
+      if (s.issuedDate < accountingOpeningDate()) {
+        return zu('PURCHASE_EDIT_SALE_BEFORE_CUTOVER', `The sale ${s.invoiceNumber} is dated before the opening cut-off (${accountingOpeningDate()}).`);
       }
     }
     const sold = c.sales.reduce((n, s) => n + s.unitsInCogs, 0);
@@ -579,7 +579,7 @@ export function purchaseEditCheck(purchaseId: string, branchId: string, now: str
       { kind: 'ENTRY_ERROR', allowed: true },
       { kind: 'SUPPLIER_DISCOUNT', allowed: false, reason: 'A later discount from the supplier is not booked yet — the accountant decides its treatment first.' },
     ],
-    cutoverDate: OPENING_CUTOFF_DATE,
+    cutoverDate: accountingOpeningDate(),
     livePayments: k.livePayments.length,
   };
 }
@@ -824,8 +824,8 @@ export function editPurchaseInHouse(
     const issue = businessDateIssue(newDate, 'The purchase date', Date.parse(ctx.now));
     if (issue || !newDate) throw nein('PURCHASE_EDIT_DATE_INVALID', issue ?? 'The purchase date is required');
     // Über den Eröffnungsstichtag hinweg verschöbe der Einkauf seine Eröffnungswerte (D1-Vorbehalt).
-    if ((oldDate < OPENING_CUTOFF_DATE) !== (newDate < OPENING_CUTOFF_DATE)) {
-      throw nein('PURCHASE_EDIT_BEFORE_CUTOVER', `The date cannot move across the opening cut-off (${OPENING_CUTOFF_DATE}).`);
+    if ((oldDate < accountingOpeningDate()) !== (newDate < accountingOpeningDate())) {
+      throw nein('PURCHASE_EDIT_BEFORE_CUTOVER', `The date cannot move across the opening cut-off (${accountingOpeningDate()}).`);
     }
     if (k.vat10) {
       const q = nbrQuarterOfDate(newDate)?.key ?? '';
@@ -1261,9 +1261,9 @@ export function voidPurchasePaymentInHouse(
     throw nein('PAYMENT_IS_OFFSET', 'This line is an offset with a client invoice (no cash) — remove the offset on the invoice or in the client account. Nothing was changed.');
   }
   const paidAt = String(pay.paid_at ?? '');
-  if (paidAt.slice(0, 10) < OPENING_CUTOFF_DATE) {
+  if (paidAt.slice(0, 10) < accountingOpeningDate()) {
     throw nein('PURCHASE_EDIT_BEFORE_CUTOVER',
-      `This payment is dated before the opening cut-off (${OPENING_CUTOFF_DATE}). It waits for the accountant to confirm the opening balances.`);
+      `This payment is dated before the opening cut-off (${accountingOpeningDate()}). It waits for the accountant to confirm the opening balances.`);
   }
   if (!hasLedgerEntries('PURCHASE_PAYMENT', paymentId)) {
     throw nein('PURCHASE_EDIT_NO_LEDGER', 'This payment has no live accounting entry. It has to be reconciled first.');
@@ -1383,9 +1383,9 @@ export function correctPurchasePaymentDateInHouse(
   if (purchaseDate && newDate < purchaseDate) {
     throw nein('PAYMENT_DATE_BEFORE_PURCHASE', `The payment date cannot be before the purchase date (${purchaseDate}).`);
   }
-  if (oldDate < OPENING_CUTOFF_DATE || newDate < OPENING_CUTOFF_DATE) {
+  if (oldDate < accountingOpeningDate() || newDate < accountingOpeningDate()) {
     throw nein('PURCHASE_EDIT_BEFORE_CUTOVER',
-      `A payment dated before the opening cut-off (${OPENING_CUTOFF_DATE}) waits for the accountant to confirm the opening balances.`);
+      `A payment dated before the opening cut-off (${accountingOpeningDate()}) waits for the accountant to confirm the opening balances.`);
   }
   // VAT-PERIOD-LOCK — die Buchungen eines eingereichten oder VAT-bezahlten Quartals ändern sich nicht: weder durch das
   // Herausnehmen (alter Tag) noch das Hineinlegen (neuer Tag) noch die heutige Gegenbuchung.

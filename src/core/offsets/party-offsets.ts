@@ -31,7 +31,7 @@ import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from '@/core/invoices/invoice-house-guards';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
 import { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 import { invoiceOpenFils, isBorrowedDirection as borrowed, isDebtClosed as debtClosed, OFFSET_CLOSED_INVOICE } from './party-offset-reads';
@@ -140,7 +140,7 @@ export function createDebtOffsetInHouse(input: DebtOffsetInput, ctx: OffsetCtx, 
   if (issue || typeof tag !== 'string') throw nein(OFFSET_DATE_INVALID, issue || 'the offset date is not valid');
   const rechnungstag = String(inv.issued_at || inv.created_at || '').slice(0, 10);
   const darlehenstag = String(d.created_at || '').slice(0, 10);
-  const frueheste = [rechnungstag, darlehenstag, OPENING_CUTOFF_DATE].filter(Boolean).sort().pop() as string;
+  const frueheste = [rechnungstag, darlehenstag, accountingOpeningDate()].filter(Boolean).sort().pop() as string;
   if (tag < frueheste) throw nein(OFFSET_DATE_TOO_EARLY, `the offset date must be on or after ${frueheste} (invoice, loan and opening cutoff)`);
 
   let userId = ctx.userId ?? '';

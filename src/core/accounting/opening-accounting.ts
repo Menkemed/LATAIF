@@ -32,8 +32,9 @@ import { isClientMode } from '@/core/bridge/client-mode';
 import { useAuthStore } from '@/stores/authStore';
 import { watchLedgerPosts } from '@/core/ledger/posting';
 import { payloadHash } from '@/core/bulk/bulk-math';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import {
-  OPENING_CUTOFF_DATE, OPENING_KINDS, kindTotals, referenceKey,
+  OPENING_KINDS, kindTotals, referenceKey,
   type OpeningItem, type OpeningKind, type OpeningKindTotal,
 } from '@/core/parties/opening-balances';
 import { oldStockReconciliationFor } from '@/core/stock/old-stock-reconciliation';
@@ -42,7 +43,6 @@ import {
   type BalanceSheet, type CutoffTransactions, type TrialBalance,
 } from './ledger-statements';
 
-export { OPENING_CUTOFF_DATE };
 
 export const OPENING_ACCOUNT_KINDS = [
   'CASH_BALANCE', 'BANK_BALANCE', 'BENEFIT_BALANCE', 'LOAN_RECEIVABLE', 'LOAN_PAYABLE', 'OTHER_ASSET', 'OTHER_LIABILITY', 'VAT_PAYABLE', 'VAT_RECEIVABLE',
@@ -262,7 +262,7 @@ export function planOpeningAccountItem(input: Partial<OpeningAccountInput>, bran
   let ledgerBefore: number | null = null;
   let difference: number | null = null;
   if (info.count && info.ledgerAccount) {
-    const f = sideBalanceBeforeFils({ branchId }, cutoffBoundaryIso(OPENING_CUTOFF_DATE), [info.ledgerAccount]);
+    const f = sideBalanceBeforeFils({ branchId }, cutoffBoundaryIso(accountingOpeningDate()), [info.ledgerAccount]);
     ledgerBefore = bhd(f);
     difference = bhd(toFils(amount) - f);
   }
@@ -320,7 +320,7 @@ export function recordOpeningAccountItemInHouse(input: OpeningAccountInput, ctx:
        created_at, created_by, revision)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECORDED', 'PENDING', ?, ?, ?, ?, 0)`,
     [id, ctx.branchId, number, plan.kind, plan.amount, plan.reference, plan.referenceKey, plan.reason,
-      plan.counterparty?.type ?? null, plan.counterparty?.id ?? null, plan.counterparty?.name ?? null, OPENING_CUTOFF_DATE,
+      plan.counterparty?.type ?? null, plan.counterparty?.id ?? null, plan.counterparty?.name ?? null, accountingOpeningDate(),
       plan.corrects?.id ?? null, actionId, hash, ctx.now, ctx.userId || null],
   );
   trackChange('opening_account_items', id, 'insert', {});
@@ -328,7 +328,7 @@ export function recordOpeningAccountItemInHouse(input: OpeningAccountInput, ctx:
     module: 'Finance', entityType: 'opening_account_items', entityId: id, action: 'CREATE',
     newValue: {
       itemNumber: number, kind: plan.kind, amount: plan.amount, reference: plan.reference, reason: plan.reason,
-      counterparty: plan.counterparty, cutoffDate: OPENING_CUTOFF_DATE, accounting: 'PENDING',
+      counterparty: plan.counterparty, cutoffDate: accountingOpeningDate(), accounting: 'PENDING',
       corrects: plan.corrects?.itemNumber ?? null, ledgerBefore: plan.ledgerBefore, difference: plan.difference,
       confirmedNotInLataif: input.confirmNotInLataif === true ? true : null,
     },
@@ -488,8 +488,8 @@ export interface OpeningAccountingInput { asOfDate?: unknown; view?: unknown; tx
 
 /** Alles, was „Settings → Opening Balances" zeichnet — am Primary und (Fernauskunft) am PC2 gleich. Schreibt nichts. */
 export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAccountingInput = {}): OpeningAccountingRead {
-  const asOfDate = input.asOfDate === undefined || input.asOfDate === null || input.asOfDate === '' ? OPENING_CUTOFF_DATE : String(input.asOfDate);
-  const cutoffIso = cutoffBoundaryIso(OPENING_CUTOFF_DATE);
+  const asOfDate = input.asOfDate === undefined || input.asOfDate === null || input.asOfDate === '' ? accountingOpeningDate() : String(input.asOfDate);
+  const cutoffIso = cutoffBoundaryIso(accountingOpeningDate());
   const booked = (accounts: readonly string[]): number => sideBalanceBeforeFils(ctx, cutoffIso, accounts);
   const items = openingAccountItemsFor(ctx);
   const live = items.filter((i) => i.status === 'RECORDED');
@@ -517,7 +517,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
     let adjustment: number | null = null;
     if (!count) {
       status = 'MISSING';
-      issues.push(`${info.label}: no counted balance as of ${OPENING_CUTOFF_DATE} recorded yet.`);
+      issues.push(`${info.label}: no counted balance as of ${accountingOpeningDate()} recorded yet.`);
     } else {
       const d = toFils(count.amount) - b;
       adjustment = bhd(d);
@@ -539,7 +539,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
       adjustment: null, range: null, valuation: 'CUTOFF', status: 'NOT_VERIFIED', source: 'Ledger only',
       notes: ['No statement balance of the card processor as of the cutoff is recorded — open reconciliation point.'],
     });
-    issues.push(`Card clearing: ${bhd(b).toFixed(3)} BHD booked before the cutoff; no settlement statement as of ${OPENING_CUTOFF_DATE} recorded — open reconciliation point.`);
+    issues.push(`Card clearing: ${bhd(b).toFixed(3)} BHD booked before the cutoff; no settlement statement as of ${accountingOpeningDate()} recorded — open reconciliation point.`);
   }
   plain('CUSTOMER_RECEIVABLES', 'Customer receivables', 'ASSET', ['ACCOUNTS_RECEIVABLE'], partyF('CUSTOMER_RECEIVABLE'), 'LATAIF invoices (ledger) + opening positions (Customer Edit)');
   plain('SUPPLIER_ADVANCES', 'Supplier advances / credits', 'ASSET', ['SUPPLIER_CREDIT'], partyF('SUPPLIER_ADVANCE'), 'Ledger + opening positions (Supplier Edit)');
@@ -553,7 +553,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
   {
     const b = booked(['INVENTORY']);
     const notes = [
-      `CURRENT value (today), not the value as of ${OPENING_CUTOFF_DATE}: the value at the cutoff is PENDING / NOT VERIFIED (B5) and is not included in the opening equity.`,
+      `CURRENT value (today), not the value as of ${accountingOpeningDate()}: the value at the cutoff is PENDING / NOT VERIFIED (B5) and is not included in the opening equity.`,
       `Preview of the old stock as it is now (page “Old stock”): ${os.totals.candidates} candidate(s), ${os.totals.review} to review, ${os.totals.capitalised} already capitalised by purchases.`,
       `V2 = shelf value + cost of sales already booked = ${os.totals.v2.toFixed(3)} BHD; V1 = V2 + pending removals = ${os.totals.v1.toFixed(3)} BHD (D4/D5 open).`,
       ...os.notes,
@@ -561,7 +561,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
     const status: OverviewStatus = os.totals.candidates > 0 || os.totals.review > 0 ? 'NOT_VERIFIED' : b !== 0 ? 'BOOKED' : 'EMPTY';
     if (os.totals.review > 0) issues.push(`Old stock: ${os.totals.review} item(s) need a review before an opening value can be proposed.`);
     if (os.ledger.unknownInventoryDebits > 0) issues.push(`Old stock: ${os.ledger.unknownInventoryDebits} inventory booking(s) of unknown origin in the ledger.`);
-    if (os.totals.candidates > 0) issues.push(`Old stock: only the CURRENT value ${os.totals.v2.toFixed(3)}–${os.totals.v1.toFixed(3)} BHD is known — the value as of ${OPENING_CUTOFF_DATE} is NOT VERIFIED and not included in the opening equity (B5; D1–D6, D8).`);
+    if (os.totals.candidates > 0) issues.push(`Old stock: only the CURRENT value ${os.totals.v2.toFixed(3)}–${os.totals.v1.toFixed(3)} BHD is known — the value as of ${accountingOpeningDate()} is NOT VERIFIED and not included in the opening equity (B5; D1–D6, D8).`);
     rows.push({
       key: 'OLD_STOCK', label: 'Inventory / old stock', side: 'ASSET', accounts: ['INVENTORY'], booked: bhd(b), draft: null, target: null, adjustment: null,
       range: os.totals.candidates > 0 ? { low: os.totals.v2, high: os.totals.v1 } : null, valuation: 'CURRENT_NOT_VERIFIED', status, source: 'Ledger + CURRENT old-stock preview (Collection)', notes,
@@ -580,7 +580,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
   if (legacyCash.invalid.length > 0) issues.push(`The settings opening has an invalid or negative value (${legacyCash.invalid.join(', ')}) — it is not booked and stays frozen.`);
   if (legacyCash.notBooked.length > 0) issues.push(`The settings opening (${legacyCash.notBooked.join(', ')}) differs from the ledger — not counted; use the counted balance.`);
 
-  const sheet = balanceSheetAt(ctx, OPENING_CUTOFF_DATE);
+  const sheet = balanceSheetAt(ctx, accountingOpeningDate());
   const assetsF = rows.filter((r) => r.side === 'ASSET').reduce((s, r) => s + toFils(r.booked), 0);
   const liabilitiesF = rows.filter((r) => r.side === 'LIABILITY').reduce((s, r) => s + toFils(r.booked), 0);
   const draftNetF = rows.filter((r) => r.key !== 'OLD_STOCK').reduce((s, r) => s + (r.side === 'ASSET' ? 1 : -1) * toFils(r.adjustment ?? 0), 0);
@@ -588,7 +588,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
   if (sheet.imbalance !== 0) issues.push(`The ledger is not balanced before the cutoff (${sheet.imbalance.toFixed(3)} BHD).`);
   if (sheet.unclassified.length > 0) issues.push(`Ledger accounts without a class: ${sheet.unclassified.map((u) => u.account).join(', ')}.`);
   if (sheet.difference !== 0) issues.push(`Assets − liabilities − equity before the cutoff leave ${sheet.difference.toFixed(3)} BHD unexplained.`);
-  if (asOfDate !== OPENING_CUTOFF_DATE) issues.push(`The trial balance below is shown as of ${asOfDate}, not the opening cutoff ${OPENING_CUTOFF_DATE}.`);
+  if (asOfDate !== accountingOpeningDate()) issues.push(`The trial balance below is shown as of ${asOfDate}, not the opening cutoff ${accountingOpeningDate()}.`);
 
   let preview: OpeningAccountingRead['preview'] = null;
   if (input.preview && typeof input.preview === 'object' && !Array.isArray(input.preview)) {
@@ -600,7 +600,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
   }
   const lim = Number(input.txLimit);
   return {
-    cutoffDate: OPENING_CUTOFF_DATE, asOfDate, status: 'PROVISIONAL', booking: OPENING_ACCOUNTING_BOOKING,
+    cutoffDate: accountingOpeningDate(), asOfDate, status: 'PROVISIONAL', booking: OPENING_ACCOUNTING_BOOKING,
     rows,
     equity: {
       openingBooked: sheet.equity.opening, partnerBooked: sheet.equity.partner, resultBooked: sheet.equity.result,
@@ -619,7 +619,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
       unknownInventoryDebits: os.ledger.unknownInventoryDebits, notes: os.notes,
     },
     trialBalance: trialBalanceAt(ctx, asOfDate),
-    balanceSheet: asOfDate === OPENING_CUTOFF_DATE ? sheet : balanceSheetAt(ctx, asOfDate),
+    balanceSheet: asOfDate === accountingOpeningDate() ? sheet : balanceSheetAt(ctx, asOfDate),
     transactions: input.view === 'transactions' ? cutoffTransactionsFor(ctx, asOfDate, Number.isFinite(lim) && lim > 0 ? lim : 1000) : null,
     counterparties: {
       customers: query("SELECT id, first_name, last_name, company FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%' ORDER BY first_name, last_name LIMIT 5000", [ctx.branchId])

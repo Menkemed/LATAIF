@@ -459,7 +459,9 @@ function obState(db: Db): string {
   }
   // B1 OPENING ACCOUNTING — die Eröffnungsübersicht liest die Posten auch, aber nur als ungebuchte Entwürfe (getrennt vom
   // gebuchten Saldo; test/opening-accounting): weiterhin kein Saldo, kein Zahlungsweg, kein Bericht.
-  ok(S([...leser].sort()) === S(['src/core/accounting/opening-accounting.ts', 'src/core/db/database.ts', 'src/core/parties/opening-balances.ts', 'src/stores/customerStore.ts', 'src/stores/supplierStore.ts']),
+  // ACCOUNTING-OPENING-DATE — die Änderung des Buchungsstichtags zählt nur, ob noch Posten auf einem anderen Tag gelten
+  // (dann wird die Änderung abgelehnt; test/opening-date): auch das ist kein Saldo, kein Zahlungsweg, kein Bericht.
+  ok(S([...leser].sort()) === S(['src/core/accounting/opening-accounting.ts', 'src/core/accounting/opening-date-house.ts', 'src/core/db/database.ts', 'src/core/parties/opening-balances.ts', 'src/stores/customerStore.ts', 'src/stores/supplierStore.ts']),
     `G1-1 die Tabelle lesen nur: Schema, das Eröffnungsmodul, die Löschsperren von Kunde/Lieferant — kein Saldo, kein Zahlungsweg, kein Bericht (${S([...leser].sort())})`);
   const obCode = src('src/core/parties/opening-balances.ts').replace(/\/\/.*$/gm, '');
   ok(!/INSERT INTO (ledger_entries|payments|purchase_payments|expense_payments|customer_credits|supplier_credits|invoices|purchases|expenses|debts)\b/.test(obCode)

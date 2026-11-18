@@ -16,9 +16,10 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { OP_PARTIES_ACCOUNT_GET, partyAccountReadFor, type PartyAccountRead } from '@/core/parties/party-account';
 import {
-  KINDS_OF, KIND_LABEL, OPENING_CUTOFF_DATE, PRIOR_VAT_STATES, cancelOpeningItemOnPrimary, recordOpeningItemOnPrimary,
+  KINDS_OF, KIND_LABEL, PRIOR_VAT_STATES, cancelOpeningItemOnPrimary, recordOpeningItemOnPrimary,
   type OpeningItem, type OpeningKind, type OpeningPartyType, type OpeningScope, type PriorVat, type ProposedLine,
 } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 
 const PRIOR_VAT_LABEL: Record<PriorVat, string> = {
   DECLARED_BEFORE: 'VAT already declared in the old records',
@@ -87,7 +88,7 @@ export function OpeningBalancesSection({ partyType, partyId, mode, canRecord, on
   async function record(): Promise<void> {
     if (!plan) return;
     const text = `Record ${KIND_LABEL[plan.kind].toLowerCase()} for ${plan.party.name}: ${fmt(plan.amount)} BHD`
-      + `${plan.reference ? ` (${plan.reference})` : ' (summarised remainder)'} as of ${OPENING_CUTOFF_DATE}?\n\n`
+      + `${plan.reference ? ` (${plan.reference})` : ' (summarised remainder)'} as of ${accountingOpeningDate()}?\n\n`
       + 'This creates an opening document only: no invoice, no purchase, no revenue, no VAT and no cash movement. '
       + 'It is not booked and not payable until the accountant confirms the opening rules.';
     if (!(await window.confirm(text))) return;
@@ -128,7 +129,7 @@ export function OpeningBalancesSection({ partyType, partyId, mode, canRecord, on
     return (
       <div data-opening-summary><Card style={{ marginTop: 16 }}>
         <div className="flex justify-between items-center">
-          <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Opening balances · {OPENING_CUTOFF_DATE}</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Opening balances · {accountingOpeningDate()}</span>
           <span style={{ fontSize: 11, color: '#9A6B00' }}>Recorded, not booked yet — not part of the balances above</span>
         </div>
         {data?.totals.filter((t) => t.count > 0).map((t) => (
@@ -144,11 +145,11 @@ export function OpeningBalancesSection({ partyType, partyId, mode, canRecord, on
   return (
     <div data-opening-section><Card style={{ marginTop: 16 }}>
       <div className="flex justify-between items-center">
-        <span style={{ fontSize: 14, fontWeight: 600, color: '#0F0F10' }}>Opening balances · as of {OPENING_CUTOFF_DATE}</span>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#0F0F10' }}>Opening balances · as of {accountingOpeningDate()}</span>
         <button onClick={() => navigate('/opening-balances')} style={{ background: 'none', border: 'none', fontSize: 12, color: '#3D7FFF', cursor: 'pointer' }}>All opening balances →</button>
       </div>
       <p style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>
-        Old balances from before {OPENING_CUTOFF_DATE}, recorded as separate documents. This is not part of “Save” above.
+        Old balances from before {accountingOpeningDate()}, recorded as separate documents. This is not part of “Save” above.
         {' '}<b>Not booked and not payable yet</b> — the accountant confirms the counter account, the booking date and the VAT treatment first.
       </p>
       {data === null && <p style={{ fontSize: 12, color: '#9CA3AF', marginTop: 8 }} data-opening-unavailable>Opening balances are not available right now.</p>}
@@ -211,7 +212,7 @@ export function OpeningBalancesSection({ partyType, partyId, mode, canRecord, on
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
             <Input label={scope === 'DOCUMENT' ? 'Old reference (required)' : 'Reference (optional)'} value={reference} onChange={(e) => setReference(e.target.value)} data-opening-reference />
-            <Input label="Document date" type="date" max={OPENING_CUTOFF_DATE} value={documentDate} onChange={(e) => setDocumentDate(e.target.value)} data-opening-date />
+            <Input label="Document date" type="date" max={accountingOpeningDate()} value={documentDate} onChange={(e) => setDocumentDate(e.target.value)} data-opening-date />
             <Input label="Due date" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} data-opening-due />
             <Input label="Amount (BHD)" value={amount} onChange={(e) => setAmount(e.target.value)} data-opening-amount />
           </div>
@@ -224,7 +225,7 @@ export function OpeningBalancesSection({ partyType, partyId, mode, canRecord, on
           <Input label="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} data-opening-note />
           {amount.trim() !== '' && (plan ? (
             <div data-opening-preview style={{ padding: '10px 12px', borderRadius: 8, background: '#F5F7FA', fontSize: 12, color: '#374151' }}>
-              {KIND_LABEL[plan.kind]}: {fmt(plan.amount)} BHD as of {OPENING_CUTOFF_DATE}. No invoice, no revenue, no VAT, no cash movement.
+              {KIND_LABEL[plan.kind]}: {fmt(plan.amount)} BHD as of {accountingOpeningDate()}. No invoice, no revenue, no VAT, no cash movement.
               {' '}Proposed booking after the accountant&apos;s approval: {lineText(data?.totals.find((t) => t.kind === plan.kind)?.proposed ?? [], plan.party.name)}.
             </div>
           ) : (

@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink, Wrench, Scale,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink, Wrench, Scale, CalendarClock,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
@@ -20,6 +20,7 @@ import { DataLocationPanel } from './DataLocationPanel';
 import { DataRepairsTab } from './DataRepairsTab';
 // B1 OPENING ACCOUNTING — Erfassung und Abstimmung der Eröffnungsbilanz (Owner; Primary und PC2).
 import { OpeningAccountingPanel } from '@/components/finance/OpeningAccountingPanel';
+import { AccountingOpeningDatePanel } from '@/components/finance/AccountingOpeningDatePanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
@@ -42,7 +43,7 @@ import { INVOICE_COMPANY_DEFAULTS, INVOICE_COMPANY_KEYS, type InvoiceA5Company }
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'opening' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'repairs' | 'danger';
+type TabKey = 'company' | 'tax' | 'accounting' | 'opening' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'repairs' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -53,6 +54,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { key: 'company', label: 'Company', icon: <Building2 size={16} /> },
   { key: 'tax', label: 'Tax / VAT', icon: <Receipt size={16} /> },
+  { key: 'accounting', label: 'Accounting', icon: <CalendarClock size={16} /> },
   { key: 'opening', label: 'Opening Balances', icon: <Scale size={16} /> },
   { key: 'categories', label: 'Categories', icon: <Tags size={16} /> },
   { key: 'branch', label: 'Branch', icon: <GitBranch size={16} /> },
@@ -3375,7 +3377,7 @@ function SettingsPageBody() {
   const initialTab = ((): TabKey => {
     try {
       const t = new URLSearchParams(window.location.search).get('tab');
-      const valid: TabKey[] = ['company', 'tax', 'opening', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'repairs', 'danger'];
+      const valid: TabKey[] = ['company', 'tax', 'accounting', 'opening', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'repairs', 'danger'];
       if (t && valid.includes(t as TabKey)) return t as TabKey;
     } catch { /* */ }
     return 'company';
@@ -3399,6 +3401,7 @@ function SettingsPageBody() {
     switch (activeTab) {
       case 'company': return <CompanyTab />;
       case 'tax': return <TaxTab />;
+      case 'accounting': return <AccountingOpeningDatePanel />;
       case 'opening': return <OpeningAccountingPanel />;
       case 'categories': return <CategoriesTab />;
       case 'branch': return <BranchTab />;

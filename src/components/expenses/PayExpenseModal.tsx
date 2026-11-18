@@ -31,7 +31,7 @@ import { saveExpensePayment, saveExpensePayments } from '@/core/payables/payable
 import { usePermission } from '@/hooks/usePermission';
 import { todayIso } from '@/core/utils/business-date';
 import { bahrainTodayIso, paymentDateIssue } from '@/core/utils/payment-date';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -64,7 +64,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const settlement = exp ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, creditPaid, exp.status) : null;
   const remaining = settlement ? settlement.remaining : 0;
   const ausgabeTag = exp?.expenseDate ? exp.expenseDate.slice(0, 10) : '';
-  const minDate = ausgabeTag > OPENING_CUTOFF_DATE ? ausgabeTag : OPENING_CUTOFF_DATE;
+  const minDate = ausgabeTag > accountingOpeningDate() ? ausgabeTag : accountingOpeningDate();
   const maxDate = bahrainTodayIso();
   const datumFehler = (d: string, i: number): string | null => {
     const label = rows.length > 1 ? `Payment ${i + 1} date` : 'The payment date';
@@ -72,7 +72,7 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
     const issue = paymentDateIssue(d, label);
     if (issue) return issue;
     if (ausgabeTag && d < ausgabeTag) return `${label} cannot be before the expense date (${ausgabeTag})`;
-    if (d < OPENING_CUTOFF_DATE) return `${label} cannot be before the opening cut-off (${OPENING_CUTOFF_DATE})`;
+    if (d < accountingOpeningDate()) return `${label} cannot be before the opening cut-off (${accountingOpeningDate()})`;
     return null;
   };
   const sumF = rows.reduce((s, r) => s + F(r.amount), 0);

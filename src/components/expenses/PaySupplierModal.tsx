@@ -37,7 +37,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { refNumbersFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
-import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 import { WriteError } from '@/components/shared/WriteError';
 import { PAYABLES_OP, planSupplierPayment, sortOpenItems, supplierOpenStamp, type SupplierOpenItem } from '@/core/payables/payables-house';
 import { saveSupplierCredit, saveSupplierPay, viaWrites } from '@/core/payables/payables-save';
@@ -225,13 +225,13 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     }
     return best;
   }, [effectiveAllocation, overrideMode, fifoPlan, openItems]);
-  const minPayDate = juengsterBeleg && juengsterBeleg.date > OPENING_CUTOFF_DATE ? juengsterBeleg.date : OPENING_CUTOFF_DATE;
+  const minPayDate = juengsterBeleg && juengsterBeleg.date > accountingOpeningDate() ? juengsterBeleg.date : accountingOpeningDate();
   const payDateFehler = ((): string | null => {
     if (!payDate) return 'The payment date is required';
     const issue = paymentDateIssue(payDate, 'The payment date');
     if (issue) return issue;
     if (juengsterBeleg && payDate < juengsterBeleg.date) return `The payment date cannot be before ${juengsterBeleg.number} (${juengsterBeleg.date}), which this payment settles`;
-    if (payDate < OPENING_CUTOFF_DATE) return `The payment date cannot be before the opening cut-off (${OPENING_CUTOFF_DATE})`;
+    if (payDate < accountingOpeningDate()) return `The payment date cannot be before the opening cut-off (${accountingOpeningDate()})`;
     return null;
   })();
 
@@ -683,7 +683,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
 
         {/* OPENING BALANCES + WAIVER — sichtbar, aber gesperrt, bis der Buchhalter die Regeln bestätigt. */}
         <p data-supplier-pay-locked style={{ fontSize: 11, color: '#9A6B00' }}>
-          Opening positions from before {OPENING_CUTOFF_DATE} are not booked yet and cannot be paid here. A debt waiver / write-off by the supplier is not available yet — both wait for the accountant.
+          Opening positions from before {accountingOpeningDate()} are not booked yet and cannot be paid here. A debt waiver / write-off by the supplier is not available yet — both wait for the accountant.
         </p>
         <WriteError text={fehler} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>

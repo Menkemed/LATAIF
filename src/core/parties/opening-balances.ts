@@ -33,9 +33,10 @@ import { watchLedgerPosts } from '@/core/ledger/posting';
 import { businessDateIssue } from '@/core/utils/business-date';
 import { payloadHash } from '@/core/bulk/bulk-math';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { accountingOpeningDate } from '@/core/accounting/opening-date';
 
-/** Der Eröffnungsstichtag (Owner-Entscheidung): Salden zu Beginn des 15.10.2026. */
-export const OPENING_CUTOFF_DATE = '2026-10-15';
+// ACCOUNTING-OPENING-DATE — der Eröffnungsstichtag ist der Buchungsstichtag DIESER Datenbank (Settings → Accounting;
+// ohne Eintrag 2026-10-15). Ein erfasster Eröffnungsposten trägt den Tag, für den er gilt (`cutoff_date`).
 
 export type OpeningPartyType = 'CUSTOMER' | 'SUPPLIER';
 export const OPENING_KINDS = ['CUSTOMER_RECEIVABLE', 'CUSTOMER_ADVANCE', 'SUPPLIER_PAYABLE', 'SUPPLIER_ADVANCE'] as const;
@@ -224,7 +225,7 @@ export function planOpeningItem(input: Partial<OpeningItemInput>, branchId: stri
   if (documentDate) {
     const issue = businessDateIssue(documentDate, 'Document date');
     if (issue) throw nein('INVALID_DATE', issue);
-    if (documentDate >= OPENING_CUTOFF_DATE) throw nein('DATE_NOT_BEFORE_CUTOFF', `an opening position is from before ${OPENING_CUTOFF_DATE} — anything from that day on is recorded in LATAIF itself`);
+    if (documentDate >= accountingOpeningDate()) throw nein('DATE_NOT_BEFORE_CUTOFF', `an opening position is from before ${accountingOpeningDate()} — anything from that day on is recorded in LATAIF itself`);
   }
   const dueDate = text(input.dueDate, 'due date', 10) ?? null;
   if (dueDate && !isDay(dueDate)) throw nein('INVALID_DATE', 'Due date is not a valid date');
@@ -292,7 +293,7 @@ export function recordOpeningItemInHouse(input: OpeningItemInput, ctx: OpeningCt
        created_at, created_by, revision)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECORDED', 'PENDING', ?, ?, ?, ?, 0)`,
     [id, ctx.branchId, number, plan.party.type, plan.party.id, plan.kind, plan.scope, plan.reference, plan.referenceKey,
-      plan.documentDate, plan.dueDate, plan.amount, OPENING_CUTOFF_DATE, plan.priorVat, plan.note, actionId, hash,
+      plan.documentDate, plan.dueDate, plan.amount, accountingOpeningDate(), plan.priorVat, plan.note, actionId, hash,
       ctx.now, ctx.userId || null],
   );
   trackChange('opening_balance_items', id, 'insert', {});
@@ -301,7 +302,7 @@ export function recordOpeningItemInHouse(input: OpeningItemInput, ctx: OpeningCt
     newValue: {
       itemNumber: number, partyType: plan.party.type, partyId: plan.party.id, partyName: plan.party.name, kind: plan.kind,
       scope: plan.scope, reference: plan.reference, documentDate: plan.documentDate, dueDate: plan.dueDate, amount: plan.amount,
-      cutoffDate: OPENING_CUTOFF_DATE, priorVat: plan.priorVat, accounting: 'PENDING',
+      cutoffDate: accountingOpeningDate(), priorVat: plan.priorVat, accounting: 'PENDING',
       confirmedNotInLataif: true, confirmedNoOverlap: plan.needsOverlapConfirm ? true : null,
     },
     actor: { userId: ctx.userId, branchId: ctx.branchId },
@@ -446,7 +447,7 @@ export function partyAccountFor(ctx: BusinessReadContext | { branchId: string },
     }
   }
   return {
-    party, cutoffDate: OPENING_CUTOFF_DATE, booking: OPENING_BOOKING, items,
+    party, cutoffDate: accountingOpeningDate(), booking: OPENING_BOOKING, items,
     totals: kindTotals(items, KINDS_OF[party.type]),
     lataifOpen, lataifOpenTotal: lataifOpen.reduce((s, d) => s + toFils(d.open), 0) / 1000,
     preview,
@@ -485,7 +486,7 @@ export function openingOverviewFor(ctx: { branchId: string }): OpeningOverview {
       WHERE branch_id = ? AND source_module = 'OPENING_BALANCE' AND account = ?`, [ctx.branchId, account],
   )[0]?.n) || 0;
   return {
-    cutoffDate: OPENING_CUTOFF_DATE, booking: OPENING_BOOKING,
+    cutoffDate: accountingOpeningDate(), booking: OPENING_BOOKING,
     totals: kindTotals(items, OPENING_KINDS),
     parties: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)).map((g) => ({ partyType: g.partyType, partyId: g.partyId, name: g.name, kind: g.kind, count: g.count, amount: g.fils / 1000 })),
     cancelledCount: items.length - live.length,
