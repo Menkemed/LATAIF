@@ -34,7 +34,10 @@ function run(script: string, args: string[], env: Record<string, string> = {}): 
     return { code: 0, out: JSON.parse(s) };
   } catch (e: any) {
     const txt = String(e.stdout || '') || String(e.stderr || '');
-    let out: any = null; try { out = JSON.parse(txt); } catch { out = { raw: txt.slice(0, 400) }; }
+    // Laufzeit-Hinweise (z. B. ExperimentalWarning) können vor dem Ergebnis stehen — der JSON-Block beginnt an
+    // der ersten Zeile mit „{".
+    const ab = txt.startsWith('{') ? 0 : txt.indexOf('\n{') + 1;
+    let out: any = null; try { out = JSON.parse(txt.slice(ab)); } catch { out = { raw: txt.slice(0, 400) }; }
     return { code: e.status ?? 1, out };
   }
 }
@@ -108,7 +111,7 @@ function welt(tag: string): { DATA: string; C: string; E: string } {
 const sichern = (w: { DATA: string; C: string; E: string }, name: string) =>
   run(BACKUP, ['sichern', '--quelle', w.DATA, '--ziel', w.C, '--ziel', w.E, '--name', name, '--ruhe-sekunden', '1', '--nur-pfad', DECOY]);
 const ausfuehren = (w: { DATA: string; C: string; E: string }, name: string, env: Record<string, string> = {}, sicherungen?: string[]) =>
-  run(TOOL, ['ausfuehren', '--daten', w.DATA, ...(sicherungen ?? [join(w.C, name), join(w.E, name)]).flatMap((x) => ['--sicherung', x]),
+  run(TOOL, ['ausfuehren', '--stufe', '1', '--daten', w.DATA, ...(sicherungen ?? [join(w.C, name), join(w.E, name)]).flatMap((x) => ['--sicherung', x]),
     '--bestaetigen', name, '--nur-pfad', DECOY], env);
 const pP = (w: { DATA: string }) => join(w.DATA, 'lataif.db');
 const pS = (w: { DATA: string }) => join(w.DATA, 'lataif_sync_server.db');
@@ -135,7 +138,7 @@ try {
   // ── 2) Ablehnungen — jeweils nichts geschrieben ─────────────────────────────────────────
   ok(sichern(A, '2026-11-18_a2-test-a').code === 0, 'Sicherung a auf C: und E: erstellt');
   const vorA2 = treeHash(A.DATA);
-  const r0 = run(TOOL, ['ausfuehren', '--daten', A.DATA, '--bestaetigen', '2026-11-18_a2-test-a', '--nur-pfad', DECOY]);
+  const r0 = run(TOOL, ['ausfuehren', '--stufe', '1', '--daten', A.DATA, '--bestaetigen', '2026-11-18_a2-test-a', '--nur-pfad', DECOY]);
   ok(r0.code !== 0 && /zwei --sicherung/.test(r0.out.abbruch), 'ohne Sicherungen: abgelehnt');
   const r1 = ausfuehren(A, '2026-11-18_a2-test-a', {}, [join(A.C, '2026-11-18_a2-test-a'), join(A.C, '2026-11-18_a2-test-a')]);
   ok(r1.code !== 0 && /demselben Laufwerk/.test(r1.out.abbruch), 'zwei Sicherungen auf demselben Laufwerk: abgelehnt');
@@ -168,7 +171,7 @@ try {
   const vorD = treeHash(D.DATA);
   const r5a = ausfuehren(D, '2026-11-18_a2-test-d');
   ok(r5a.code !== 0 && /ohne Server-Gegenstück/.test(r5a.out.abbruch) && treeHash(D.DATA) === vorD, 'Nur-Primary-Eintrag ohne Bestätigung: abgelehnt, nichts geschrieben');
-  const mitFlag = (ids: string) => run(TOOL, ['ausfuehren', '--daten', D.DATA, '--sicherung', join(D.C, '2026-11-18_a2-test-d'), '--sicherung', join(D.E, '2026-11-18_a2-test-d'),
+  const mitFlag = (ids: string) => run(TOOL, ['ausfuehren', '--stufe', '1', '--daten', D.DATA, '--sicherung', join(D.C, '2026-11-18_a2-test-d'), '--sicherung', join(D.E, '2026-11-18_a2-test-d'),
     '--bestaetigen', '2026-11-18_a2-test-d', '--erlaube-nur-primary', ids, '--nur-pfad', DECOY]);
   const r5b = mitFlag(`${idD},99`);
   ok(r5b.code !== 0 && treeHash(D.DATA) === vorD, 'Bestätigung mit falscher Nummernliste: abgelehnt, nichts geschrieben');
@@ -247,7 +250,7 @@ try {
   const sollZ = new Map((mfZ.dateien as Array<{ file: string; sha256: string }>).map((e) => [e.file, e.sha256]));
   const r12 = ausfuehren(Z, '2026-11-18_a2-test-z', { LATAIF_A2_TESTABBRUCH: 'vor-tausch' });
   ok(r12.code !== 0 && /TESTABBRUCH vor-tausch/.test(r12.out.abbruch) && sha(pP(Z)) === sollZ.get('lataif.db') && existsSync(pP(Z) + '.a2-neu'),
-    'Absturz vor dem Einsetzen: lataif.db unverändert der alte Stand (die App sähe nie eine halbe Datei), Arbeitskopie liegt daneben');
+    `Absturz vor dem Einsetzen: lataif.db unverändert der alte Stand (die App sähe nie eine halbe Datei), Arbeitskopie liegt daneben (${String(r12.out.abbruch).slice(0, 80)})`);
   ok(sperre(Z) === 'laeuft', '…und die Wartungssperre liegt');
   const r13 = run(TOOL, ['fortsetzen', '--daten', Z.DATA, '--nur-pfad', DECOY]);
   ok(r13.code === 0 && r13.out.stand === 'abgeschlossen' && JSON.stringify(cl(pP(Z))) === JSON.stringify(pNach) && !existsSync(pP(Z) + '.a2-neu'),
@@ -352,7 +355,7 @@ try {
   `prüfen benennt genau die beiden Beleg-Zeilen und die nötige Bestätigung (${gIds.join(',')})`);
   const rG1 = ausfuehren(G, '2026-11-18_a2-test-g');
   ok(rG1.code !== 0 && treeHash(G.DATA) === vorG && sperre(G) === null, 'ohne Bestätigung: abgelehnt, nichts geschrieben, keine Sperre');
-  const mitG = (ids: string) => run(TOOL, ['ausfuehren', '--daten', G.DATA, '--sicherung', join(G.C, '2026-11-18_a2-test-g'), '--sicherung', join(G.E, '2026-11-18_a2-test-g'),
+  const mitG = (ids: string) => run(TOOL, ['ausfuehren', '--stufe', '1', '--daten', G.DATA, '--sicherung', join(G.C, '2026-11-18_a2-test-g'), '--sicherung', join(G.E, '2026-11-18_a2-test-g'),
     '--bestaetigen', '2026-11-18_a2-test-g', '--erlaube-nur-primary', ids, '--nur-pfad', DECOY]);
   ok(mitG(String(gIds[0])).code !== 0 && treeHash(G.DATA) === vorG, 'nur eine der beiden bestätigt: abgelehnt, nichts geschrieben');
   const rG2 = mitG(gIds.join(','));
@@ -367,7 +370,7 @@ try {
   const nId = cl(pP(N)).filter((r) => r.record_id === 'p-only').map((r) => Number(r.id))[0];
   sichern(N, '2026-11-18_a2-test-n');
   const vorN = treeHash(N.DATA);
-  const rN = run(TOOL, ['ausfuehren', '--daten', N.DATA, '--sicherung', join(N.C, '2026-11-18_a2-test-n'), '--sicherung', join(N.E, '2026-11-18_a2-test-n'),
+  const rN = run(TOOL, ['ausfuehren', '--stufe', '1', '--daten', N.DATA, '--sicherung', join(N.C, '2026-11-18_a2-test-n'), '--sicherung', join(N.E, '2026-11-18_a2-test-n'),
     '--bestaetigen', '2026-11-18_a2-test-n', '--erlaube-nur-primary', String(nId), '--nur-pfad', DECOY]);
   ok(rN.code !== 0 && /würden verändert/.test(String(rN.out.abbruch)) && treeHash(N.DATA) === vorN,
     'bestätigter Nur-Primary-Eintrag, der verändert würde: trotzdem abgelehnt, nichts geschrieben');
