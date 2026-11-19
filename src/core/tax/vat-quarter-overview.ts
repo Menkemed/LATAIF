@@ -57,7 +57,7 @@ export function sumByQuarter(months: NbrMonthTotals[]): Map<string, VatQuarterFi
 /** Rechnungen im Export-Zuschnitt aus der Datenbank: ohne Butterfly (wie die Vorauswahl des Exports). */
 export function nbrInvoicesFromDb(branchId: string, status: 'FINAL' | 'PARTIAL'): { invoices: Invoice[]; payments: PaymentsByInvoice; gross: Map<string, { gross: number; paid: number }> } {
   const heads = query(
-    `SELECT id, invoice_number, customer_id, status, issued_at, created_at, gross_amount, paid_amount
+    `SELECT id, invoice_number, customer_id, status, issued_at, created_at, gross_amount, paid_amount, final_issued_at
        FROM invoices WHERE branch_id = ? AND status = ? AND COALESCE(butterfly, 0) = 0`, [branchId, status],
   );
   const invoices: Invoice[] = [];
@@ -87,6 +87,10 @@ export function nbrInvoicesFromDb(branchId: string, status: 'FINAL' | 'PARTIAL')
     invoices.push({
       id, invoiceNumber: String(h.invoice_number), customerId: String(h.customer_id), status: String(h.status),
       issuedAt: (h.issued_at as string) || undefined, createdAt: String(h.created_at),
+      // FINAL-INVOICE-DATE (17.11.) — das festgehaltene Endrechnungsdatum, wie im NBR-Export und im Store. Ohne es rechnete
+      // die VAT-Übersicht (und die Summen beim Einreichen) mit dem spätesten Zahlungsdatum: nach einem Umdatieren, einer
+      // Überzahlung oder erneuter Vollzahlung ein anderes Quartal als Export und Zeilen-Snapshot.
+      finalIssuedAt: (h.final_issued_at as string | null) || undefined,
       lines: (byId.get(id) ?? []).map((l) => ({
         productId: String(l.product_id), taxScheme: String(l.tax_scheme), quantity: Number(l.quantity) || 1,
         lineTotal: Number(l.line_total) || 0, vatAmount: Number(l.vat_amount) || 0,

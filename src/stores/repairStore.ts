@@ -8,7 +8,7 @@ import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType
 import { newRepairHeaderCostIssue, repairCostParts } from '@/core/repairs/repair-cost';
 import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair-type-rule';
 import {
-  assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
+  assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, ownWorkBookedAt, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
   repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop, changeRepairLineCostDateInHouse, type RepairCostDateChanged,
 } from '@/core/repairs/repair-cost-booking';
@@ -489,6 +489,9 @@ export function getOrCreateRepairServiceProductId(branchId: string): string {
   return prodId;
 }
 
+/** Ab diesen Stufen ist eine Kostenzeile mit Betrag gebucht (Werkstatt = Ausgabe, im Haus = Eigenleistung). */
+const REPAIR_COMMITTING_STAGES: readonly string[] = ['IN_PROGRESS', 'SENT_TO_WORKSHOP', 'READY', 'DELIVERED'];
+
 // Plan repair-multi-supplier — Stage-based Commit:
 // Postet fuer jede OPEN Line ohne Expense_id eine neue Expense + Ledger-Eintrag.
 // Wird beim IN_PROGRESS/SENT_TO_WORKSHOP-Uebergang ausgefuehrt sowie wenn nach
@@ -526,6 +529,10 @@ function commitRepairLineExpenses(repairId: string): void {
   // Owner 12.11.2026 — jede Zeile bucht an IHREM Kostendatum (Altbestand ohne Datum: heute, wie bisher). VOR dem ersten
   // Schreiben geprüft: liegt ein Kostendatum inzwischen in einer geschlossenen Periode, wird nichts gebucht.
   for (const lr of lineRows) {
+    // Eine Zeile im Haus, deren Eigenleistung schon in voller Höhe gebucht ist, bucht hier nichts (syncOwnWork ist dann
+    // ein Nichts-tun) — ihr Kostendatum darf deshalb auch nichts sperren. Vorher wies eine längst gebuchte Zeile in einem
+    // inzwischen geschlossenen Quartal jede weitere Zeile und „Sent to workshop" ab.
+    if (!lr.supplier_id && ownWorkBookedAt(lr.id as string, (lr.cost_amount as number) || 0)) continue;
     if (lr.cost_date) assertRepairCostDay(lr.cost_date, (repair.branch_id as string) || '', Date.parse(now), `The cost date of line ${formatRepairLineNumber(repairNumber, (lr.position as number) || 0)}`);
   }
 
@@ -1224,6 +1231,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   deleteRepair: (id) => {
     const db = getDatabase();
     const repair = get().getRepair(id);
+    // Eine Reparatur mit GELTENDER Rechnung (Entwurf, offen, bezahlt, zurückgegeben) wird nicht gelöscht: sonst bliebe die
+    // Rechnung mit Erlös und Kosten-Snapshot verwaist, und die Werkstattkosten würden zurückgebucht. Erst die Rechnung
+    // stornieren. VOR jedem Schreiben. (Nach einem Storno der Rechnung gilt wie bisher das normale Löschen.)
+    // Aus der Datenbank gelesen, nicht aus dem Store-Zustand (der könnte älter sein als die Verknüpfung).
+    const rechnung = query(
+      `SELECT i.invoice_number, i.status FROM repairs r JOIN invoices i ON i.id = r.invoice_id WHERE r.id = ?`, [id])[0];
+    if (rechnung && String(rechnung.status) !== 'CANCELLED') {
+      throw new RepairActionRejected('REPAIR_ALREADY_INVOICED',
+        `this repair is invoiced (${String(rechnung.invoice_number ?? '')}) — it cannot be deleted; cancel the invoice first`);
+    }
     // POST-PARITY PP-13/PP-14 — beglichene Reparaturkosten sperren das Löschen (sonst bliebe die Zahlung
     // ohne Gegenstück); an EIGENER Ware nach „ready" wird der Einstand zurückgenommen (die Ausgaben
     // storniert der Rest wie bisher) — ein verkaufter Artikel sperrt.
@@ -1534,8 +1551,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const repair = get().getRepair(repairId);
     if (repair) {
       const canon = canonicalRepairStatus(repair.status);
-      const committingStages: string[] = ['IN_PROGRESS', 'SENT_TO_WORKSHOP', 'READY', 'DELIVERED'];
-      if (committingStages.includes(canon)) {
+      if (REPAIR_COMMITTING_STAGES.includes(canon)) {
         commitRepairLineExpenses(repairId);
         get().loadRepairLines();
       }
@@ -1596,6 +1612,27 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       }
     }
 
+    // Eine GEBUCHTE Zeile, deren Betrag sich ändert, wird an ihrem bisherigen Buchungstag neu gebucht (Ausgabe: expense_date,
+    // im Haus: Kostendatum). Liegt dieser Tag vor dem Buchungsstichtag oder in einem eingereichten/bezahlten Quartal, wird
+    // abgewiesen — VOR jedem Schreiben (vorher buchte die Änderung still in die gesperrte Periode). Altbestand ohne Tag bucht
+    // wie bisher heute. Welcher Tag für eine Korrektur gelten soll, ist eine offene Owner-Frage; geprüft wird nur die geltende Regel.
+    if (data.costAmount !== undefined && (Number(data.costAmount) || 0) !== (Number(line.costAmount) || 0) && (line.expenseId || ownWorkLine)) {
+      const bisher = line.expenseId
+        ? String(query('SELECT expense_date FROM expenses WHERE id = ?', [line.expenseId])[0]?.expense_date ?? '').slice(0, 10)
+        : String(line.costDate ?? '').slice(0, 10);
+      if (bisher) {
+        const filiale = String(query('SELECT branch_id FROM repairs WHERE id = ?', [line.repairId])[0]?.branch_id ?? '');
+        try {
+          assertRepairCostDay(bisher, filiale, Date.parse(now), 'The cost date of this line');
+        } catch (e) {
+          if (e instanceof RepairActionRejected) {
+            throw new RepairActionRejected(e.code, `${e.message}. Move it with “Edit date” to an open day first, then change the amount.`);
+          }
+          throw e;
+        }
+      }
+    }
+
     // Owner 12.11.2026 — bekommt eine Zeile OHNE Kostendatum (angelegt mit 0.000) einen Betrag, braucht sie ihren Tag: der
     // Annahmetag, wenn er offen ist — sonst ein verständliches Nein (zuerst „Edit date"), nie still „heute". VOR jedem Schreiben.
     let kostenTagNeu: string | null = null;
@@ -1611,6 +1648,19 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         }
         throw e;
       }
+    }
+
+    // Bekommt eine noch UNGEBUCHTE Zeile (angelegt mit 0.000, oder auf 0 gesetzt und damit storniert) in einer buchenden
+    // Stufe einen Betrag, wird sie jetzt gebucht — wie eine Zeile, die in dieser Stufe hinzukommt (addRepairLine). Vorher
+    // buchte nur eine schon gebuchte Zeile nach; eine 0.000-Zeile, die nach „Start" ihren Betrag bekam, blieb für immer
+    // ungebucht (Marge/Einstand mit Kosten, Hauptbuch ohne). Ihr Kostendatum wird VOR jedem Schreiben geprüft.
+    const repVorher = get().getRepair(line.repairId);
+    const buchtJetzt = data.costAmount !== undefined && (Number(data.costAmount) || 0) > 0 && !line.expenseId && !ownWorkLine
+      && (data.status ?? line.status) === 'OPEN' && !!repVorher && REPAIR_COMMITTING_STAGES.includes(canonicalRepairStatus(repVorher.status));
+    if (buchtJetzt) {
+      const tag = kostenTagNeu ?? (query('SELECT cost_date FROM repair_lines WHERE id = ?', [lineId])[0]?.cost_date as string | null | undefined);
+      const filiale = String(query('SELECT branch_id FROM repairs WHERE id = ?', [line.repairId])[0]?.branch_id ?? '');
+      if (tag) assertRepairCostDay(tag, filiale, Date.parse(now), 'The cost date of this line');
     }
 
     // POST-PARITY PP-13 — an EIGENER Ware nach „ready" steht der Betrag schon im Einstand: eine neue
@@ -1688,6 +1738,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       // Owner 12.11.2026 — die Neubuchung steht am Kostendatum der Zeile (Altbestand: wie bisher heute).
       syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, kostenTagNeu ?? line.costDate);
     }
+    // Die bisher ungebuchte Zeile jetzt buchen (derselbe idempotente Weg wie beim Start und bei addRepairLine).
+    if (buchtJetzt) commitRepairLineExpenses(line.repairId);
 
     saveDatabase();
     get().loadRepairLines();

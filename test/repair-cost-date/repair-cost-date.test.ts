@@ -131,7 +131,7 @@ function freshDb(): Db {
     db.run(`INSERT INTO partners (id, branch_id, name, share_percentage, active, created_at, updated_at)
       VALUES (?, 'branch-main', ?, 0, ?, ?, ?)`, [id, name, active, NOW, NOW]);
   }
-  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15', 'pw16', 'pw17', 'pw18', 'pw19', 'pw20']) {
+  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15', 'pw16', 'pw17', 'pw18', 'pw19', 'pw20', 'pw21', 'pw23']) {
     db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
         scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
         tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
@@ -691,6 +691,76 @@ let L2 = '';
   ok(S(bild(Re)) === S({ kopf: [50, 50, null, 'sup-1'], zeilen: [] }) && ausgaben(Re).length === 0,
     `R13 nur Voranschlag 50: Werkstatt eingeplant, keine Zeile, nichts gebucht (${S(bild(Re))})`);
   abgleich('R13');
+}
+
+// ── R14 Nachträge 19.11.: eine 0.000-Zeile bekommt nach „Start" ihren Betrag (F1); eine längst gebuchte Zeile im Haus sperrt
+//        keine neue Zeile (F4); eine Reparatur mit geltender Rechnung wird nicht gelöscht (F2) ───────────────────────────
+{
+  const od = await import('../../src/core/accounting/opening-date.ts');
+  const a = await kauf('pw21', 1000);
+  const R = await reparatur('pw21', lotOf(DB, a.line), '2026-10-20');
+  const L0 = await zeileNeu(R, { workType: 'polishing', costAmount: 0 });
+  await status(R, 'in_progress');
+  ok(lebend('REPAIR_OWN_WORK', L0).length === 0, 'R14 F1 eigene Arbeit 0.000 beim Start: nichts gebucht');
+  await repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 15 }, rev(R));
+  ok(S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 15 2026-10-20', 'INVENTORY DEBIT 15 2026-10-20']),
+    `R14 F1 0.000 → 15 nach dem Start: jetzt gebucht, am Kostendatum (${S(lebend('REPAIR_OWN_WORK', L0))})`);
+  abgleich('R14 F1a');
+  await repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 0 }, rev(R));
+  ok(lebend('REPAIR_OWN_WORK', L0).length === 0, 'R14 F1 15 → 0: Eigenleistung storniert');
+  await repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 12 }, rev(R));
+  ok(S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 12 2026-10-20', 'INVENTORY DEBIT 12 2026-10-20']),
+    `R14 F1 0 → 12: wieder gebucht, am Kostendatum der Zeile (${S(lebend('REPAIR_OWN_WORK', L0))})`);
+  abgleich('R14 F1b');
+
+  // F4 — der Stichtag liegt inzwischen NACH dem Tag der gebuchten Eigenleistung (20.10.): eine neue Zeile mit offenem Tag
+  // wird trotzdem gebucht (vorher wies die alte, unveränderte Zeile sie mit „before the opening" ab).
+  od.setOpeningDateForTest('2026-11-01');
+  try {
+    const vorF4 = stand();
+    let W = '';
+    const m = await meldung(async () => { W = await zeileNeu(R, { supplierId: 'sup-1', workType: 'service', costAmount: 40, costDate: '2026-11-10' }); });
+    const E = W ? ausgabeDer(W) : '';
+    ok(m === '' && !!E && S(lebend('EXPENSE', E)) === S(['ACCOUNTS_PAYABLE CREDIT 40 2026-11-10', 'INVENTORY DEBIT 40 2026-11-10'])
+      && S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 12 2026-10-20', 'INVENTORY DEBIT 12 2026-10-20']),
+    `R14 F4 gebuchte Eigenleistung vor dem neuen Stichtag sperrt die neue Werkstattzeile nicht (${m || S(lebend('EXPENSE', E))}; vorher ${vorF4.length} Zeichen Stand)`);
+    // Die neue Zeile selbst bleibt geprüft: ein Tag vor dem Stichtag wird weiter abgewiesen.
+    const vorNein = stand();
+    const nein = await fehler(() => repairs.addRepairLineOnPrimary(R, { supplierId: 'sup-1', workType: 'service', costAmount: 25, costDate: '2026-10-25' } as never));
+    ok(nein !== '' && stand() === vorNein, `R14 F4 …eine neue Zeile vor dem Stichtag bleibt abgewiesen, nichts geschrieben (${nein})`);
+
+    // F3 — der Betrag einer GEBUCHTEN Zeile, deren Buchungstag inzwischen gesperrt ist, ändert sich nicht still in die
+    // gesperrte Periode: abgewiesen, nichts geschrieben. Eine Zeile mit offenem Tag ändert sich wie bisher.
+    const vorF3 = stand();
+    const m3 = await meldung(() => repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 20 }, rev(R)));
+    const c3f = await fehler(() => repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 20 }, rev(R)));
+    ok(/before the opening/.test(m3) && /Edit date/.test(m3) && c3f !== '' && stand() === vorF3
+      && n(DB, 'SELECT cost_amount FROM repair_lines WHERE id = ?', [L0]) === 12
+      && S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 12 2026-10-20', 'INVENTORY DEBIT 12 2026-10-20']),
+    `R14 F3 gebuchte Eigenleistung vom 20.10. (vor dem Stichtag 01.11.): 12 → 20 abgewiesen, nichts geändert (${c3f}: ${m3.slice(0, 110)})`);
+    const Wz = String((DB.exec("SELECT id FROM repair_lines WHERE repair_id = ? AND supplier_id = 'sup-1' AND cost_amount = 40", [R])[0]?.values ?? [])[0]?.[0] ?? '');
+    const Ez = ausgabeDer(Wz);
+    await repairs.updateRepairLineOnPrimary(R, Wz, { costAmount: 45 }, rev(R));
+    ok(S(lebend('EXPENSE', Ez)) === S(['ACCOUNTS_PAYABLE CREDIT 45 2026-11-10', 'INVENTORY DEBIT 45 2026-11-10']),
+      `R14 F3 …Werkstattzeile mit offenem Tag (10.11.): 40 → 45 wie bisher neu gebucht (${S(lebend('EXPENSE', Ez))})`);
+  } finally { od.setOpeningDateForTest(null); }
+  abgleich('R14 F4');
+
+  // F2 — eine Reparatur mit geltender Rechnung wird nicht gelöscht (sonst verwaiste Rechnung, zurückgebuchte Werkstattkosten).
+  const b = await kauf('pw23', 500);
+  const { inv } = verkauf(DB, 'pw23', lotOf(DB, b.line), 800, 'full');
+  DB.run('UPDATE repairs SET invoice_id = ? WHERE id = ?', [inv, R]);
+  reload();
+  const vorF2 = stand();
+  const c2 = await fehler(() => useRepairStore.getState().deleteRepair(R));
+  const m2 = await meldung(() => useRepairStore.getState().deleteRepair(R));
+  ok(c2 === 'REPAIR_ALREADY_INVOICED' && /cancel the invoice first/.test(m2) && stand() === vorF2 && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [R]) === 1,
+    `R14 F2 Reparatur mit FINAL-Rechnung: Löschen abgewiesen, nichts geändert (${c2}: ${m2.slice(0, 90)})`);
+  DB.run("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?", [inv]);
+  reload();
+  const c3 = await fehler(() => useRepairStore.getState().deleteRepair(R));
+  ok(c3 === '' && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [R]) === 0, `R14 F2 …nach dem Storno der Rechnung: Löschen wie bisher möglich (${c3})`);
+  abgleich('R14 F2');
 }
 
 console.log(`\nrepair-cost-date: ${PASS} passed, ${fails.length} failed`);

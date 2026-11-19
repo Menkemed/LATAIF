@@ -148,6 +148,11 @@ function ownWorkPosted(sourceId: string): number {
 export function hasOwnWork(sourceId: string): boolean {
   return ownWorkPosted(sourceId) > EPS;
 }
+/** Ist die eigene Arbeit dieser Quelle schon GENAU in dieser Höhe gebucht (dann bucht `syncOwnWork` nichts)? */
+export function ownWorkBookedAt(sourceId: string, amount: number): boolean {
+  const posted = ownWorkPosted(sourceId);
+  return posted > EPS && F(posted) === F(amount);
+}
 /**
  * Bringt die eigene Arbeit einer Quelle auf ihren Betrag — genau einmal, Änderung = Storno + Neubuchung.
  * Owner 12.11.2026 — `occurredAt`: das Kostendatum der Zeile (ohne Angabe wie bisher der Tag der Buchung).

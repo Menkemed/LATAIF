@@ -262,6 +262,24 @@ const A = rechnung('2026-11-02');
     `F4 Überzahlung danach: Endrechnungsdatum und NBR-Datum bleiben ${day(fest)} (${kopf(db, A).final})`);
 }
 
+// ── F4b — die VAT-Übersicht (und die Summen beim Einreichen) lesen dasselbe festgehaltene Datum wie der NBR-Export ─────
+// Vorher lud `nbrInvoicesFromDb` final_issued_at nicht und rechnete mit dem spätesten Zahlungsdatum.
+{
+  const { liveVatQuarters, nbrInvoicesFromDb } = await import('../../src/core/tax/vat-quarter-overview.ts');
+  const fest = kopf(db, A).final;
+  const geladen = nbrInvoicesFromDb('branch-main', 'FINAL').invoices.find((i) => i.id === A) as { finalIssuedAt?: string } | undefined;
+  ok(geladen?.finalIssuedAt === fest, `F4b die VAT-Übersicht lädt das festgehaltene Endrechnungsdatum (${geladen?.finalIssuedAt})`);
+  // Festgehalten im Vorquartal (voll bezahlt am 30.09., die Zahlung danach auf November umdatiert):
+  const zaehle = (key: string): number => liveVatQuarters('branch-main').get(key)?.invoiceCount ?? 0;
+  const q3vor = zaehle('2026-Q3'), q4vor = zaehle('2026-Q4');
+  db.run('UPDATE invoices SET final_issued_at = ? WHERE id = ?', ['2026-09-30T10:00:00.000Z', A]);
+  const q3 = zaehle('2026-Q3'), q4 = zaehle('2026-Q4');
+  const exportTag = invoiceFinalizationDate({ ...storeInv(A), finalIssuedAt: '2026-09-30T10:00:00.000Z' }, zahlungen(db, A));
+  ok(q3 === q3vor + 1 && q4 === q4vor - 1 && exportTag.startsWith('2026-09-30'),
+    `F4b …Quartal der Übersicht = Quartal des Exports (Q3 ${q3vor}→${q3}, Q4 ${q4vor}→${q4}; Export ${exportTag.slice(0, 10)})`);
+  db.run('UPDATE invoices SET final_issued_at = ? WHERE id = ?', [fest, A]);
+}
+
 // ── F5 — Vollzahlung durch Preisreduzierung ─────────────────────────────────────────────────
 {
   const D = rechnung('2026-11-02');
