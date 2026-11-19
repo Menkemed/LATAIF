@@ -808,7 +808,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 // ── 10) Der Nachweis, dass nichts Zerstoerendes dabei ist ────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 131, `SCOPE genau 127 Mutationen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${list.length})`);
+  ok(list.length === 132, `SCOPE genau 127 Mutationen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${list.length})`);
   for (const op of life.C3H_LIFECYCLE_MUTATIONS) ok(list.includes(op), `SCOPE ${op} ist freigegeben`);
   // Klasse C — namentlich, nicht als Sammelbegriff. Auch nach sechzehn neuen Namen.
   for (const op of fin.C3G_PRIMARY_ONLY) ok(!list.includes(op), `SCOPE ${op} bleibt Primary-only`);
@@ -819,7 +819,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 61 && reads.length === 20,
+  ok(known.length === 62 && reads.length === 20,
     `SCOPE 1 Probe + 20 Reads + 40 Mutationen = 61 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of life.C3H_LIFECYCLE_MUTATIONS) ok(rust.includes(`"${op}"`), `SCOPE Rust kennt ${op} ebenfalls`);

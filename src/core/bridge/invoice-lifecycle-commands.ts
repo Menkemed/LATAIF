@@ -43,6 +43,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { CARD_BRANDS as CARD_BRAND_LIST } from '@/core/finance/card-fees';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
+import { OP_INVOICES_CORRECT_FINAL_DATE as FINAL_DATE_OP_NAME, correctFinalInvoiceDateInHouse } from '@/core/invoices/final-date-correction';
 import { createDebtOffsetInHouse, DEBT_OFFSET_METHOD, type DebtOffsetInput } from '@/core/offsets/party-offsets';
 import { businessDateIssue } from '@/core/utils/business-date';
 import {
@@ -588,4 +589,47 @@ registerCommand(OP_INVOICES_UPDATE, {
 registerCommand(OP_INVOICES_RECORD_PAYMENT, {
   kind: 'mutation',
   handler: (payload, actor?: CommandActor) => execute(runInvoicePayment, OP_INVOICES_RECORD_PAYMENT, payload, actor),
+});
+
+// ── Owner 19.11.2026 — „Correct final invoice date" vom zweiten Rechner (nur ADMIN) ───────────────────────────
+//
+// DIESELBE Hausfolge wie am Primary (`correctFinalInvoiceDateInHouse`): Prüfung (Recht, Grund, Fassung, Endrechnung,
+// abschließende Zahlung, Stichtag, eingereichte Quartale, Jahr der Endnummer) und Speicherung am Primary, in der
+// Transaktion des Auftrags. Rumpf nur {invoiceId, newDate, reason, expectedRevision}; was umdatiert wird, entscheidet das Haus.
+
+export const OP_INVOICES_CORRECT_FINAL_DATE = FINAL_DATE_OP_NAME;
+
+export interface FinalDateRequest { invoiceId: string; newDate: string; reason: string; expectedRevision: number }
+
+export function parseFinalDateCorrection(raw: unknown): FinalDateRequest {
+  if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
+  for (const k of Object.keys(raw)) {
+    if (!['invoiceId', 'newDate', 'reason', 'expectedRevision'].includes(k)) throw new InvoicePayloadError(`unknown field: ${k}`);
+  }
+  if (typeof raw.invoiceId !== 'string' || !raw.invoiceId.trim()) throw new InvoicePayloadError('invoiceId is required');
+  if (typeof raw.newDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.newDate)) throw new InvoicePayloadError('newDate must look like YYYY-MM-DD');
+  if (typeof raw.reason !== 'string') throw new InvoicePayloadError('reason is required');
+  if (!isRev(raw.expectedRevision)) throw new InvoicePayloadError('expectedRevision is required');
+  return { invoiceId: raw.invoiceId.trim(), newDate: raw.newDate, reason: raw.reason, expectedRevision: raw.expectedRevision };
+}
+
+export function runFinalDateCorrection(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseFinalDateCorrection(raw);
+  return runRemoteCommand(deps, identity, () => {
+    try {
+      const r = correctFinalInvoiceDateInHouse(
+        { invoiceId: req.invoiceId, newDate: req.newDate, reason: req.reason, expectedRevision: req.expectedRevision },
+        { branchId: identity.branchId, userId: identity.userId, now: deps.now(), role: (identity as CommandIdentity & { role?: string }).role },
+      );
+      return { ...stateOf(req.invoiceId), ...r } as unknown as Record<string, unknown>;
+    } catch (err) {
+      if (err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
+      throw err;
+    }
+  });
+}
+
+registerCommand(OP_INVOICES_CORRECT_FINAL_DATE, {
+  kind: 'mutation',
+  handler: (payload, actor?: CommandActor) => execute(runFinalDateCorrection, OP_INVOICES_CORRECT_FINAL_DATE, payload, actor),
 });

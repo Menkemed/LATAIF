@@ -8,7 +8,7 @@ import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType
 import { newRepairHeaderCostIssue, repairCostParts } from '@/core/repairs/repair-cost';
 import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair-type-rule';
 import {
-  assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, ownWorkBookedAt, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
+  assertCostCorrectionOpen, assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairBookedCosts, ownWorkBookedAt, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
   repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop, changeRepairLineCostDateInHouse, type RepairCostDateChanged,
 } from '@/core/repairs/repair-cost-booking';
@@ -1249,6 +1249,21 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'
             AND category != 'CardFees'`, [id]);
       for (const e of linked) assertRepairCostUnsettled(e.id as string);
+    }
+    // Owner 19.11.2026 — beim Storno bleiben TATSÄCHLICH entstandene Werkstattkosten als Firmenaufwand; nicht entstandene nimmt
+    // „Cancel line" am ursprünglichen Buchungstag zurück. Löschen nähme ALLE Kosten zurück (auch entstandene, und heute statt am
+    // Kostentag) — deshalb nur noch ohne gebuchte Kosten. Aus der Datenbank, VOR jedem Schreiben.
+    {
+      const gebucht = repairBookedCosts(id);
+      if (gebucht.count > 0) {
+        const eigene = (repair?.repairScope ?? String(query('SELECT repair_scope FROM repairs WHERE id = ?', [id])[0]?.repair_scope ?? '')) === 'OWN';
+        throw new RepairActionRejected('REPAIR_HAS_BOOKED_COSTS',
+          `this repair has booked costs (${gebucht.amount.toFixed(3)} BHD) — deleting it would take back costs that may have been incurred. `
+          + 'Cancel the cost lines whose work was not done (they are corrected on their original day); incurred costs stay as company expense — '
+          + (eigene ? 'finish the repair instead of deleting it' : 'use “Return” instead of deleting it') + '. Nothing was changed.');
+      }
+    }
+    if (repair) {
       if (ownRepairCapitalized(repair)) {
         shiftOwnRepairCost(repair, -repairTotalCostInHouse(repair), new Date().toISOString(), 'repair-deleted');
       }
@@ -1613,24 +1628,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     }
 
     // Eine GEBUCHTE Zeile, deren Betrag sich ändert, wird an ihrem bisherigen Buchungstag neu gebucht (Ausgabe: expense_date,
-    // im Haus: Kostendatum). Liegt dieser Tag vor dem Buchungsstichtag oder in einem eingereichten/bezahlten Quartal, wird
-    // abgewiesen — VOR jedem Schreiben (vorher buchte die Änderung still in die gesperrte Periode). Altbestand ohne Tag bucht
-    // wie bisher heute. Welcher Tag für eine Korrektur gelten soll, ist eine offene Owner-Frage; geprüft wird nur die geltende Regel.
-    if (data.costAmount !== undefined && (Number(data.costAmount) || 0) !== (Number(line.costAmount) || 0) && (line.expenseId || ownWorkLine)) {
-      const bisher = line.expenseId
-        ? String(query('SELECT expense_date FROM expenses WHERE id = ?', [line.expenseId])[0]?.expense_date ?? '').slice(0, 10)
-        : String(line.costDate ?? '').slice(0, 10);
-      if (bisher) {
-        const filiale = String(query('SELECT branch_id FROM repairs WHERE id = ?', [line.repairId])[0]?.branch_id ?? '');
-        try {
-          assertRepairCostDay(bisher, filiale, Date.parse(now), 'The cost date of this line');
-        } catch (e) {
-          if (e instanceof RepairActionRejected) {
-            throw new RepairActionRejected(e.code, `${e.message}. Move it with “Edit date” to an open day first, then change the amount.`);
-          }
-          throw e;
-        }
-      }
+    // im Haus: Kostendatum). Owner 19.11.2026 — die Korrektur steht am URSPRÜNGLICHEN Buchungstag: auch die Rücknahme der
+    // alten Buchung (vorher: heute). Jeder noch wirksame Buchungstag muss deshalb offen sein (nicht vor dem Stichtag, kein
+    // eingereichtes/bezahltes Quartal) — sonst ein Nein VOR jedem Schreiben.
+    const korrigiertBetrag = data.costAmount !== undefined && (Number(data.costAmount) || 0) !== (Number(line.costAmount) || 0)
+      && !!(line.expenseId || ownWorkLine);
+    if (korrigiertBetrag) {
+      const filiale = String(query('SELECT branch_id FROM repairs WHERE id = ?', [line.repairId])[0]?.branch_id ?? '');
+      assertCostCorrectionOpen([{ module: 'EXPENSE', id: line.expenseId }, { module: 'REPAIR_OWN_WORK', id: ownWorkLine ? lineId : null }],
+        filiale, Date.parse(now), 'Changing the amount');
     }
 
     // Owner 12.11.2026 — bekommt eine Zeile OHNE Kostendatum (angelegt mit 0.000) einen Betrag, braucht sie ihren Tag: der
@@ -1703,10 +1709,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         [data.costAmount, line.expenseId]
       );
       trackUpdate('expenses', line.expenseId, { amount: data.costAmount, fromRepairLineEdit: lineId });
-      // Reverse alten Post (falls noch unreversed) + neu posten
+      // Reverse alten Post (falls noch unreversed) + neu posten. Owner 19.11.2026 — die Rücknahme steht am Tag der alten
+      // Buchung (oben geprüft), nicht heute: die Korrektur gehört in die Periode der Kosten.
       if (hasLedgerEntries('EXPENSE', line.expenseId)) {
         safePost(`reverseSource(EXPENSE,${line.expenseId}) [line-edit]`, () => {
-          reverseSource('EXPENSE', line.expenseId!, now);
+          reverseSource('EXPENSE', line.expenseId!, now, { mirrorOriginalDates: true });
         });
       }
       // Re-Post mit neuem Betrag
@@ -1736,7 +1743,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // POST-PARITY PP-13/PP-14 — eine gebuchte Zeile im Haus: die aktivierte Eigenleistung folgt dem Betrag.
     if (data.costAmount !== undefined && ownWorkLine) {
       // Owner 12.11.2026 — die Neubuchung steht am Kostendatum der Zeile (Altbestand: wie bisher heute).
-      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, kostenTagNeu ?? line.costDate);
+      // Owner 19.11.2026 — die Rücknahme der alten Eigenleistung am Tag ihrer Buchung (oben geprüft).
+      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now, kostenTagNeu ?? line.costDate,
+        { mirror: true });
     }
     // Die bisher ungebuchte Zeile jetzt buchen (derselbe idempotente Weg wie beim Start und bei addRepairLine).
     if (buchtJetzt) commitRepairLineExpenses(line.repairId);
@@ -1785,12 +1794,19 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       [lineId]
     );
     assertGoldPayablesRemovable(linkedGp, 'Zeile');
+    // Owner 19.11.2026 — „Cancel line" nimmt NICHT entstandene Kosten zurück, und zwar am ursprünglichen Buchungstag (vorher:
+    // heute). Jeder noch wirksame Buchungstag muss offen sein (Stichtag, eingereichtes/bezahltes Quartal) — VOR jedem Schreiben.
+    {
+      const filiale = String(query('SELECT branch_id FROM repairs WHERE id = ?', [line.repairId])[0]?.branch_id ?? '');
+      assertCostCorrectionOpen([{ module: 'EXPENSE', id: line.expenseId }, { module: 'REPAIR_OWN_WORK', id: lineId }],
+        filiale, Date.parse(now), 'Cancelling this line');
+    }
     // POST-PARITY PP-13/PP-14 — erst NACH allen Prüfungen schreiben (sonst bliebe bei einem Nein der Gold-Regel
     // eine halbe Rücknahme stehen): Einstand eigener Ware zurück, aktivierte Eigenleistung der Zeile gegenbuchen.
     if (rep && ownRepairCapitalized(rep) && (line.costAmount || 0) > 0) {
       shiftOwnRepairCost(rep, -(line.costAmount || 0), now, 'line-cancelled');
     }
-    reverseOwnWork(lineId, now);
+    reverseOwnWork(lineId, now, { mirror: true });
     for (const g of linkedGp) {
       db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
       trackDelete('gold_payables', g.id as string);
@@ -1800,7 +1816,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (line.expenseId) {
       safePost(`reverseSource(EXPENSE,${line.expenseId}) [line-cancel]`, () => {
         if (hasReversalFor('EXPENSE', line.expenseId!)) return;
-        reverseSource('EXPENSE', line.expenseId!, now);
+        // Owner 19.11.2026 — am Tag der Kostenbuchung (oben geprüft), nicht heute.
+        reverseSource('EXPENSE', line.expenseId!, now, { mirrorOriginalDates: true });
       });
       db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [line.expenseId]);
       db.run(`DELETE FROM expenses WHERE id = ?`, [line.expenseId]);

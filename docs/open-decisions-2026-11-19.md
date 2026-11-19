@@ -1,5 +1,51 @@
 # Offene ERP-Aufgaben gebündelt (19.11.2026, lokal, nicht released)
 
+## Nachtrag 19.11.2026 — Owner-Entscheidungen umgesetzt (lokal, nicht released)
+
+**Reparaturen**
+- Entstandene Werkstattkosten bleiben beim Storno als Firmenaufwand. Bei „Return“ (Kundenware) bleiben sie als COGS stehen; das war schon so.
+- Nicht entstandene Kosten nimmt „Cancel line“ zurück, jetzt **am ursprünglichen Buchungstag** (`mirrorOriginalDates`, vorher: heute).
+- „Delete repair“ geht nur noch **ohne gebuchte Kosten** (`REPAIR_HAS_BOOKED_COSTS`, mit Weg im Text). Vorher nahm Löschen alle Kosten heute zurück, auch entstandene.
+- Betragskorrektur einer gebuchten Zeile: Rücknahme und Neubuchung stehen am **ursprünglichen Tag**. Gilt für Werkstatt (Ausgabe) und eigene Arbeit.
+- Geprüft wird jeder noch wirksame Buchungstag (`assertCostCorrectionOpen`): Buchungsstichtag und eingereichte/bezahlte Quartale. Sonst Nein, nichts geschrieben.
+- Fehlerhafte Reparaturrechnungen laufen über das bestehende „Edit“ der Rechnung (keine neue Rechnung, kein Wieder-Abrechnen nach Storno). Bestand, nichts geändert.
+- Reparaturen vor v0.8.55: unverändert, keine Nachbuchung (F5 bleibt dokumentiert).
+- Kopfkosten-Altbestand (v0.8.55–v0.8.101) korrigiert weiter wie bisher (heute). In Produktion gibt es 0 Fälle.
+
+**„Correct final invoice date“ (nur ADMIN, Primary und PC2)**
+- Hausfolge `correctFinalInvoiceDateInHouse` (`src/core/invoices/final-date-correction.ts`).
+- Fernauftrag `invoices.correct_final_date`; Registry 132, Rust REMOTE_OPS 219.
+- Knopf „Correct final date“ auf der Rechnungsseite, nur bei Endrechnung.
+- Abschließende Zahlung und `final_issued_at` wandern gemeinsam:
+  - Die alte Zahlungsbuchung wird an ihrem Tag zurückgenommen und am neuen Tag neu gebucht.
+  - Nummer, Umsatz/VAT und Kartengebühr bleiben.
+  - Steht die Zahlung schon auf dem neuen Tag, zieht nur das Datum nach.
+- Pflichtgrund; Protokoll in `invoice_edits` (FINAL_DATE) und Audit für Endrechnungsdatum und Zahlung.
+- Abgewiesen wird:
+  - kein ADMIN (Sitzung und `user_branches`), alte Fassung;
+  - keine voll bezahlte Endrechnung;
+  - Tag künftig oder vor dem Rechnungstag;
+  - abschließende Zahlung nicht eindeutig oder keine Geldzahlung;
+  - eine andere Zahlung liegt nach dem neuen Tag;
+  - Überzahlung oder Guthaben;
+  - alter oder neuer Tag vor dem Stichtag oder in einem eingereichten/bezahlten Quartal;
+  - **Endnummer trägt ein anderes Jahr** (z. B. `INV-2027-…` und neuer Tag 2026; NBR zeigt die Nummer).
+- Jahreswechsel ins Jahr der Nummer ist erlaubt.
+- Liste, Detail, PDF, CSV, NBR und VAT-Übersicht lesen dasselbe Feld.
+- „Manage payments“ bleibt unverändert: es datiert nur die Zahlung, das feste Datum bleibt.
+
+**Lieferantenrückgabe mit Zusatzkosten**: Der bestätigte Standardfall war schon umgesetzt (8fdeabba):
+- Rücknahme höchstens zum Einkaufspreis, kein Gewinn.
+- Erstattung getrennt erfasst (`added_cost_refund`), Gutschrift = Gesamtbetrag.
+- Deckel = aktivierte Zusatzkosten der zurückgegebenen Stücke; nur eine Rückgabe je Einkauf.
+- Erstattung ohne VAT: Die Zusatzkosten selbst tragen nie Vorsteuer (`VAT_INPUT` bucht nur die Einkaufszeile), also dieselbe Behandlung. Kein pauschaler Satz.
+- Neu:
+  - A1: verständliche Meldung (ohne Zusatzkosten `PURCHASE_RETURN_GAIN_UNSUPPORTED`, mit Zusatzkosten der Höchstbetrag fürs eigene Feld).
+  - A3: Rundungsrest ≤ 5 Fils auch im Partneranteil 0.
+  - Hinweis zur VAT in der Maske.
+
+**Gemeinsame Produktion**: wird nicht genutzt, die Sperre bleibt. Keine Umsetzung.
+
 Grundlage:
 - Branch `feature/customer-account`, ab `fe681669`.
 - Code-Prüfung, dazu für die Reparaturen eine Auswertung auf einer **Kopie** der Sicherung `2026-11-18_nach-a2-stufe2`.

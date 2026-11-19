@@ -728,6 +728,7 @@ export function PurchaseDetail() {
             <p style={{ fontSize: 11, color: '#6B7280', marginBottom: 8 }} data-purchase-return-added-hint>
               The unit price is what the supplier credits for the item (at most the purchase price). If the item carries added costs (repair, polishing, workshop gold),
               enter what the supplier refunds for them under “Added costs refunded” — the part of the book value that is not refunded is booked as a loss, nothing stays as stock value.
+              That refund is booked without VAT, exactly like the added costs themselves (they carry no input VAT); a supplier credit holds the total of both.
             </p>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>REFUND METHOD (if paid)</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>

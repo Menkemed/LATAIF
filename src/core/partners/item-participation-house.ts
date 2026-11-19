@@ -1085,6 +1085,9 @@ export function settleSaleLineInHouse(invoiceLineId: string, ctx: PartnerItemCtx
  * Umsatz, keine VAT, keine Lieferantenzahlung. Wirft `PartnerItemRejected`, wenn es nicht eindeutig
  * geht — dann gibt es auch die Rückgabe nicht.
  */
+/** Rundungsrest einer Lieferantenrückgabe in Fils — derselbe Wert wie `RUNDUNG_F` der Rückgabebuchung. */
+export const SUPPLIER_RETURN_ROUNDING_F = 5;
+
 export function settleSupplierReturnForPartners(
   returnId: string, returnNumber: string,
   lines: ReadonlyArray<{ purchaseLineId: string | null; quantity: number; unitPrice: number; addedCostRefund?: number }>,
@@ -1118,7 +1121,11 @@ export function settleSupplierReturnForPartners(
     // v0.8.101 — getrennt erstattete Zusatzkosten zählen zum Erstattungswert (der Verlust ist Buchwert − beides).
     const valueF = grossF - vatBackF + F(l.addedCostRefund ?? 0);
     const costF = stockValueF(l.purchaseLineId, q);
-    const profitF = valueF - costF;
+    // Owner 19.11.2026 (A3) — dieselbe Rundungstoleranz wie die Rückgabebuchung (`confirmPurchaseReturnInHouse`, 5 Fils je Zeile):
+    // ein Rest bis dahin stammt aus der Rundung (Vorsteuer-Anteil auf 3 Stellen, Einstand ungerundet) und ist dort weder Verlust
+    // noch Gewinn — also auch kein Partneranteil. Vorher bekam der Partner hier bis zu etwa 3 Fils Verlust, die nie gebucht wurden.
+    const rohF = valueF - costF;
+    const profitF = Math.abs(rohF) <= SUPPLIER_RETURN_ROUNDING_F ? 0 : rohF;
     const groupId = uuid();
     const occurredAt = dayOf(ctx.now);
     for (const p of e.parties) {

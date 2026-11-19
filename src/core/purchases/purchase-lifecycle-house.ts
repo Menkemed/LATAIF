@@ -52,7 +52,7 @@ import {
 } from '@/core/payables/purchase-overpay';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 // PARTNER-ITEMS — die Rückgabe gemeinsam gekaufter Ware: der Partneranteil in derselben Transaktion.
-import { reverseSupplierReturnForPartners, settleSupplierReturnForPartners } from '@/core/partners/item-participation-house';
+import { reverseSupplierReturnForPartners, settleSupplierReturnForPartners, SUPPLIER_RETURN_ROUNDING_F } from '@/core/partners/item-participation-house';
 import { PartnerItemRejected } from '@/core/partners/item-participation';
 
 /** Ein Nein der Partnerabrechnung als Nein der Rückgabe (derselbe Code, dieselbe Meldung). */
@@ -334,8 +334,25 @@ export const PURCHASE_RETURN_HAS_ADDED_COSTS = 'PURCHASE_RETURN_HAS_ADDED_COSTS'
 export const PURCHASE_RETURN_ADDED_REFUND_TOO_HIGH = 'PURCHASE_RETURN_ADDED_REFUND_TOO_HIGH';
 export const PURCHASE_RETURN_GAIN_UNSUPPORTED = 'PURCHASE_RETURN_GAIN_UNSUPPORTED';
 export const PURCHASE_RETURN_PRICE_ABOVE_PURCHASE = 'PURCHASE_RETURN_PRICE_ABOVE_PURCHASE';
-/** Rundungsrest einer Rückgabe in Fils (0,005 BHD): darunter weder Verlust noch Gewinn. */
-const RUNDUNG_F = 5;
+/** Rundungsrest einer Rückgabe in Fils (0,005 BHD): darunter weder Verlust noch Gewinn — derselbe Wert wie im Partneranteil. */
+const RUNDUNG_F = SUPPLIER_RETURN_ROUNDING_F;
+
+/**
+ * Owner 19.11.2026 (A1) — die aktivierten Zusatzkosten der zurückgegebenen Stücke (Reparatur, Polieren, Werkstattgold …), in Fils:
+ * Buchwert (Menge × Einstand des Loses) − Einkaufsnetto-Anteil. Dieselbe Rechnung wie die Bestätigung (`confirmPurchaseReturnInHouse`).
+ */
+function carriedAddedCostsF(purchaseLineId: string, quantity: number): number {
+  const q = Math.max(0, Number(quantity) || 0);
+  const lot = query(`SELECT unit_cost FROM stock_lots WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+                      ORDER BY acquired_at ASC, id ASC LIMIT 1`, [purchaseLineId])[0];
+  const pl = query('SELECT quantity, line_total, vat_amount FROM purchase_lines WHERE id = ?', [purchaseLineId])[0];
+  if (!lot || !pl || q <= 0) return 0;
+  const plQty = Math.max(1, Number(pl.quantity) || 1);
+  const split = getPurchaseLineInputSplit(purchaseLineId);
+  const origNetF = split.net > 0 ? Math.round(split.net * 1000) : Math.round((Number(pl.line_total) - Number(pl.vat_amount || 0)) * 1000);
+  const carryingF = Math.round(q * (Number(lot.unit_cost) || 0) * 1000);
+  return Math.max(0, carryingF - Math.round(origNetF * q / plQty));
+}
 
 export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): PurchaseReturnConfirmed {
   assertBooks();
@@ -601,6 +618,7 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   const seen = new Set<string>();
   let totalF = 0;
   let preisZuHoch: Error | null = null;
+  let zusatzHinweis = false;
   for (const l of req.lines) {
     if (seen.has(l.purchaseLineId)) throw nein('PURCHASE_RETURN_LINE_DUPLICATE', 'the same purchase line twice is not a return');
     seen.add(l.purchaseLineId);
@@ -619,9 +637,20 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
     // v0.8.101 — der Rücknahmepreis mindert den Einkauf und ist höchstens der Einkaufspreis; was der Lieferant für Zusatzkosten
     // (Reparatur …) darüber hinaus erstattet, steht getrennt („added costs refunded") — nie im Rücknahmepreis versteckt.
     const plPrice = Number(query('SELECT unit_price FROM purchase_lines WHERE id = ?', [l.purchaseLineId])[0]?.unit_price ?? 0) || 0;
+    // Owner 19.11.2026 (A1) — die Meldung nennt, was wirklich geht: tragen die Stücke Zusatzkosten, gehört der Mehrbetrag (bis zu
+    // ihnen) unter „added costs refunded"; tragen sie keine, wäre es ein Gewinn — der wird nicht gebucht (keine Gewinnfunktion).
     if (F(l.unitPrice) > F(plPrice) && !preisZuHoch) {
-      preisZuHoch = nein(PURCHASE_RETURN_PRICE_ABOVE_PURCHASE,
-        `the return price per piece (${l.unitPrice.toFixed(3)}) is above the purchase price (${plPrice.toFixed(3)}) — enter what the supplier pays for added costs (repair …) under "added costs refunded"`);
+      const zusatzF = carriedAddedCostsF(l.purchaseLineId, l.quantity);
+      if (zusatzF > RUNDUNG_F) {
+        zusatzHinweis = true;
+        preisZuHoch = nein(PURCHASE_RETURN_PRICE_ABOVE_PURCHASE,
+          `the return price per piece (${l.unitPrice.toFixed(3)}) is above the purchase price (${plPrice.toFixed(3)}) — enter at most the purchase price; `
+          + `what the supplier pays for the added costs of these pieces (at most ${B(zusatzF).toFixed(3)}) goes under "added costs refunded". Nothing was changed.`);
+      } else {
+        preisZuHoch = nein(PURCHASE_RETURN_GAIN_UNSUPPORTED,
+          `the return price per piece (${l.unitPrice.toFixed(3)}) is above the purchase price (${plPrice.toFixed(3)}) and this item carries no added costs — `
+          + `the supplier would pay more than its value, and a gain on a supplier return is not supported. Return it at most at the purchase price. Nothing was changed.`);
+      }
     }
     if (l.addedCostRefund !== undefined && (typeof l.addedCostRefund !== 'number' || !Number.isFinite(l.addedCostRefund) || l.addedCostRefund < 0)) {
       throw nein('PURCHASE_RETURN_PRICE_INVALID', 'the refund of added costs must be a number of at least 0');
@@ -645,10 +674,12 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
     totalF += F(l.quantity * l.unitPrice);
   }
   if (totalF <= 0) throw nein('PURCHASE_RETURN_TOTAL_INVALID', 'The return total must be more than 0.');
+  // A1 — ein Preis über dem Einkauf OHNE Zusatzkosten ist ein Gewinn: diese Meldung zuerst (sie sagt, was zu tun ist).
+  if (preisZuHoch && !zusatzHinweis) throw preisZuHoch;
   if (totalF > F(p.total_amount)) {
     throw nein('PURCHASE_RETURN_EXCEEDS_PURCHASE',
       `the return (${B(totalF).toFixed(3)}) is more than this purchase is worth (${B(F(p.total_amount)).toFixed(3)})`
-      + (preisZuHoch ? ' — what the supplier pays for added costs (repair …) goes under "added costs refunded"' : ''));
+      + (zusatzHinweis ? ' — what the supplier pays for added costs (repair …) goes under "added costs refunded"' : ''));
   }
   if (preisZuHoch) throw preisZuHoch;
   // Overpay-Vorabprüfung VOR dem ersten Schreiben — mit derselben Rechnung, die die Wirkung benutzt.

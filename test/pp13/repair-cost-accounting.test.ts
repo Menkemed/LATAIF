@@ -595,9 +595,20 @@ for (const weg of ['P', 'C'] as Weg[]) {
   await status('P', db, id, 'in_progress');
   await status('P', db, id, 'ready');
   rs().loadRepairs();
+  // Owner 19.11.2026 — entstandene Kosten bleiben beim Storno: mit gebuchten Kosten wird nicht gelöscht (nichts geschrieben).
+  const vorDel = stand(db);
+  let delCode = '';
+  try { rs().deleteRepair(id); } catch (e) { delCode = String((e as { code?: string }).code ?? ''); }
+  ok(delCode === 'REPAIR_HAS_BOOKED_COSTS' && S(stand(db)) === S(vorDel) && n(db, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [id]) === 1,
+    `§6 Reparatur mit gebuchten Kosten löschen: Nein (${delCode}), nichts geschrieben`);
+  // Nicht entstandene Kosten: die Zeile stornieren (am ursprünglichen Tag) — danach ist die Reparatur ohne Kosten löschbar.
+  rs().loadRepairLines();
+  rs().cancelRepairLine(ersteZeile(db, id));
+  rs().loadRepairs();
   rs().deleteRepair(id);
   const b = stand(db);
-  ok(b.einstand === 0 && b.los === 0 && b.INVENTORY === 0 && b.AP === 0, `§6 Reparatur gelöscht: Einstand und Schuld zurück (${S(b)})`);
+  ok(b.einstand === 0 && b.los === 0 && b.INVENTORY === 0 && b.AP === 0 && n(db, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [id]) === 0,
+    `§6 …nach „Cancel line" gelöscht: Einstand und Schuld zurück (${S(b)})`);
   const db2 = welt();
   const id2 = await eigene(WERKSTATT);
   await status('P', db2, id2, 'in_progress');
@@ -912,7 +923,7 @@ M.gegenkonto = fails.length === 0;
     && /account: 'EXPENSES_OPERATING', direction: 'CREDIT', amount, metadata: \{ repairId: input\.repairId, kind: 'repair_own_work' \}/.test(post)
     && !/Paid with the repair \(in-house cost\)/.test(store),
     '§10 Zeile im Haus / eigene Kosten ohne Zahlweg: aktivierte Eigenleistung (Haben EXPENSES_OPERATING) — keine künstliche Verbindlichkeit, kein künstlicher Geldfluss');
-  ok(ALLOWED_MUTATIONS.length === 131, `§10 Registry unverändert: 127 Buchungen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length}) — keine neue Fähigkeit`);
+  ok(ALLOWED_MUTATIONS.length === 132, `§10 Registry unverändert: 127 Buchungen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length}) — keine neue Fähigkeit`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — post-parity pp-13 + pp-14 repair cost accounting: ${PASS} passed, ${fails.length} failed`);

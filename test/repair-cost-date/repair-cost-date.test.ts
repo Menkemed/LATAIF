@@ -131,7 +131,7 @@ function freshDb(): Db {
     db.run(`INSERT INTO partners (id, branch_id, name, share_percentage, active, created_at, updated_at)
       VALUES (?, 'branch-main', ?, 0, ?, ?, ?)`, [id, name, active, NOW, NOW]);
   }
-  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15', 'pw16', 'pw17', 'pw18', 'pw19', 'pw20', 'pw21', 'pw23']) {
+  for (const pid of ['pw1', 'pw2', 'pw3', 'pw4', 'pw5', 'pw6', 'pw7', 'pw8', 'pw9', 'pw10', 'pw11', 'pw12', 'pw13', 'pw14', 'pw15', 'pw16', 'pw17', 'pw18', 'pw19', 'pw20', 'pw21', 'pw23', 'pw24', 'pw25']) {
     db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
         scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
         tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
@@ -734,7 +734,7 @@ let L2 = '';
     const vorF3 = stand();
     const m3 = await meldung(() => repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 20 }, rev(R)));
     const c3f = await fehler(() => repairs.updateRepairLineOnPrimary(R, L0, { costAmount: 20 }, rev(R)));
-    ok(/before the opening/.test(m3) && /Edit date/.test(m3) && c3f !== '' && stand() === vorF3
+    ok(/before the opening/.test(m3) && /original day/.test(m3) && /locked/.test(m3) && c3f !== '' && stand() === vorF3
       && n(DB, 'SELECT cost_amount FROM repair_lines WHERE id = ?', [L0]) === 12
       && S(lebend('REPAIR_OWN_WORK', L0)) === S(['EXPENSES_OPERATING CREDIT 12 2026-10-20', 'INVENTORY DEBIT 12 2026-10-20']),
     `R14 F3 gebuchte Eigenleistung vom 20.10. (vor dem Stichtag 01.11.): 12 → 20 abgewiesen, nichts geändert (${c3f}: ${m3.slice(0, 110)})`);
@@ -758,9 +758,80 @@ let L2 = '';
     `R14 F2 Reparatur mit FINAL-Rechnung: Löschen abgewiesen, nichts geändert (${c2}: ${m2.slice(0, 90)})`);
   DB.run("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?", [inv]);
   reload();
+  // Owner 19.11.2026 — nach dem Storno der Rechnung greift die Kostenregel: entstandene Kosten bleiben, Löschen nur ohne gebuchte Kosten.
+  const vorF2b = stand();
   const c3 = await fehler(() => useRepairStore.getState().deleteRepair(R));
-  ok(c3 === '' && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [R]) === 0, `R14 F2 …nach dem Storno der Rechnung: Löschen wie bisher möglich (${c3})`);
+  ok(c3 === 'REPAIR_HAS_BOOKED_COSTS' && stand() === vorF2b && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [R]) === 1,
+    `R14 F2 …nach dem Storno der Rechnung: mit gebuchten Kosten weiter nicht löschbar (${c3})`);
   abgleich('R14 F2');
+}
+
+// ── R15 Owner 19.11.2026: Kostenkorrekturen am URSPRÜNGLICHEN Buchungstag; nicht entstandene Kosten per „Cancel line";
+//        entstandene bleiben (Löschen nur ohne gebuchte Kosten); Stichtag und eingereichte Quartale werden nicht umgangen ──
+{
+  const od = await import('../../src/core/accounting/opening-date.ts');
+  const heute = new Date().toISOString().slice(0, 10);
+  const a = await kauf('pw24', 1000);
+  const R = await reparatur('pw24', lotOf(DB, a.line), '2026-11-02');
+  const W = await zeileNeu(R, { supplierId: 'sup-1', workType: 'service', costAmount: 40, costDate: '2026-11-03' });
+  const I = await zeileNeu(R, { workType: 'polishing', costAmount: 10, costDate: '2026-11-04' });
+  await status(R, 'in_progress');
+  const E = ausgabeDer(W);
+  ok(S(lebend('EXPENSE', E)) === S(['ACCOUNTS_PAYABLE CREDIT 40 2026-11-03', 'INVENTORY DEBIT 40 2026-11-03'])
+    && S(lebend('REPAIR_OWN_WORK', I)) === S(['EXPENSES_OPERATING CREDIT 10 2026-11-04', 'INVENTORY DEBIT 10 2026-11-04']),
+  'R15 Ausgang: Werkstatt 40 am 03.11., eigene Arbeit 10 am 04.11.');
+
+  // a) Betrag ändern: die alte Buchung wird an IHREM Tag zurückgenommen (vorher: heute), die neue steht am Kostendatum.
+  await repairs.updateRepairLineOnPrimary(R, W, { costAmount: 45 }, rev(R));
+  await repairs.updateRepairLineOnPrimary(R, I, { costAmount: 12 }, rev(R));
+  const tageW = buchungen('EXPENSE', E).map((x) => x.split(' ').pop());
+  const tageI = buchungen('REPAIR_OWN_WORK', I).map((x) => x.split(' ').pop());
+  ok(S(lebend('EXPENSE', E)) === S(['ACCOUNTS_PAYABLE CREDIT 45 2026-11-03', 'INVENTORY DEBIT 45 2026-11-03'])
+    && tageW.every((t) => t === '2026-11-03') && (heute === '2026-11-03' || !tageW.includes(heute)),
+  `R15 a Werkstattzeile 40 → 45: Storno und Neubuchung am 03.11., nichts heute (${S(buchungen('EXPENSE', E))})`);
+  ok(S(lebend('REPAIR_OWN_WORK', I)) === S(['EXPENSES_OPERATING CREDIT 12 2026-11-04', 'INVENTORY DEBIT 12 2026-11-04'])
+    && tageI.every((t) => t === '2026-11-04'),
+  `R15 a eigene Arbeit 10 → 12: Storno und Neubuchung am 04.11. (${S(buchungen('REPAIR_OWN_WORK', I))})`);
+  abgleich('R15 a');
+
+  // b) Reparatur löschen, solange Kosten gebucht sind: Nein mit Weg, nichts geschrieben.
+  const vorDel = stand();
+  const cd = await fehler(() => useRepairStore.getState().deleteRepair(R));
+  const md = await meldung(() => useRepairStore.getState().deleteRepair(R));
+  ok(cd === 'REPAIR_HAS_BOOKED_COSTS' && /Cancel the cost lines/.test(md) && /company expense/.test(md) && stand() === vorDel,
+    `R15 b Löschen mit gebuchten Kosten (57.000): abgewiesen, nichts geändert (${md.slice(0, 120)})`);
+
+  // c) „Cancel line" in einer gesperrten Periode (Stichtag nach dem Kostentag): Nein, nichts geschrieben.
+  od.setOpeningDateForTest('2026-11-04');
+  try {
+    const vorC = stand();
+    const cc = await fehler(() => repairs.cancelRepairLineOnPrimary(W));
+    ok(cc === 'REPAIR_COST_DATE_BEFORE_OPENING' && stand() === vorC && ausgabeDer(W) === E,
+      `R15 c Werkstattzeile vom 03.11. stornieren bei Stichtag 04.11.: abgewiesen, nichts geändert (${cc})`);
+  } finally { od.setOpeningDateForTest(null); }
+  // …und in einem eingereichten Quartal ebenso.
+  quartalZu(2026, 4);
+  try {
+    const vorQ = stand();
+    const cq = await fehler(() => repairs.cancelRepairLineOnPrimary(I));
+    ok(cq === 'VAT_PERIOD_FILED' && stand() === vorQ, `R15 c eigene Arbeit im eingereichten Q4 stornieren: abgewiesen (${cq})`);
+  } finally { quartalAuf(2026, 4); }
+
+  // d) Nicht entstandene Kosten: „Cancel line" nimmt sie am ursprünglichen Tag zurück (vorher: heute).
+  await repairs.cancelRepairLineOnPrimary(W);
+  ok(lebend('EXPENSE', E).length === 0 && buchungen('EXPENSE', E).every((x) => x.endsWith('2026-11-03'))
+    && n(DB, 'SELECT COUNT(*) FROM expenses WHERE id = ?', [E]) === 0,
+  `R15 d Werkstattzeile storniert: Gegenbuchung am 03.11. (${S(buchungen('EXPENSE', E))})`);
+  await repairs.cancelRepairLineOnPrimary(I);
+  ok(lebend('REPAIR_OWN_WORK', I).length === 0 && buchungen('REPAIR_OWN_WORK', I).every((x) => x.endsWith('2026-11-04')),
+    `R15 d eigene Arbeit storniert: Gegenbuchung am 04.11. (${S(buchungen('REPAIR_OWN_WORK', I))})`);
+  abgleich('R15 d');
+
+  // e) Ohne gebuchte Kosten ist Löschen wie bisher möglich.
+  reload();
+  const ce = await fehler(() => useRepairStore.getState().deleteRepair(R));
+  ok(ce === '' && n(DB, 'SELECT COUNT(*) FROM repairs WHERE id = ?', [R]) === 0, `R15 e ohne gebuchte Kosten: Löschen möglich (${ce})`);
+  abgleich('R15 e');
 }
 
 console.log(`\nrepair-cost-date: ${PASS} passed, ${fails.length} failed`);

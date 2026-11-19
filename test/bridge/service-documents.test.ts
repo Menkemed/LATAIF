@@ -174,7 +174,7 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(list.length === 131, `SCOPE genau 127 Mutationen (R7A + MEDIA-INBOX + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${list.length})`);
+  ok(list.length === 132, `SCOPE genau 127 Mutationen (R7A + MEDIA-INBOX + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${list.length})`);
   for (const op of ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich auf der Liste`);
   }
@@ -189,7 +189,7 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 61 && reads.length === 20,
+  ok(known.length === 62 && reads.length === 20,
     `SCOPE 1 Probe + 20 Reads + 40 Mutationen = 61 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['repairs.list', 'repairs.get', 'transfers.list', 'transfers.get',

@@ -26,7 +26,7 @@ import { query, currentUserId } from '@/core/db/helpers';
 import { trackUpdate } from '@/core/sync/track';
 import { trackLotRow } from '@/core/lots/lot-queries';
 import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement } from '@/core/finance/expenseSettlement';
-import { hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from '@/core/ledger/posting';
+import { activeSourceDates, hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from '@/core/ledger/posting';
 import { createExpenseInHouse, updateExpenseInHouse } from '@/core/payables/payables-house';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { assertRepairCostDay, repairCostDayIssue } from './repair-cost-date';
@@ -157,10 +157,13 @@ export function ownWorkBookedAt(sourceId: string, amount: number): boolean {
  * Bringt die eigene Arbeit einer Quelle auf ihren Betrag — genau einmal, Änderung = Storno + Neubuchung.
  * Owner 12.11.2026 — `occurredAt`: das Kostendatum der Zeile (ohne Angabe wie bisher der Tag der Buchung).
  */
-export function syncOwnWork(sourceId: string, repairId: string, scope: string | null | undefined, target: number, now: string, occurredAt?: string): void {
+export function syncOwnWork(sourceId: string, repairId: string, scope: string | null | undefined, target: number, now: string, occurredAt?: string,
+  opts: { mirror?: boolean } = {}): void {
   const posted = ownWorkPosted(sourceId);
   if (F(posted) === F(target)) return;
-  if (posted > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
+  // Owner 19.11.2026 — eine KORREKTUR (Betrag einer gebuchten Zeile) nimmt die alte Buchung an ihrem eigenen Tag zurück
+  // (`mirror`, vorher geprüft: `assertCostCorrectionOpen`); ohne die Option wie bisher am Tag der Änderung.
+  if (posted > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now, opts.mirror ? { mirrorOriginalDates: true } : {});
   if (F(target) > 0) {
     postRepairOwnWork({ sourceId, repairId, account: scope === 'OWN' ? 'INVENTORY' : 'COGS', amount: target, occurredAt: occurredAt || now });
   }
@@ -173,8 +176,48 @@ function ownWorkDay(sourceId: string): string {
        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)
      ORDER BY e1.occurred_at DESC LIMIT 1`, [sourceId])[0]?.d ?? '').slice(0, 10);
 }
-export function reverseOwnWork(sourceId: string, now: string): void {
-  if (ownWorkPosted(sourceId) > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
+export function reverseOwnWork(sourceId: string, now: string, opts: { mirror?: boolean } = {}): void {
+  if (ownWorkPosted(sourceId) > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now, opts.mirror ? { mirrorOriginalDates: true } : {});
+}
+
+/**
+ * Owner 19.11.2026 — Kostenkorrekturen (Betrag ändern, nicht entstandene Kosten stornieren) stehen am URSPRÜNGLICHEN
+ * Buchungstag. Jeder noch wirksame Buchungstag der genannten Quellen muss dafür offen sein: nicht vor dem Buchungsstichtag,
+ * nicht in einem eingereichten/bezahlten VAT-Quartal. Sonst ein verständliches Nein — VOR jedem Schreiben.
+ */
+export function assertCostCorrectionOpen(
+  sources: ReadonlyArray<{ module: 'EXPENSE' | 'REPAIR_OWN_WORK'; id: string | null | undefined }>,
+  branchId: string, nowMs: number, what: string,
+): void {
+  for (const s of sources) {
+    if (!s.id) continue;
+    for (const d of activeSourceDates(s.module, s.id)) {
+      const issue = repairCostDayIssue(String(d).slice(0, 10), branchId, nowMs, 'The original booking day of this cost');
+      if (issue) {
+        throw new RepairActionRejected(issue.code,
+          `${issue.message}. ${what} would correct that booking on its original day — that period is locked; nothing was changed.`);
+      }
+    }
+  }
+}
+
+/**
+ * Owner 19.11.2026 — die noch gebuchten Kosten einer Reparatur (Werkstatt-/Kopfausgaben ohne Kartengebühr, eigene Arbeit an
+ * Reparatur oder Zeile). Entstandene Kosten bleiben beim Storno als Firmenaufwand; was nicht entstanden ist, nimmt
+ * „Cancel line" am ursprünglichen Tag zurück. Gelöscht wird eine Reparatur deshalb nur ohne gebuchte Kosten.
+ */
+export function repairBookedCosts(repairId: string): { count: number; amount: number } {
+  const ausgaben = query(
+    `SELECT COUNT(*) AS c, COALESCE(SUM(amount), 0) AS t FROM expenses
+      WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED' AND category != 'CardFees'`, [repairId])[0];
+  let count = Number(ausgaben?.c) || 0;
+  let amount = Number(ausgaben?.t) || 0;
+  const quellen = [repairId, ...query('SELECT id FROM repair_lines WHERE repair_id = ?', [repairId]).map((r) => String(r.id))];
+  for (const q of quellen) {
+    const eigen = ownWorkPosted(q);
+    if (eigen > EPS) { count += 1; amount += eigen; }
+  }
+  return { count, amount: Math.round(amount * 1000) / 1000 };
 }
 
 /** Eine schon (bar oder per Guthaben) beglichene Reparaturkosten-Ausgabe bleibt — ihre Zeile ist nicht mehr stornierbar. */

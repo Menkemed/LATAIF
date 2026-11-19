@@ -315,6 +315,9 @@ pub const OP_PURCHASES_CANCEL_RETURN: &str = "purchases.cancel_return";
 // Owner 14.11.2026 — „Remove" eines Approval-Transfers vom zweiten Rechner: dieselbe Hausfolge wie am Primary
 // (ohne Buchung loeschen, nach dem Verkauf stornieren). Nur DIESER Vorgang; jedes andere Loeschen bleibt am Primary.
 pub const OP_TRANSFERS_REMOVE: &str = "transfers.remove";
+// Owner 19.11.2026 — „Correct final invoice date" (nur ADMIN): abschliessende Zahlung und festes Endrechnungsdatum
+// gemeinsam berichtigen, die Nummer bleibt; geprueft und gespeichert am Primary.
+pub const OP_INVOICES_CORRECT_FINAL_DATE: &str = "invoices.correct_final_date";
 pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
 pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
@@ -598,6 +601,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PURCHASES_CANCEL_RETURN,
     // Owner 14.11.2026 — „Remove" eines Approval-Transfers (loeschen oder stornieren, Primary == PC2).
     OP_TRANSFERS_REMOVE,
+    // Owner 19.11.2026 — das Endrechnungsdatum berichtigen (nur ADMIN, Primary == PC2).
+    OP_INVOICES_CORRECT_FINAL_DATE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

@@ -31,6 +31,7 @@ import { invoicePrintFor, type InvoicePrintExtras } from '@/core/data/page-reads
 import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 import { useSharedRead } from '@/core/data/shared-read';
 import { invoiceDocumentDate } from '@/core/invoices/invoice-document-date';
+import { correctFinalInvoiceDateOnPrimary } from '@/core/invoices/final-date-correction';
 import { usePartyBalances } from '@/core/parties/use-party-balances';
 import { localReadContext } from '@/core/data/read-context';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
@@ -153,6 +154,10 @@ export function InvoiceDetail() {
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
+  // Owner 19.11.2026 — „Correct final date" (nur ADMIN): abschließende Zahlung + festes Endrechnungsdatum gemeinsam.
+  const [finalDateOpen, setFinalDateOpen] = useState(false);
+  const [finalDateValue, setFinalDateValue] = useState('');
+  const [finalDateReason, setFinalDateReason] = useState('');
   const [cancelRefundMethod, setCancelRefundMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
 
   useEffect(() => { loadInvoices(); loadCustomers(); loadProducts(); loadCategories(); loadSalesReturns(); loadCreditNotes(); loadRepairs(); loadEmployees(); }, [loadInvoices, loadCustomers, loadProducts, loadCategories, loadSalesReturns, loadCreditNotes, loadRepairs, loadEmployees]);
@@ -471,6 +476,22 @@ export function InvoiceDetail() {
     loadInvoices();
   }
 
+  // Owner 19.11.2026 — das Endrechnungsdatum berichtigen: am Primary die Hausfolge, am PC2 derselbe geprüfte Auftrag.
+  // Geprüft und gespeichert wird am Primary (Recht ADMIN, Grund, Fassung, Stichtag, eingereichte Quartale, Nummernjahr).
+  async function finalDatumKorrigieren() {
+    if (!id || !invoice) return;
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('correcting the final invoice date (no revision loaded)'))); return; }
+    const eingabe = { invoiceId: id, newDate: finalDateValue, reason: finalDateReason, expectedRevision: fassung ?? 0 };
+    if (!await w.ok('invoices.correct_final_date', {
+      local: () => correctFinalInvoiceDateOnPrimary(eingabe, () => loadInvoices()),
+      remote: () => eingabe,
+    })) return;
+    setFinalDateOpen(false);
+    setFinalDateReason('');
+    loadInvoices();
+  }
+
   async function zahlungLoeschen(paymentId: string) {
     if (!id || !invoice) return;
     const fassung = invoice.revision;
@@ -670,6 +691,13 @@ export function InvoiceDetail() {
                 <Button variant="secondary" onClick={() => { void printInvoice(); }}><Download size={14} /> PDF</Button>
                 <Button variant="secondary" onClick={() => { void printInvoice(); }} className="no-print"><Printer size={14} /> Print</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
+                {perm.isOwner && invoice.status === 'FINAL' && !!invoice.numberFinalizedAt && (
+                  <Button variant="ghost" data-invoice-correct-final-date disabled={w.busy}
+                    onClick={() => { w.clear(); setFinalDateValue(String(belegDatum.date || '').slice(0, 10)); setFinalDateReason(''); setFinalDateOpen(true); }}
+                    title="Only if the date of the completing payment was recorded wrongly">
+                    Correct final date
+                  </Button>
+                )}
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
                 {/* B2/B3 — derselbe Dialog wie im Kundenkonto: Store Credit, We Borrowed und offene Einkäufe (normal/Kommission). */}
@@ -1507,6 +1535,33 @@ export function InvoiceDetail() {
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmCancel(false)}>Keep Invoice</Button>
           <Button variant="danger" onClick={() => void handleCancelInvoice()} disabled={w.busy} data-invoice-cancel>Cancel Invoice</Button>
+        </div>
+      </Modal>
+
+      {/* Owner 19.11.2026 — Correct final invoice date (ADMIN) */}
+      <Modal open={finalDateOpen} onClose={() => { setFinalDateOpen(false); w.clear(); }} title="Correct final invoice date" width={480}>
+        <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 12 }}>
+          Only when the date of the payment that completed <strong style={{ color: '#0F0F10' }}>{formatInvoiceDisplayShort(invoice)}</strong> was
+          recorded wrongly. That payment and the final invoice date move together; the invoice number stays. List, detail page, PDF and
+          NBR export then show the corrected date. Nothing is sent to the customer.
+        </p>
+        <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }} data-final-date-current>
+          Current final date: <strong style={{ color: '#0F0F10' }}>{fmtDate(belegDatum.date)}</strong>
+        </div>
+        <Input label="CORRECT DATE *" type="date" value={finalDateValue} max={new Date().toISOString().slice(0, 10)}
+          data-final-date-input onChange={e => setFinalDateValue(e.target.value)} />
+        <div style={{ height: 12 }} />
+        <Input label="REASON *" placeholder="what was recorded wrongly" value={finalDateReason}
+          data-final-date-reason onChange={e => setFinalDateReason(e.target.value)} />
+        <div style={{ fontSize: 11, color: '#6B7280', margin: '10px 0 16px' }}>
+          Refused (nothing changes) if a day lies before the accounting opening date or in a filed/paid VAT quarter, if the completing
+          payment is not unique, or if the final number carries another year.
+        </div>
+        <WriteError text={w.fehler} />
+        <div className="flex justify-end gap-3">
+          <Button variant="ghost" onClick={() => { setFinalDateOpen(false); w.clear(); }}>Close</Button>
+          <Button variant="primary" data-final-date-save disabled={w.busy || !finalDateValue || finalDateReason.trim().length < 3}
+            onClick={() => void finalDatumKorrigieren()}>Correct date</Button>
         </div>
       </Modal>
 

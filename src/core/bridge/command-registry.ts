@@ -199,6 +199,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // ohne Buchung löschen, nach dem Verkauf mit Gegenbuchung stornieren, mit Rechnung/Zahlung ein Nein; Grund, Fassung,
   // Periodenschutz. Nur DIESER Vorgang; jedes andere Löschen bleibt Primary-only (R6B).
   'transfers.remove',
+  // Owner 19.11.2026 — „Correct final invoice date" (nur ADMIN): abschließende Zahlung und festes Endrechnungsdatum gemeinsam
+  // berichtigen, die Nummer bleibt; Hausfolge `correctFinalInvoiceDateInHouse` mit Grund, Fassung, Stichtag und VAT-Sperren.
+  'invoices.correct_final_date',
 ];
 
 export interface CommandSpec {

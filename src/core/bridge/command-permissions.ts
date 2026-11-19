@@ -289,6 +289,8 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'purchases.correct': owner('PurchaseDetail Edit: perm.isOwner (date, supplier, prices, quantities)'),
   'purchases.void_payment': owner('PurchaseDetail: perm.isOwner (void a payment)'),
   'purchases.correct_payment_date': owner('PurchaseDetail: perm.isOwner (correct a payment date)'),
+  // Owner 19.11.2026 — das Endrechnungsdatum berichtigen: nur ADMIN (die Hausfolge prüft zusätzlich user_branches).
+  'invoices.correct_final_date': owner('InvoiceDetail: perm.isOwner (correct the final invoice date)'),
   // CUSTOMER ACCOUNT C — „Settle Balance" und „Undo settlement" im Kundenkonto: dasselbe Recht wie „Record Payment"
   // (und wie „Remove offset" auf der Rechnung, `invoices.delete_payment`). Keine neue Rolle.
   'customers.settle_balance': RECORD_PAYMENTS,

@@ -327,6 +327,26 @@ const verlust = (): number => soll('INVENTORY_LOSS');
   abgleich('Z6b');
 }
 
+// ── Z6c Owner 19.11.2026 (A1): Preis über dem Einkauf — die Meldung nennt, was geht ─────────────────────────────────────
+{
+  // Ohne Zusatzkosten wäre der Mehrbetrag ein Gewinn: GAIN_UNSUPPORTED mit verständlichem Satz (vorher: „Preis über Einkauf" mit
+  // dem Hinweis auf das Zusatzkosten-Feld, das dann ADDED_REFUND_TOO_HIGH ergab).
+  const a = await kauf('pw27', 500, undefined, 1, 500);
+  let m1 = '', c1 = '';
+  try { ret(a.id, a.line, 1, 600); } catch (e) { c1 = String((e as { code?: string }).code ?? ''); m1 = (e as Error).message; }
+  ok(c1 === 'PURCHASE_RETURN_GAIN_UNSUPPORTED' && /carries no added costs/.test(m1) && /at most at the purchase price/.test(m1)
+    && n(DB, "SELECT COUNT(*) FROM purchase_returns WHERE purchase_id = ?", [a.id]) === 0,
+  `Z6c Preis 600 über Einkauf 500 ohne Zusatzkosten: Gewinn nicht unterstützt, nichts geschrieben (${c1}: ${m1.slice(0, 90)})`);
+  // Mit Zusatzkosten bleibt es PRICE_ABOVE_PURCHASE — jetzt mit dem Höchstbetrag fürs eigene Feld.
+  const b = await kauf('pw28', 500, undefined, 2, 1000);
+  await reparaturFertig('pw28', lotOf(DB, b.line), 100);
+  let m2 = '', c2 = '';
+  try { ret(b.id, b.line, 1, 600); } catch (e) { c2 = String((e as { code?: string }).code ?? ''); m2 = (e as Error).message; }
+  ok(c2 === 'PURCHASE_RETURN_PRICE_ABOVE_PURCHASE' && /at most 50\.000\)/.test(m2) && /added costs refunded/.test(m2),
+    `Z6c …mit Zusatzkosten 2 × 50: Preis über Einkauf, Hinweis aufs eigene Feld mit Höchstbetrag je Stück (${m2.slice(100, 220)})`);
+  abgleich('Z6c');
+}
+
 // ── Z7 VAT_10: 110 brutto (100 + 10 VAT), Reparatur 10 → Buchwert 110; Rückgabe 110 → Vorsteuer 10 zurück, Verlust 10 ──
 {
   const a = await kauf('pw12', 110, undefined, 1, 110, 'VAT_10');
@@ -421,6 +441,21 @@ const { reverseConfirmedPurchaseReturnInHouse } = await import('../../src/core/p
   const c = await code(() => Promise.resolve(imHaus(() => cancelPurchaseInHouse(a.id, 'branch-main', {}))));
   ok(c === '' && r3(verlust() - v0) === 0, `Z12c Einkaufs-Storno nimmt die Rückgabe samt Verlust zurück (${c || 'ok'}, Verlust ${r3(verlust() - v0)}, Kasse ${r3(geld() - g0)})`);
   abgleich('Z12c Storno');
+}
+
+// ── Z6d Owner 19.11.2026 (A3): ein Rundungsrest bis 5 Fils ist auch im Partneranteil weder Verlust noch Gewinn ────────────
+{
+  // 3 × 100 gemeinsam (50/50), Reparatur 0,010 auf das Los → je 100,00333; 1 Stück zurück zu 100: Rest 3 Fils (Rückgabe bucht
+  // keinen Verlust) — vorher bekam der Partner trotzdem rund −0,002 Verlustanteil.
+  const a = await kauf('pw29', 100, [{ partnerId: 'pa-b', sharePct: 50 }], 3, 300);
+  await reparaturFertig('pw29', lotOf(DB, a.line), 0.01);
+  const v0 = verlust();
+  ret(a.id, a.line, 1, 100);
+  const bew = DB.exec("SELECT COUNT(*), COALESCE(SUM(ABS(amount)), 0) FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'SUPPLIER_RETURN'", [a.line])[0].values[0];
+  ok(r3(verlust() - v0) === 0 && Number(bew[0]) >= 1 && Number(bew[1]) === 0,
+    `Z6d Rest 3 Fils: kein Verlust gebucht, Partnerbewegung ${bew[0]}× mit Betrag ${bew[1]} (Stücke verlassen den Abschnitt, kein Anteil)`);
+  // Der Rest von 3 Fils bleibt (wie seit v0.8.101 gewollt) ungebucht im Lagerkonto — deshalb steht dieser Fall am Ende der Datei.
+  ok(Math.abs(lagerHB() - lagerBestand()) <= 0.005 && ausgeglichen(), `Z6d Abgleich mit Rundungsrest ≤ 5 Fils (${lagerHB()} / ${lagerBestand()})`);
 }
 
 console.log(`\nsupplier-return-added-costs: ${PASS} passed, ${fails.length} failed`);
