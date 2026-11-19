@@ -57,15 +57,21 @@ const nodeFs = {
 };
 
 const SQL = await initSqlJs({ locateFile: () => WASM });
-const db = new SQL.Database(readFileSync(dbPath));
+const h = { db: new SQL.Database(readFileSync(dbPath)) };
 
 await compactDatabase({
-  db,
+  db: h.db,
   isTransactionActive: () => false,
   // A throwaway volume with room: this child is about the KILL, not about the preflight.
   freeBytes: async () => 8 * 1024 * 1024 * 1024,
-  saveDurably: async () => {
-    const data = db.export();
+  // VERIFY-BEFORE-SWAP — the production shape: VACUUM a copy, verify, replace the live handle.
+  openCopy: (bytes) => new SQL.Database(bytes),
+  replaceLive: async (build) => {
+    const next = build(h.db);
+    if (next !== h.db) { const old = h.db; h.db = next; old.close(); }
+  },
+  saveDurably: async (live) => {
+    const data = live.export();
     await atomicWrite(nodeFs, {
       dir: dirname(dbPath),
       finalPath: dbPath,

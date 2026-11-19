@@ -4194,6 +4194,33 @@ export async function reloadDbFromDisk(): Promise<boolean> {
   return ok;
 }
 
+/**
+ * VERIFY-BEFORE-SWAP (Verdichten) — eine unabhängige In-Memory-Datenbank aus diesen Bytes. Die Fabrik wird vorab
+ * (asynchron) geholt, damit der Tausch selbst synchron bleiben kann.
+ */
+export async function databaseCopyOpener(): Promise<(bytes: Uint8Array) => Database> {
+  const SQL = await initSqlJs({ locateFile: () => wasmUrl });
+  return (bytes: Uint8Array) => new SQL.Database(bytes);
+}
+
+/**
+ * VERIFY-BEFORE-SWAP (Verdichten) — die geladene Datenbank exklusiv ersetzen. `build` läuft SYNCHRON im exklusiven
+ * Abschnitt (keine Lease, kein anderer Tausch, kein `await` zwischen Kopie, Prüfung und Tausch — also kann kein Schreiben
+ * dazwischen kommen und mit dem Tausch verloren gehen). Wirft `build`, bleibt die geladene Datenbank, wie sie war.
+ * Danach ist die neue Instanz die geladene (neue Epoche); die alte wird geschlossen. Speichern ist Sache des Aufrufers.
+ */
+export async function replaceLiveDatabase(build: (live: Database) => Database): Promise<void> {
+  await dbLifecycle.runExclusiveSwap(async () => {
+    if (!db) throw new Error('Database not initialized');
+    const next = build(db);
+    if (next === db) return;
+    const old = db;
+    db = next;
+    try { old.close(); } catch { /* schon zu */ }
+    dbLifecycle.bumpEpoch();
+  });
+}
+
 export async function resetDatabase(): Promise<void> {
   // R4: same exclusive-swap gate as reload — no destructive swap while an
   // ingest holds a lease, and reset serialises against a concurrent reload.

@@ -9,6 +9,10 @@ declare module 'sql.js' {
 
   export interface Statement {
     run(params?: unknown[]): void;
+    /** Next row; false at the end. */
+    step(): boolean;
+    /** The current row as an array of values. */
+    get(params?: unknown[]): unknown[];
     free(): void;
   }
 

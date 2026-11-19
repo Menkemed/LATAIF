@@ -10,7 +10,7 @@
 // trigger: the only caller is the owner-gated maintenance panel.
 // ════════════════════════════════════════════════════════════════════════════
 
-import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { databaseCopyOpener, getDatabase, replaceLiveDatabase, saveDatabaseDurably } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { getStockMediaOrchestrator } from '@/core/media/orchestrator';
 import { ProductMediaCutoverService } from '@/core/media/product-media-cutover';
@@ -153,11 +153,16 @@ export async function assertOwnerCredentials(owner: { email: string; password: s
  */
 export async function compactDatabaseLive(owner: { email: string; password: string }): Promise<CompactionStats> {
   await assertOwnerCredentials(owner);
+  // VERIFY-BEFORE-SWAP — verdichtet wird eine Kopie; nur eine Kopie, die Zeile für Zeile (mit rowid), im Schema und in der
+  // Integrität dem Original gleicht, ersetzt die geladene Datenbank und wird gespeichert.
+  const openCopy = await databaseCopyOpener();
   return compactDatabase({
-    db: getDatabase() as unknown as never,
+    db: getDatabase(),
     isTransactionActive,
     saveDurably: () => saveDatabaseDurably(),
     freeBytes: probeFreeBytes,
+    openCopy,
+    replaceLive: replaceLiveDatabase,
   });
 }
 

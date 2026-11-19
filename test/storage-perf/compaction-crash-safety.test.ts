@@ -51,6 +51,20 @@ const SQL = await initSqlJs({ locateFile: () => WASM });
 /** The free-space probe for the cases that are about a crash or an ENOSPC, not about the preflight. */
 const ROOMY = async (): Promise<number> => 8 * 1024 * 1024 * 1024;
 
+type Db = InstanceType<typeof SQL.Database>;
+/** VERIFY-BEFORE-SWAP — the live database as `database.ts` holds it: the verified copy replaces it, the old one is closed. */
+function tausch(start: Db) {
+  const h = { db: start, swapped: false };
+  return {
+    h,
+    openCopy: (b: Uint8Array): Db => new SQL.Database(b),
+    replaceLive: async (build: (live: Db) => Db) => {
+      const next = build(h.db);
+      if (next !== h.db) { const old = h.db; h.db = next; h.swapped = true; old.close(); }
+    },
+  };
+}
+
 // ── a throwaway database with real content and a real freelist ──────────────
 //
 // The freelist matters: without deleted pages a VACUUM has nothing to reclaim and the test would
@@ -156,11 +170,11 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
   }
   // The decisive property: after a crash the app opens the OLD database and loses nothing. Prove it
   // by completing a clean compaction afterwards — the file must still be usable, not merely present.
-  const db = new SQL.Database(readFileSync(dbPath));
-  const stats = await compactDatabase({ db, isTransactionActive: () => false, freeBytes: ROOMY, saveDurably: async () => {
-    writeFileSync(dbPath, Buffer.from(db.export()));
+  const t = tausch(new SQL.Database(readFileSync(dbPath)));
+  const stats = await compactDatabase({ ...t, db: t.h.db, isTransactionActive: () => false, freeBytes: ROOMY, saveDurably: async (live) => {
+    writeFileSync(dbPath, Buffer.from(live.export()));
   } });
-  db.close();
+  t.h.db.close();
   ok(stats.pagesAfter <= stats.pagesBefore, '§13 a retry after the crash compacts normally — the database was never poisoned');
   ok(sqliteOk(dbPath).products === 400, '§13 …and still holds every product');
 }
@@ -183,11 +197,14 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
   {
     const db = load();
     let vacuumed = false;
-    const wrapped = { run: (sql: string) => { if (/VACUUM/i.test(sql)) vacuumed = true; db.run(sql); }, exec: (s: string) => db.exec(s) };
+    const t = tausch(db);
     let code = '';
     try {
       await compactDatabase({
-        db: wrapped, isTransactionActive: () => false,
+        db, isTransactionActive: () => false,
+        // The VACUUM runs on the copy inside the swap section — reaching it is "the VACUUM started".
+        openCopy: (b) => { vacuumed = true; return t.openCopy(b); },
+        replaceLive: async (build) => { vacuumed = true; return t.replaceLive(build); },
         saveDurably: async () => { throw new Error('must not be reached'); },
         freeBytes: async () => 1024,
       });
@@ -200,14 +217,14 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
 
   // Plenty of room → proceeds.
   {
-    const db = load();
+    const t = tausch(load());
     let saved = false;
     const stats = await compactDatabase({
-      db, isTransactionActive: () => false,
+      ...t, db: t.h.db, isTransactionActive: () => false,
       saveDurably: async () => { saved = true; },
       freeBytes: async () => requiredFreeBytes(sizeOnDisk) * 4,
     });
-    db.close();
+    t.h.db.close();
     ok(saved && stats.pagesAfter <= stats.pagesBefore, '§14 A a volume with room compacts normally');
   }
 
@@ -222,10 +239,14 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
     const db = load();
     let saved = false;
     let vacuumed = false;
-    const wrapped = { run: (sql: string) => { if (/VACUUM/i.test(sql)) vacuumed = true; db.run(sql); }, exec: (q: string) => db.exec(q) };
+    const t = tausch(db);
     let code = '';
     try {
-      await compactDatabase({ db: wrapped, isTransactionActive: () => false, saveDurably: async () => { saved = true; }, freeBytes: probe });
+      await compactDatabase({
+        db, isTransactionActive: () => false, saveDurably: async () => { saved = true; }, freeBytes: probe,
+        openCopy: (b) => { vacuumed = true; return t.openCopy(b); },
+        replaceLive: async (build) => { vacuumed = true; return t.replaceLive(build); },
+      });
     } catch (e) { code = (e as CompactionError).code; }
     db.close();
     ok(code === 'COMPACTION_FREE_SPACE_UNKNOWN', `§1 C/D ${name} → refused (${code})`);
@@ -253,20 +274,20 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
     async mkdir(p: string, o: { recursive: boolean }) { mkdirSync(p, o); },
   };
 
-  const db = new SQL.Database(readFileSync(dbPath));
+  const t = tausch(new SQL.Database(readFileSync(dbPath)));
   let thrown = '';
   try {
     await compactDatabase({
       // The preflight PASSES here on purpose: this is the case where the volume looked fine and the
       // write failed anyway (another process filled it, a quota, a network volume). The two layers
       // are independent — proving the second one requires getting past the first.
-      db, isTransactionActive: () => false, freeBytes: ROOMY,
-      saveDurably: async () => {
-        await atomicWrite(fullDisk, { dir, finalPath: dbPath, tmpPath: dbPath + '.tmp', data: db.export(), baseline: null });
+      ...t, db: t.h.db, isTransactionActive: () => false, freeBytes: ROOMY,
+      saveDurably: async (live) => {
+        await atomicWrite(fullDisk, { dir, finalPath: dbPath, tmpPath: dbPath + '.tmp', data: live.export(), baseline: null });
       },
     });
   } catch (e) { thrown = (e as { code?: string }).code ?? (e as Error).message; }
-  db.close();
+  t.h.db.close();
 
   ok(/ENOSPC/.test(thrown), `§14 B the disk-full failure propagates instead of reporting success (${thrown})`);
   ok(removedTemp, '§14 B the temp file is cleaned up on the failure path');
@@ -288,17 +309,17 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
   const beforePages = freelistOf(dbPath);
   ok(beforePages.freelist > 0, `§14 C the fixture really has free pages to reclaim (${beforePages.freelist})`);
 
-  const db = new SQL.Database(readFileSync(dbPath));
+  const t = tausch(new SQL.Database(readFileSync(dbPath)));
   let reported: unknown = null;
   let thrown = '';
   try {
     reported = await compactDatabase({
-      db, isTransactionActive: () => false, freeBytes: ROOMY,
+      ...t, db: t.h.db, isTransactionActive: () => false, freeBytes: ROOMY,
       // The exact production shape: VACUUM in memory, then the durable save — which fails here.
       saveDurably: async () => { throw new Error('DURABLE_SAVE_FAILED'); },
     });
   } catch (e) { thrown = (e as Error).message; }
-  db.close();
+  t.h.db.close();
 
   ok(thrown === 'DURABLE_SAVE_FAILED', `§15 the persist failure propagates (${thrown})`);
   ok(reported === null, '§15 no CompactionStats are returned — a compaction that was not persisted is never reported as done');
@@ -317,19 +338,19 @@ async function crashRun(stop: 'temp' | 'rename', dir: string): Promise<{ killed:
   buildFixture(dbPath);
   const before = { bytes: statSync(dbPath).size, ...freelistOf(dbPath) };
 
-  const db = new SQL.Database(readFileSync(dbPath));
+  const t = tausch(new SQL.Database(readFileSync(dbPath)));
   const stats = await compactDatabase({
-    db, isTransactionActive: () => false,
-    saveDurably: async () => {
+    ...t, db: t.h.db, isTransactionActive: () => false,
+    saveDurably: async (live) => {
       await atomicWrite(
         { async writeFile(p, d) { writeFileSync(p, d); }, async stat(p) { const s = statSync(p); return { size: s.size, mtime: s.mtime }; },
           async rename(o, n) { renameSync(o, n); }, async remove(p) { rmSync(p, { force: true }); }, async mkdir(p, o) { mkdirSync(p, o); } },
-        { dir, finalPath: dbPath, tmpPath: dbPath + '.tmp', data: db.export(), baseline: null },
+        { dir, finalPath: dbPath, tmpPath: dbPath + '.tmp', data: live.export(), baseline: null },
       );
     },
     freeBytes: async () => requiredFreeBytes(before.bytes) * 4,
   });
-  db.close();
+  t.h.db.close();
 
   const after = { bytes: statSync(dbPath).size, ...freelistOf(dbPath), ...sqliteOk(dbPath) };
   ok(after.bytes < before.bytes, `§12 the FILE shrank on disk (${before.bytes} → ${after.bytes} bytes)`);

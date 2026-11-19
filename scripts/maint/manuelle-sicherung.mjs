@@ -232,8 +232,11 @@ function zurueckspielen(o) {
   const app = laufendeApp(o['nur-pfad']);
   if (app.length) fail(`App läuft noch (${app.join(', ')}) — erst schließen`);
 
-  // 1) heutigen Stand vollständig beiseite legen und prüfen
+  // 1) heutigen Stand vollständig beiseite legen und prüfen. `--beiseite` wird IMMER angelegt — auch wenn der
+  //    Datenordner leer ist (z. B. Wiederherstellung auf einen neuen Rechner). Vorher entstand er erst mit der ersten
+  //    kopierten Datei; bei einem leeren Ziel fehlte er, und die Prüfung brach mit ENOENT ab (nichts zurückgespielt).
   const heute = manifestOf(ziel);
+  mkdirSync(beiseite, { recursive: true });
   for (const e of heute) {
     const dst = join(beiseite, ...e.file.split('/'));
     mkdirSync(dirname(dst), { recursive: true });
@@ -250,7 +253,7 @@ function zurueckspielen(o) {
   }
   const nachher = manifestOf(ziel);
   if (key(nachher) !== key(manifest.dateien)) fail('Datenordner weicht nach dem Einspielen ab — Inhalt von --beiseite zurücklegen');
-  return { ok: true, name: p.name, dateien: nachher.length, beiseite, hinweis: 'Locator wurde nicht angefasst' };
+  return { ok: true, name: p.name, dateien: nachher.length, beiseite, beiseiteDateien: heute.length, zielWarLeer: heute.length === 0, hinweis: 'Locator wurde nicht angefasst' };
 }
 
 try {

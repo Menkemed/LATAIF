@@ -146,6 +146,28 @@ async function main(): Promise<void> {
   { const a = new DatabaseSync(join(DATA, 'lataif.db'), { readOnly: true }); ok(a.prepare(`SELECT COUNT(*) n FROM media_ingest_jobs WHERE state='accepted'`).get()!.n === 2, 'nach dem Rückweg: Jobs wieder accepted'); a.close(); }
   ok(treeHash(join(E, name)) === eHash, 'Sicherung durch das Zurückspielen nicht verändert');
 
+  // ── Zurückspielen in einen VÖLLIG LEEREN Datenordner (z. B. neuer Rechner) ─────────────────────
+  // Vorher: --beiseite entstand erst mit der ersten kopierten Datei → bei leerem Ziel ENOENT, nichts zurückgespielt.
+  {
+    const leer = join(box, 'leer-data');
+    mkdirSync(leer);
+    const rl = run(['zurueckspielen', '--sicherung', join(E, name), '--ziel', leer, '--beiseite', join(box, 'beiseite-leer'), '--bestaetigen', name, '--nur-pfad', DECOY]);
+    ok(rl.code === 0 && rl.out.ok && rl.out.zielWarLeer === true && rl.out.beiseiteDateien === 0,
+      `leerer Zielordner: zurückgespielt (${JSON.stringify(rl.out).slice(0, 160)})`);
+    ok(treeHash(leer) === dataBefore, 'leerer Zielordner: danach EXAKT der Stand der Sicherung');
+    ok(existsSync(join(box, 'beiseite-leer')) && readdirSync(join(box, 'beiseite-leer')).length === 0, 'leerer Zielordner: --beiseite angelegt und leer (es gab nichts zu sichern)');
+    ok(!existsSync(join(leer, 'data-location.json')) && !existsSync(join(leer, '_locator')), 'leerer Zielordner: Locator nicht geschrieben');
+    // Die Schutzregeln gelten unverändert auch für das leere Ziel.
+    const leer2 = join(box, 'leer-data-2'); mkdirSync(leer2);
+    const rlx = run(['zurueckspielen', '--sicherung', join(E, name), '--ziel', leer2, '--beiseite', join(box, 'beiseite-leer'), '--bestaetigen', name, '--nur-pfad', DECOY]);
+    ok(rlx.code !== 0 && /existiert bereits/.test(rlx.out.abbruch ?? '') && readdirSync(leer2).length === 0, 'leeres Ziel, --beiseite existiert: abgewiesen, nichts geschrieben');
+    const rlb = run(['zurueckspielen', '--sicherung', join(E, name), '--ziel', leer2, '--beiseite', join(box, 'beiseite-leer-2'), '--bestaetigen', 'falsch-xxxx', '--nur-pfad', DECOY]);
+    ok(rlb.code !== 0 && /bestaetigen/.test(rlb.out.abbruch ?? '') && readdirSync(leer2).length === 0 && !existsSync(join(box, 'beiseite-leer-2')), 'leeres Ziel, falsche Bestätigung: abgewiesen, nichts angelegt');
+    const rlf = run(['zurueckspielen', '--sicherung', join(E, name), '--ziel', join(box, 'gibt-es-nicht'), '--beiseite', join(box, 'beiseite-leer-3'), '--bestaetigen', name, '--nur-pfad', DECOY]);
+    ok(rlf.code !== 0 && /Datenordner fehlt/.test(rlf.out.abbruch ?? '') && !existsSync(join(box, 'beiseite-leer-3')), 'fehlender Zielordner: weiterhin abgewiesen');
+    ok(treeHash(join(E, name)) === eHash, 'Sicherung auch durch das Zurückspielen ins leere Ziel nicht verändert');
+  }
+
   rmSync(box, { recursive: true, force: true });
   console.log(`\nMANUELLE-SICHERUNG: ${PASS} passed, ${FAIL} failed`);
   if (FAIL > 0) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }

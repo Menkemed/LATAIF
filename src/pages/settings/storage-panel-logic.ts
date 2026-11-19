@@ -59,6 +59,7 @@ export function explainStorageCode(code: string | undefined): string {
     case 'COMPACTION_INSUFFICIENT_SPACE': return 'Not enough free disk space to reclaim safely — the compacted copy needs room alongside the current file. Nothing was changed.';
     case 'OWNER_VERIFICATION_FAILED': return 'These are not valid owner credentials. Nothing was changed.';
     case 'COMPACTION_FREE_SPACE_UNKNOWN': return 'The free disk space could not be determined, so reclaiming was not started. Nothing was changed.';
+    case 'COMPACTION_VERIFY_FAILED': return 'Safety check failed — the compacted copy did not match the database (tables, row ids or integrity). The copy was discarded; the database was not changed.';
     default: return code ? `Left untouched (${code}).` : 'Left untouched.';
   }
 }
