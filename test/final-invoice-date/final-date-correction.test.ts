@@ -1,6 +1,6 @@
 // ════════════════════════════════════════════════════════════════════════════
 // Owner 19.11.2026 — „Correct final invoice date" (nur ADMIN): abschließende Zahlung und festes Endrechnungsdatum
-// gemeinsam berichtigen; Nummer bleibt; Stichtag, eingereichte Quartale, Nummernjahr geschützt; Primary == PC2.
+// gemeinsam berichtigen; Nummer bleibt (auch über den Jahreswechsel, Owner 20.11.); Stichtag und eingereichte Quartale geschützt; Primary == PC2.
 // Echte sql.js-Datenbank (schema.sql + echte Migrationen), echte Zahlungswege (Gerüst wie final-invoice-date).
 // Run: node test/final-invoice-date/final-date-correction.test.ts
 // ════════════════════════════════════════════════════════════════════════════
@@ -136,7 +136,7 @@ function freshDb(): Db {
   applyMediaSchema(db as never);
   setTestDatabase(db as never);
   installWriteGuard(db as never);
-  for (let i = 1; i <= 12; i++) product(db, 'p' + i, 5);
+  for (let i = 1; i <= 30; i++) product(db, 'p' + i, 5);
   reload();
   tauriState.reset();
   return db;
@@ -316,17 +316,135 @@ const stand = (inv: string): string => JSON.stringify({ k: kopf(db, inv), z: zah
   db.run("DELETE FROM vat_filings WHERE id IN ('vf-q3','vf-q4')");
 }
 
-// ── K6 Jahreswechsel: die Endnummer trägt ihr Jahr, die Nummer wird nie geändert ────────────────────────────────────
+// ── K6 Jahreswechsel (Owner 20.11.): erlaubt in beide Richtungen, die Nummer bleibt; NBR/PDF/Audit folgen dem Datum ──
+const { nbrMonthTotals } = await import('../../src/core/tax/nbr-export.ts');
+const { formatInvoiceDisplayShort } = await import('../../src/core/utils/invoiceNumber.ts');
+const FIRMA = { nameEn: 'L', nameAr: 'L', crNumber: '1', vatNumber: '1', address: '', phone: '', email: '', instagram: '', terms: '' };
+/** Was der Druck zeigt: dieselben Felder wie InvoiceDetail.printInvoice (Nummer kurz, Datum = invoiceDocumentDate). */
+const druck = (inv: string): { nr: string; datum: string } => {
+  const i = storeInv(inv);
+  const d = buildInvoiceA5Data({ company: FIRMA, invoice: { number: formatInvoiceDisplayShort(i), status: i.status,
+    issuedAt: invoiceDocumentDate(i, zahlungen(db, inv)).date, createdAt: i.createdAt, grossAmount: i.grossAmount, paidAmount: i.paidAmount,
+    lines: i.lines }, customer: null, products: [], paymentMethods: [] } as never);
+  const zeile = (k: string) => String(d.invoice.find((r: [string, string]) => r[0] === k)?.[1] ?? '');
+  return { nr: zeile('Invoice No.'), datum: zeile('Date') };
+};
+/** In welchem NBR-Monatsblatt die Rechnung steht (dieselbe Auswahl wie der Export). */
+const nbrMonat = (inv: string): string => nbrMonthTotals([storeInv(inv)], new Map([[inv, zahlungen(db, inv).map((z) => ({ ...z }))]]) as never)
+  .filter((m) => m.invoiceIds.includes(inv)).map((m) => m.month).join(',');
 {
   const jahr = new Date().getFullYear();
-  const H = rechnung(`${jahr - 1}-12-20`);
-  zahle(H, 1100, `${jahr - 1}-12-28T12:00:00.000Z`);   // Endnummer heute vergeben → trägt das Jahr ${jahr}
+  const vj = jahr - 1;
+  // K6a vorwärts: bezahlt 28.12. Vorjahr (Nummer heute vergeben → trägt ${jahr}), richtig war der 02.01.
+  const H = rechnung(`${vj}-12-20`);
+  zahle(H, 1100, `${vj}-12-28T12:00:00.000Z`);
   const nr = kopf(db, H).nummer;
-  ok(new RegExp(`-${jahr}-\\d+$`).test(nr), `K6 Endnummer trägt das Vergabejahr (${nr})`);
-  ok(nein(() => korrigiere(H, `${jahr - 1}-12-27`)) === 'FINAL_DATE_NUMBER_YEAR', 'K6 neuer Tag im Vorjahr der Nummer → Nein');
-  const r = korrigiere(H, `${jahr}-01-02`);
-  ok(day(kopf(db, H).final) === `${jahr}-01-02` && kopf(db, H).nummer === nr && r.oldDate === `${jahr - 1}-12-28`,
-    `K6 über den Jahreswechsel ins Jahr der Nummer: erlaubt, Nummer bleibt (${nr}, ${kopf(db, H).final})`);
+  const pay = payIds(db, H)[0];
+  const druckVor = druck(H);
+  ok(new RegExp(`-${jahr}-\\d+$`).test(nr) && nbrMonat(H) === `${vj}-12`,
+    `K6 Ausgang: Endnummer trägt das Vergabejahr (${nr}), Datum im Vorjahr — so schon heute bei Erfassung nach dem Jahreswechsel (NBR ${nbrMonat(H)})`);
+  const r = korrigiere(H, `${jahr}-01-02`, 'customer paid on 2 January');
+  reload();
+  ok(day(kopf(db, H).final) === `${jahr}-01-02` && day(zahlungen(db, H)[0].receivedAt) === `${jahr}-01-02`
+    && kopf(db, H).nummer === nr && vergaben(db, H) === 1 && r.oldDate === `${vj}-12-28`,
+  `K6a vorwärts über den Jahreswechsel: Zahlung + Endrechnungsdatum 02.01., Nummer unverändert (${nr})`);
+  ok(JSON.stringify(lebend('PAYMENT', pay)) === JSON.stringify([`ACCOUNTS_RECEIVABLE CREDIT 1100 ${jahr}-01-02`, `CASH DEBIT 1100 ${jahr}-01-02`])
+    && JSON.stringify(gegen('PAYMENT', pay)) === JSON.stringify([`${vj}-12-28`]),
+  `K6a Hauptbuch: alte Buchung am 28.12. zurückgenommen, neu am 02.01. (${lebend('PAYMENT', pay).join(' / ')})`);
+  const dr = druck(H);
+  ok(nbrMonat(H) === `${jahr}-01` && vatFingerprint(H)?.month === `${jahr}-01` && dr.nr === druckVor.nr
+    && dr.datum === invoiceDateText(`${jahr}-01-02`) && day(invoiceDocumentDate(storeInv(H), zahlungen(db, H)).date) === `${jahr}-01-02`,
+  `K6a NBR-Blatt ${nbrMonat(H)}, VAT-Fingerabdruck, Liste/Detail und PDF (${dr.nr}, ${dr.datum}) folgen dem neuen Datum, Nummer gleich`);
+  const ed = s(db, 'SELECT new_snapshot FROM invoice_edits WHERE invoice_id = ?', [H]);
+  ok(/"crossYear":true/.test(ed) && ed.includes(`"invoiceNumber":"${nr}"`)
+    && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = ? AND field_name = 'final_issued_at' AND new_value LIKE '%\"crossYear\":true%'", [H]) === 1,
+  'K6a Protokoll kennzeichnet den Jahreswechsel (invoice_edits + Audit, mit Nummer und Grund)');
+  // K6a' und wieder zurück (Mehrfachkorrektur): nur die jüngste Buchung lebt, jede Rücknahme an ihrem Tag.
+  korrigiere(H, `${vj}-12-29`, 'second look: it was 29 December');
+  reload();
+  ok(day(kopf(db, H).final) === `${vj}-12-29` && kopf(db, H).nummer === nr && nbrMonat(H) === `${vj}-12`
+    && JSON.stringify(lebend('PAYMENT', pay)) === JSON.stringify([`ACCOUNTS_RECEIVABLE CREDIT 1100 ${vj}-12-29`, `CASH DEBIT 1100 ${vj}-12-29`])
+    && JSON.stringify(gegen('PAYMENT', pay).sort()) === JSON.stringify([`${vj}-12-28`, `${jahr}-01-02`].sort())
+    && n(db, 'SELECT COUNT(*) FROM invoice_edits WHERE invoice_id = ?', [H]) === 2,
+  `K6a' zurück ins Vorjahr: Nummer bleibt, NBR ${nbrMonat(H)}, Rücknahmen ${gegen('PAYMENT', pay).join('/')}`);
+
+  // K6b rückwärts: bezahlt 03.01. (Nummer ${jahr}), richtig war der 30.12. Vorjahr.
+  const H2 = rechnung(`${vj}-12-20`);
+  zahle(H2, 1100, `${jahr}-01-03T12:00:00.000Z`);
+  const nr2 = kopf(db, H2).nummer;
+  korrigiere(H2, `${vj}-12-30`);
+  reload();
+  ok(day(kopf(db, H2).final) === `${vj}-12-30` && day(zahlungen(db, H2)[0].receivedAt) === `${vj}-12-30` && kopf(db, H2).nummer === nr2
+    && nbrMonat(H2) === `${vj}-12` && vatFingerprint(H2)?.month === `${vj}-12` && druck(H2).datum === invoiceDateText(`${vj}-12-30`),
+  `K6b rückwärts über den Jahreswechsel: 30.12. Vorjahr, Nummer ${nr2} bleibt, NBR/PDF im Vorjahr`);
+
+  // K6c Sperren über den Jahreswechsel: Buchungsstichtag und eingereichtes Q4 des Vorjahres.
+  const H3 = rechnung(`${vj}-12-20`);
+  zahle(H3, 1100, `${jahr}-01-03T12:00:00.000Z`);
+  const vor3 = stand(H3);
+  setOpeningCutoffForTest(`${jahr}-01-01`);
+  ok(nein(() => korrigiere(H3, `${vj}-12-30`)) === 'FINAL_DATE_BEFORE_OPENING', 'K6c rückwärts vor den Buchungsstichtag (01.01.) → Nein');
+  setOpeningCutoffForTest('2025-01-01');
+  db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, invoice_count, snapshot_json, created_at)
+          VALUES ('vf-vj-q4','branch-main',?,4,?,1,'[]',?)`, [vj, `${jahr}-01-10T00:00:00.000Z`, `${jahr}-01-10T00:00:00.000Z`]);
+  ok(nein(() => korrigiere(H3, `${vj}-12-30`)) === 'VAT_PERIOD_FILED', 'K6c rückwärts in ein eingereichtes Q4 des Vorjahres → Nein');
+  ok(nein(() => korrigiere(H, `${jahr}-01-02`)) === 'VAT_PERIOD_FILED', 'K6c vorwärts AUS einem eingereichten Q4 des Vorjahres → Nein');
+  db.run("DELETE FROM vat_filings WHERE id = 'vf-vj-q4'");
+  ok(stand(H3) === vor3, 'K6c …nichts geschrieben');
+}
+
+// ── K10 Überzahlung und keine Geldzahlung → Nein ohne Schreiben ─────────────────────────────────────────────────────
+{
+  const O = rechnung('2026-11-02');
+  zahle(O, 1200, '2026-11-10T12:00:00.000Z');          // 100 zu viel → Guthaben aus der Rechnung
+  const vorO = stand(O);
+  ok(nein(() => korrigiere(O, '2026-11-08')) === 'FINAL_DATE_OVERPAID' && stand(O) === vorO, 'K10 Überzahlung (Guthaben) → Nein, nichts geschrieben');
+  const Q = rechnung('2026-11-02');
+  zahle(Q, 1100, '2026-11-10T12:00:00.000Z');
+  db.run("UPDATE payments SET method = 'credit' WHERE invoice_id = ?", [Q]);   // wie eine angerechnete Gutschrift
+  const vorQ = stand(Q);
+  ok(nein(() => korrigiere(Q, '2026-11-08')) === 'FINAL_DATE_PAYMENT_KIND' && stand(Q) === vorQ,
+    'K10 abschließende Zahlung ist eine Anrechnung (keine Geldzahlung) → Nein, nichts geschrieben');
+}
+
+// ── K11 Atomar: scheitert ein Schritt NACH dem Umbuchen, bleibt nichts zurück (Primary und PC2) ──────────────────────
+{
+  const jahr = new Date().getFullYear();
+  const T = rechnung(`${jahr - 1}-12-20`);
+  zahle(T, 1100, `${jahr - 1}-12-28T12:00:00.000Z`);
+  const pay = payIds(db, T)[0];
+  const vor = stand(T);
+  const ledgerVor = n(db, 'SELECT COUNT(*) FROM ledger_entries');
+  db.run("CREATE TEMP TRIGGER k11_boom BEFORE INSERT ON invoice_edits BEGIN SELECT RAISE(ABORT, 'k11 boom'); END");
+  ok(/k11 boom/.test(meldung(() => korrigiere(T, `${jahr}-01-02`))), 'K11 Fehler beim Protokoll (nach Zahlung + Hauptbuch) wird gemeldet');
+  reload();
+  ok(stand(T) === vor && n(db, 'SELECT COUNT(*) FROM ledger_entries') === ledgerVor && gegen('PAYMENT', pay).length === 0,
+    'K11 Primary: Zahlung, Hauptbuch, Endrechnungsdatum und Protokoll unverändert (keine Teilbuchung)');
+  let saves = 0;
+  const deps = { db: db as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => { saves += 1; }, now: () => HEUTE };
+  const ident = { commandId: '0000000b-0000-4000-8000-0000000000fd', tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test',
+    role: 'ADMIN', op: 'invoices.correct_final_date', payloadHash: 'hk11' };
+  let x: { kind?: string } = {};
+  try { x = await runFinalDateCorrection(deps as never, ident as never, { invoiceId: T, newDate: `${jahr}-01-02`, reason: 'pc2 try', expectedRevision: rev(T) }) as never; }
+  catch { x = { kind: 'thrown' }; }
+  reload();
+  ok(x.kind !== 'ok' && stand(T) === vor && n(db, 'SELECT COUNT(*) FROM ledger_entries') === ledgerVor && saves === 0,
+    `K11 PC2: Auftrag scheitert (${x.kind}), nichts gespeichert, keine Teilbuchung`);
+  db.run('DROP TRIGGER k11_boom');
+  const r = korrigiere(T, `${jahr}-01-02`);
+  ok(r.newDate === `${jahr}-01-02` && day(kopf(db, T).final) === `${jahr}-01-02`, 'K11 danach (ohne Störung) gelingt dieselbe Korrektur');
+
+  // PC2 über den Jahreswechsel (rückwärts) mit eigener Kennung.
+  const U = rechnung(`${jahr - 1}-12-20`);
+  zahle(U, 1100, `${jahr}-01-03T12:00:00.000Z`);
+  const nrU = kopf(db, U).nummer;
+  const y = await runFinalDateCorrection(deps as never, { ...ident, commandId: '0000000c-0000-4000-8000-0000000000fd', payloadHash: 'hk11b' } as never,
+    { invoiceId: U, newDate: `${jahr - 1}-12-30`, reason: 'pc2: paid 30 December', expectedRevision: rev(U) });
+  reload();
+  ok((y as { kind: string }).kind === 'ok' && day(kopf(db, U).final) === `${jahr - 1}-12-30` && kopf(db, U).nummer === nrU && saves === 1
+    && nbrMonat(U) === `${jahr - 1}-12`,
+  `K11 PC2 → Primary über den Jahreswechsel: gleiche Regeln, Nummer ${nrU} bleibt, einmal gespeichert`);
 }
 
 // ── K7 Zahlung schon über „Manage payments" umdatiert → nur das Datum zieht nach ─────────────────────────────────────

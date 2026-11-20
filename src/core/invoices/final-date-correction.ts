@@ -16,8 +16,14 @@
 //   kein ADMIN · kein Grund · alte Fassung · keine voll bezahlte Endrechnung · Tag ungültig/künftig/vor dem Rechnungstag ·
 //   die abschließende Zahlung ist nicht eindeutig oder keine Geldzahlung · eine andere Zahlung liegt nach dem neuen Tag ·
 //   Überzahlung/Guthaben aus der Rechnung · ein betroffener Tag vor dem Buchungsstichtag oder in einem eingereichten bzw.
-//   VAT-bezahlten Quartal · die Endnummer trägt ein anderes Jahr als der neue Tag (die Nummer wird nie geändert).
+//   VAT-bezahlten Quartal.
 // Keine Massenkorrektur: genau eine Rechnung je Auftrag.
+//
+// Owner 20.11.2026 — Jahreswechsel erlaubt. Die Endnummer (`INV-2026-000009`) trägt das Jahr ihrer VERGABE (Uhrzeit der
+// Erfassung), nicht das Jahr des Endrechnungsdatums: der Zähler je Kreis läuft über die Jahre durch (`document_sequences`
+// ohne Jahreswechsel), die Anzeige „No: 000009" ist deshalb in jedem Jahr eindeutig, und eine Zahlung vom 31.12., erfasst
+// am 02.01., ergibt schon heute `INV-<neues Jahr>-…` mit Datum im alten Jahr. Die Nummer bleibt also unverändert; der
+// NBR-Export führt die Rechnung im Jahr/Quartal ihres (neuen) Endrechnungsdatums. Beide Quartale (alt und neu) werden geprüft.
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
@@ -47,7 +53,6 @@ export const FINAL_DATE_PAYMENT_KIND = 'FINAL_DATE_PAYMENT_KIND';
 export const FINAL_DATE_LATER_PAYMENT = 'FINAL_DATE_LATER_PAYMENT';
 export const FINAL_DATE_OVERPAID = 'FINAL_DATE_OVERPAID';
 export const FINAL_DATE_BEFORE_OPENING = 'FINAL_DATE_BEFORE_OPENING';
-export const FINAL_DATE_NUMBER_YEAR = 'FINAL_DATE_NUMBER_YEAR';
 export const FINAL_DATE_NO_LEDGER = 'FINAL_DATE_NO_LEDGER';
 export const FINAL_DATE_CHANGED = 'INVOICE_CHANGED';
 export const FINAL_DATE_VAT_PERIOD_FILED = 'VAT_PERIOD_FILED';
@@ -161,14 +166,7 @@ function plan(input: FinalDateInput, ctx: FinalDateCtx): Plan {
       `no payment is dated ${oldDate} (the payments were changed after the invoice was completed) — the final invoice date can only follow the completing payment, dated ${latest}. Nothing was changed.`);
   }
 
-  // Die Endnummer wird nie geändert. Trägt sie ein Jahr, muss der neue Tag in diesem Jahr liegen (NBR zeigt die Nummer).
-  const nummer = String(inv.invoice_number ?? '');
-  const jahr = /-(\d{4})-\d+$/.exec(nummer)?.[1];
-  if (jahr && newDate.slice(0, 4) !== jahr) {
-    throw nein(FINAL_DATE_NUMBER_YEAR,
-      `the final number ${nummer} carries the year ${jahr} — a final invoice date in ${newDate.slice(0, 4)} would not match it, and the number is never changed. Nothing was changed.`);
-  }
-
+  // Die Endnummer wird nie geändert — auch nicht über den Jahreswechsel (siehe Kopf: sie trägt das Vergabejahr).
   // Buchungsstichtag und geschlossene Quartale: der alte Tag (die Rücknahme steht dort), der neue Tag (Zahlung und Endrechnung).
   const stichtag = accountingOpeningDate();
   const zu = closedVatQuarters(ctx.branchId);
@@ -208,6 +206,7 @@ export function correctFinalInvoiceDateInHouse(input: FinalDateInput, ctx: Final
   const vorher = vatFingerprint(invoiceId);
   const altFinal = (p.inv.final_issued_at as string | null) ?? null;
   const neuFinal = businessTimestamp(p.newDate, ctx.now);
+  const crossYear = p.oldDate.slice(0, 4) !== p.newDate.slice(0, 4);
 
   let paymentId: string | null = null;
   let altZahlung: string | null = null;
@@ -234,14 +233,15 @@ export function correctFinalInvoiceDateInHouse(input: FinalDateInput, ctx: Final
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [editId, ctx.branchId, invoiceId, edRev, p.reason,
       JSON.stringify({ kind: 'FINAL_DATE', finalIssuedAt: altFinal, finalDate: p.oldDate, payment: paymentId ? { id: paymentId, receivedAt: altZahlung } : null }),
-      JSON.stringify({ kind: 'FINAL_DATE', finalIssuedAt: neuFinal, finalDate: p.newDate, payment: paymentId ? { id: paymentId, receivedAt: neuFinal } : null }),
+      JSON.stringify({ kind: 'FINAL_DATE', finalIssuedAt: neuFinal, finalDate: p.newDate, payment: paymentId ? { id: paymentId, receivedAt: neuFinal } : null,
+        invoiceNumber: String(p.inv.invoice_number ?? ''), crossYear }),
       ctx.userId || null, ctx.now],
   );
   trackChange('invoice_edits', editId, 'insert', {});
   logAuditOrThrow({
     module: 'Sales', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE', field: 'final_issued_at',
     oldValue: { finalDate: p.oldDate, finalIssuedAt: altFinal },
-    newValue: { finalDate: p.newDate, finalIssuedAt: neuFinal, reason: p.reason, invoiceNumber: String(p.inv.invoice_number ?? ''),
+    newValue: { finalDate: p.newDate, finalIssuedAt: neuFinal, reason: p.reason, invoiceNumber: String(p.inv.invoice_number ?? ''), crossYear,
       paymentMoved: paymentId ? { paymentId, from: altZahlung, to: neuFinal } : null },
     actor: { branchId: ctx.branchId, userId: ctx.userId },
   });

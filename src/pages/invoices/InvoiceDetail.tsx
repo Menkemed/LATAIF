@@ -1555,7 +1555,7 @@ export function InvoiceDetail() {
           data-final-date-reason onChange={e => setFinalDateReason(e.target.value)} />
         <div style={{ fontSize: 11, color: '#6B7280', margin: '10px 0 16px' }}>
           Refused (nothing changes) if a day lies before the accounting opening date or in a filed/paid VAT quarter, if the completing
-          payment is not unique, or if the final number carries another year.
+          payment is not unique. The invoice number never changes, also across the year end.
         </div>
         <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
