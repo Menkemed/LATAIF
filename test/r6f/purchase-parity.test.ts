@@ -475,7 +475,8 @@ marker('CENTRAL_UI_R6F_PURCHASE_RETURN_VARIANTS_PROVED');
     ['fremde Zeile', { lines: [{ purchaseLineId: fremdeZeile, quantity: 1, unitPrice: 100 }] }, 'PURCHASE_RETURN_LINE_UNKNOWN'],
     ['doppelte Zeile', { lines: [{ purchaseLineId: w.lA, quantity: 1, unitPrice: 500 }, { purchaseLineId: w.lA, quantity: 1, unitPrice: 500 }] }, 'PURCHASE_RETURN_LINE_DUPLICATE'],
     ['Summe 0', { lines: [{ purchaseLineId: w.lA, quantity: 1, unitPrice: 0 }] }, 'PURCHASE_RETURN_TOTAL_INVALID'],
-    ['mehr als der Einkauf', { lines: [{ purchaseLineId: w.lA, quantity: 1, unitPrice: 5000 }] }, 'PURCHASE_RETURN_EXCEEDS_PURCHASE'],
+    // Owner 19.11.2026 (A1) — über dem Einkaufspreis ohne Zusatzkosten ist ein Gewinn: die klare Meldung kommt zuerst.
+    ['mehr als der Einkauf', { lines: [{ purchaseLineId: w.lA, quantity: 1, unitPrice: 5000 }] }, 'PURCHASE_RETURN_GAIN_UNSUPPORTED'],
   ];
   let i = 410;
   for (const [was, over, code] of faelle) {

@@ -191,8 +191,8 @@ const LEGACY_MODULES = [
   await import('../../src/core/bridge/financial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 45 && reads.length === 20 && known.includes('bridge.probe'),
-    `REGISTRY 1 Probe + 20 Reads + 24 Mutationen (${known.join(', ')})`);
+  ok(known.length === 46 && reads.length === 20 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 20 Reads + 25 Mutationen (Owner 19.11.2026: + invoices.correct_final_date) (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
   // R7B PP-7 — die Pruefung „das alte Formular ruft keine fremde Mutation" ist mit ihm entfernt.
