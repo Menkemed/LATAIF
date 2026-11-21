@@ -17,6 +17,7 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { exportCsv } from '@/core/utils/export-file';
 import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-export';
 import { invoiceDocumentDate } from '@/core/invoices/invoice-document-date';
+import { sortInvoicesByDisplayedDate } from '@/core/invoices/invoice-list-order';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
@@ -197,8 +198,10 @@ export function InvoiceList() {
         return matchesDeep(inv, searchQuery, [customer, ...lineProducts]);
       });
     }
-    return r;
-  }, [invoices, filterStatus, searchQuery, customers, products, customerFilter, staffFilter, getInvoiceReturnSummary]);
+    // Nach dem Datum, das die Zeile zeigt (Endrechnung: Endrechnungsdatum), neueste zuerst — für jeden Filter.
+    // Dieselben Zahlungen wie die Datumsspalte, damit Anzeige und Reihenfolge nie auseinanderlaufen.
+    return sortInvoicesByDisplayedDate(r, (invId) => nbrPaymentsByInvoice.get(invId));
+  }, [invoices, filterStatus, searchQuery, customers, products, customerFilter, staffFilter, getInvoiceReturnSummary, nbrPaymentsByInvoice]);
 
   const acceptedOffers = useMemo(() => offers.filter(o => o.status === 'accepted'), [offers]);
 
