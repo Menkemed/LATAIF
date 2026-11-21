@@ -84,7 +84,8 @@ type Line = MixIn['ownLines'][number];
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
-const src = (p: string): string => readFileSync(resolvePath(repo, p), 'utf8');
+// Zeilenenden vereinheitlichen (Windows-Checkout mit core.autocrlf liefert CRLF; `git show` liefert LF).
+const src = (p: string): string => readFileSync(resolvePath(repo, p), 'utf8').replace(/\r\n/g, '\n');
 const S = (v: unknown): string => JSON.stringify(v);
 const NOW = '2026-11-07T10:00:00.000Z';
 const HEUTE = todayIso();

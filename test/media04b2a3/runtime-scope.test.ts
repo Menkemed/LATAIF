@@ -141,8 +141,9 @@ function evidence(over: Partial<RuntimeScopeEvidence> = {}): RuntimeScopeEvidenc
 {
   // strip comments so the "we deliberately avoid X" prose doesn't count as a usage of X.
   const strip = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-  const dlgRaw = readFileSync(join(repo, 'src/pages/settings/RuntimeScopeDialog.tsx'), 'utf8');
-  const wrapRaw = readFileSync(join(repo, 'src/core/sync/runtime-scope-provisioning.ts'), 'utf8');
+  // Zeilenenden vereinheitlichen, sonst entfernt `strip` (Zeile für Zeile) unter CRLF keine Kommentare.
+  const dlgRaw = readFileSync(join(repo, 'src/pages/settings/RuntimeScopeDialog.tsx'), 'utf8').replace(/\r\n/g, '\n');
+  const wrapRaw = readFileSync(join(repo, 'src/core/sync/runtime-scope-provisioning.ts'), 'utf8').replace(/\r\n/g, '\n');
   const dlg = strip(dlgRaw), wrap = strip(wrapRaw), both = dlg + '\n' + wrap;
   // dedicated modal, not window.prompt/confirm as the protection layer
   ok(/<Modal/.test(dlg) && /type="password"/.test(dlg), 'a dedicated modal with a masked password input');

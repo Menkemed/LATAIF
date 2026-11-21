@@ -137,7 +137,8 @@ for (const [was, attrs, scope, grund] of GESPERRT) {
 }
 {
   const alteGeometrie = altQuelle.slice(altQuelle.indexOf('const FONT'), altQuelle.indexOf('const ZPL_FOOT'));
-  const neu = readFileSync(join(repo, 'src/core/print/zpl-tag.ts'), 'utf8');
+  // Zeilenenden vereinheitlichen: die alte Fassung kommt aus `git show` (LF), der Checkout kann CRLF haben.
+  const neu = readFileSync(join(repo, 'src/core/print/zpl-tag.ts'), 'utf8').replace(/\r\n/g, '\n');
   ok(alteGeometrie.length > 100 && neu.includes(alteGeometrie), 'ZPL gelockte Geometrie (Font, 17 Zeichen, Pads, Kopf) wörtlich unverändert');
 }
 

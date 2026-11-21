@@ -12,7 +12,8 @@ const m = await import('../../src/core/ui/list-nav-memory.ts');
 let PASS = 0;
 const fails: string[] = [];
 const ok = (c: unknown, msg: string): void => { if (c) PASS++; else { fails.push(msg); console.log('  x ' + msg); } };
-const src = (p: string): string => readFileSync(join(repo, p), 'utf8');
+// Zeilenenden vereinheitlichen (Windows-Checkout mit core.autocrlf liefert CRLF; die Muster prüfen Zeilen mit \n).
+const src = (p: string): string => readFileSync(join(repo, p), 'utf8').replace(/\r\n/g, '\n');
 const S = JSON.stringify;
 
 // ── Speicher je Verlaufsschritt ────────────────────────────────────────────
