@@ -421,8 +421,10 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
     'A0 die Hausregel selbst nimmt weiter kein Altbild an (der Umzug läuft davor)');
   ok(JSON.stringify(M.legacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [
     { productId: 'alt-1', expectedUpdatedAt: NOW }, { productId: 'alt-verkauft', expectedUpdatedAt: NOW }, { productId: a, expectedUpdatedAt: upd(db7, a) },
-    { productId: 'alt-kaputt', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' }] }, CTX)) === JSON.stringify(['alt-1']),
-    'A1 umgezogen wird nur, was der Merge anfasst: verfügbar, Stand stimmt, mit Altbildern (nicht verkauft, nicht veraltet)');
+    { productId: 'alt-kaputt', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' }] }, CTX)) === '[]'
+    && JSON.stringify(M.legacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [
+      { productId: 'alt-1', expectedUpdatedAt: NOW }, { productId: 'alt-kaputt', expectedUpdatedAt: NOW }] }, CTX)) === JSON.stringify(['alt-1', 'alt-kaputt']),
+    'A1 umgezogen wird nur, wenn der Merge abgesehen vom Altformat gelingt (mit verkauftem/veraltetem Ziel: nichts), und nur Altbild-Ziele');
   ok(M.legacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] }, { ...CTX, role: 'ACCOUNTANT' }).length === 0
     && M.legacyMergeTargets({ modelKey: key, restore: [{ productId: 'alt-1', mediaIds: [], expectedUpdatedAt: NOW }] }, CTX).length === 0,
     'A2 ohne products.edit und bei Rückgängig wird nichts umgezogen');
@@ -464,6 +466,84 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
     'A11 Freigabe: nur das gelöste (umgezogene) Altbild ist Kandidat — nie das gemeinsame, nie noch verknüpfte');
   ok(await convertLegacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: upd(db7, 'alt-1') }] }, CTX, false).then((x) => x.length) === 0,
     'A12 ein schon umgezogener Artikel wird nicht erneut umgezogen');
+}
+
+// ── 12 Grenzfall: Umzug gelungen, Merge scheitert danach oder wird wiederholt (Primary und PC2) ──────────────────────
+{
+  const { convertLegacyMergeTargets, mergeModelPhotosOnPrimary } = await import('../../src/core/products/product-models-primary.ts');
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  useAuthStore.setState({ session: { ...(useAuthStore.getState().session ?? {}), role: 'ADMIN', branchId: 'branch-main', userId: 'user-test' } } as never);
+  const db8 = freshDb();
+  const a = await variant(db8, '16', 81); const b = await variant(db8, '17', 82);
+  const pickA = gallery(a)[0]; const ownB = gallery(b)[0];
+  const alt = (id: string, size: string, n: number, status = 'in_stock'): void => {
+    db8.run(`INSERT INTO products (id, branch_id, category_id, brand, name, purchase_price, stock_status, source_type, attributes, images, created_at, updated_at)
+             VALUES (?,'branch-main','cat-bgj','Cartier','Love Bracelet',2500,?,'OWN',?,?,?,?)`,
+      [id, status, JSON.stringify({ item_type: 'Bracelet', size }), JSON.stringify(Array.from({ length: n }, (_, i) => url(bild(90 + i + size.length * 7)))), NOW, NOW]);
+  };
+  alt('g-1', '18', 2); alt('g-2', '19', 1); alt('g-verkauft', '20', 1, 'sold');
+  const { modelKey: key } = M.groupProductsInHouse({ productIds: [a, b, 'g-1', 'g-2', 'g-verkauft'] }, CTX);
+  const imagesOf = (id: string): string => String(one(db8, 'SELECT images FROM products WHERE id = ?', [id]));
+  const audits = (): number => n(db8, "SELECT COUNT(*) FROM audit_log WHERE field_name = 'gallery'");
+  const deps8 = { db: db8 as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => '2026-11-23T22:00:00.000Z' };
+  const id8 = (x: string) => ({ commandId: `${x.padStart(8, '0')}-0000-4000-8000-000000000081`, tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'SALES', op: cmd.OP_PRODUCT_MODELS_MERGE_PHOTOS, payloadHash: 'hg' + x });
+  const g1Vor = imagesOf('g-1'), o0 = objects(db8), f0 = files(db8), au0 = audits(), bVor = gallery(b).join();
+
+  // (a) Merge wird ABGELEHNT (zweites Ziel veraltet / verkauft) → der Umzug läuft gar nicht erst
+  const r1 = await cmd.runModelMergePhotos(deps8 as never, id8('801'), { modelKey: key, pickMediaId: pickA, detachOld: false,
+    targets: [{ productId: 'g-1', expectedUpdatedAt: NOW }, { productId: b, expectedUpdatedAt: '2000-01-01T00:00:00.000Z' }] });
+  ok(r1.kind === 'rejected' && (r1 as { code?: string }).code === 'PRODUCT_RECORD_CHANGED' && (r1 as { frozen?: boolean }).frozen === true,
+    `K1 PC2: Merge mit veraltetem zweitem Ziel abgelehnt — der echte Grund, eingefroren (${(r1 as { code?: string }).code})`);
+  ok(imagesOf('g-1') === g1Vor && gallery('g-1').length === 0 && objects(db8) === o0 && files(db8) === f0 && audits() === au0,
+    'K2 …und das Altbild wurde NICHT umgezogen: Artikel, Medien, Dateien, Audit unverändert');
+  let code = '';
+  try { await mergeModelPhotosOnPrimary({ modelKey: key, pickMediaId: pickA, detachOld: false,
+    targets: [{ productId: 'g-1', expectedUpdatedAt: NOW }, { productId: 'g-verkauft', expectedUpdatedAt: NOW }] }); } catch (e) { code = (e as { code?: string }).code ?? String(e); }
+  ok(code === 'MODEL_PHOTO_SOLD' && imagesOf('g-1') === g1Vor && imagesOf('g-verkauft') !== '[]' && objects(db8) === o0,
+    `K3 Primary: Merge mit verkauftem Ziel abgelehnt (${code}) — nichts umgezogen, verkaufter Artikel unberührt`);
+
+  // (b) Umzug GELINGT, der Merge scheitert DANACH (hier: das gewählte Bild wird zwischen beiden Schritten unbrauchbar)
+  const req = { modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'g-1', expectedUpdatedAt: NOW }] };
+  const ohneBilder = (id: string): string => {
+    const r = db8.exec('SELECT * FROM products WHERE id = ?', [id])[0];
+    return JSON.stringify(r.columns.map((c, i) => [c, r.values[0][i]]).filter(([c]) => c !== 'images'));
+  };
+  const g1Zeile = ohneBilder('g-1');
+  ok(JSON.stringify(await convertLegacyMergeTargets(req, CTX, false)) === '["g-1"]', 'K4 Schritt 1: Umzug gelungen');
+  const umgezogen = gallery('g-1');
+  const o1 = objects(db8), f1 = files(db8);
+  ok(imagesOf('g-1') === '[]' && umgezogen.length === 2 && o1 === o0 + 2 && upd(db8, 'g-1') === NOW,
+    'K5 …beide Altbilder in Reihenfolge im Bildspeicher, je eines neu, der Stand des Artikels (updated_at) unverändert');
+  db8.run('UPDATE media_objects SET deleted_at = ? WHERE media_id = ?', ['2026-11-23T22:01:00.000Z', pickA]);   // Bild inzwischen freigegeben
+  const r2 = await cmd.runModelMergePhotos(deps8 as never, id8('802'), req);
+  ok(r2.kind === 'rejected' && (r2 as { code?: string }).code === 'MODEL_PHOTO_NOT_READY',
+    `K6 Schritt 2 (PC2): Merge scheitert danach (${(r2 as { code?: string }).code})`);
+  ok(gallery('g-1').join() === umgezogen.join() && imagesOf('g-1') === '[]' && objects(db8) === o1 && files(db8) === f1,
+    'K7 kein Bildverlust: der Artikel zeigt seine umgezogenen Bilder, nichts Neues angelegt');
+  ok(ohneBilder('g-1') === g1Zeile,
+    'K8 an der Artikelzeile änderte sich nur das Ablageformat der Bilder (images → Bildspeicher): jede andere Spalte byte-gleich');
+  ok(audits() === au0 && gallery(a).join() === pickA && gallery(b).join() === bVor && n(db8, 'SELECT COUNT(*) FROM product_models WHERE model_key = ?', [key]) === 5,
+    'K9 keine fremde Referenz berührt: Audit, Galerien von A und B, Gruppierung unverändert');
+  let codeP = '';
+  try { await mergeModelPhotosOnPrimary(req); } catch (e) { codeP = (e as { code?: string }).code ?? String(e); }
+  ok(codeP === 'MODEL_PHOTO_NOT_READY' && objects(db8) === o1 && gallery('g-1').join() === umgezogen.join(), `K10 Primary: derselbe Fall ebenso (${codeP}), kein zweiter Umzug`);
+
+  // (c) Wiederholung: dieselbe Kennung = eingefrorenes Ergebnis; nach Behebung ein neuer Auftrag — ohne zweiten Umzug
+  const r3 = await cmd.runModelMergePhotos(deps8 as never, id8('802'), req);
+  ok(r3.kind === 'rejected' && (r3 as { replayed?: boolean }).replayed === true && objects(db8) === o1 && files(db8) === f1,
+    'K11 PC2-Wiederholung derselben Kennung: dieselbe Antwort, kein neues Medium, keine neue Datei');
+  db8.run('UPDATE media_objects SET deleted_at = NULL WHERE media_id = ?', [pickA]);
+  const r4 = await cmd.runModelMergePhotos(deps8 as never, id8('803'), req);
+  ok(r4.kind === 'ok' && gallery('g-1').join() === [pickA, ...umgezogen].join() && objects(db8) === o1 && files(db8) === f1,
+    'K12 PC2: neuer Auftrag gelingt — gemeinsames Bild vorn, die umgezogenen dahinter; KEIN zweiter Umzug, keine Doppel-Datei');
+  const pr = await mergeModelPhotosOnPrimary({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'g-2', expectedUpdatedAt: NOW }] });
+  const again = await convertLegacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'g-2', expectedUpdatedAt: upd(db8, 'g-2') }] }, CTX, false);
+  ok(pr.products.length === 1 && gallery('g-2').length === 2 && objects(db8) === o1 + 1 && again.length === 0,
+    'K13 Primary: Umzug + Merge in einem Zug; ein erneuter Aufruf zieht nicht noch einmal um (+1 Medium für 1 Altbild)');
+  ok(n(db8, `SELECT COUNT(*) FROM media_links WHERE media_id = ? AND deleted_at IS NULL`, [pickA]) === 3
+    && umgezogen.every((m) => n(db8, `SELECT COUNT(*) FROM media_links WHERE media_id = ? AND deleted_at IS NULL`, [m]) === 1),
+    'K14 Referenzen konsistent: gemeinsames Bild an A, g-1, g-2; jedes umgezogene Bild genau einmal verknüpft');
 }
 
 console.log(`\nmodel-photos: ${PASS} passed, ${fails.length} failed`);

@@ -385,7 +385,7 @@ function mediaLinkable(mediaId: string, branchId: string): boolean {
 
 interface PhotoStep { productId: string; previous: string[]; next: string[] }
 
-function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx): PhotoStep[] {
+function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx, opts: { legacyOk?: boolean } = {}): PhotoStep[] {
   assertMayEdit(ctx);
   const key = String(input.modelKey ?? '');
   const members = key ? membersOf(key) : [];
@@ -411,17 +411,16 @@ function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx): PhotoSt
   }
   const seen = new Set<string>();
   const steps: PhotoStep[] = [];
+  // Das Altformat wird ZULETZT geprüft (nach allen anderen Regeln für ALLE Ziele): so nennt eine Ablehnung den echten
+  // Grund, und der Vorab-Umzug (legacyMergeTargets) läuft nur, wenn der Merge abgesehen davon gelingen würde.
+  let altformat: string | null = null;
   for (const req of requests) {
     if (seen.has(req.productId)) nein('MODEL_PHOTO_DUPLICATE', 'An item is listed twice.');
     seen.add(req.productId);
     if (!members.includes(req.productId)) nein('MODEL_PHOTO_NOT_MEMBER', 'An item is not part of this model.');
     const r = rows.get(req.productId)!;
     if (!mayChangeVariantPhoto(String(r.stock_status ?? ''))) nein('MODEL_PHOTO_SOLD', `${String(r.name ?? req.productId)}: sold or closed items keep their photos.`);
-    if (legacyImages(r.images) > 0) {
-      // Der Umzug in den Bildspeicher läuft VOR dieser Transaktion (convertLegacyMergeTargets); hier kommt ein Altbild nur
-      // an, wenn er nicht laufen durfte (z. B. veralteter Stand) — dann ändert dieser Merge nichts.
-      nein('MODEL_PHOTO_LEGACY', `${String(r.name ?? req.productId)}: photos are still in the old format — reload and try again (they are moved to the photo storage first).`);
-    }
+    if (legacyImages(r.images) > 0 && altformat === null) altformat = String(r.name ?? req.productId);
     if (String(r.updated_at ?? '') !== req.expectedUpdatedAt) {
       nein('PRODUCT_RECORD_CHANGED', `${String(r.name ?? req.productId)} was changed in the meantime — reload and try again.`);
     }
@@ -444,6 +443,11 @@ function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx): PhotoSt
       for (const m of next) if (m !== pick && !mediaLinkable(m, ctx.branchId)) nein('MODEL_PHOTO_NOT_READY', 'A current photo of this item is not ready.');
     }
     steps.push({ productId: req.productId, previous, next });
+  }
+  if (altformat !== null && !opts.legacyOk) {
+    // Der Umzug in den Bildspeicher läuft VOR dieser Transaktion (convertLegacyMergeTargets); hier kommt ein Altbild nur
+    // an, wenn er nicht laufen durfte oder scheiterte — dann ändert dieser Merge nichts.
+    nein('MODEL_PHOTO_LEGACY', `${altformat}: photos are still in the old format — reload and try again (they are moved to the photo storage first).`);
   }
   return steps;
 }
@@ -469,6 +473,10 @@ export function legacyMergeTargets(input: MergePhotosInput, ctx: ProductModelCtx
     if (String(r.updated_at ?? '') !== String(t.expectedUpdatedAt ?? '')) continue;
     if (legacyImages(r.images) > 0 && !out.includes(String(r.id))) out.push(String(r.id));
   }
+  if (out.length === 0) return [];
+  // Nur umziehen, wenn der Merge abgesehen vom Altformat gelingen würde (alle Ziele, Bildwahl, Stände, Bereitschaft) —
+  // ein ohnehin abgelehnter Merge ändert so auch am Altbild nichts; die Ablehnung kommt dann aus der Hausregel.
+  try { planMergePhotos(input, ctx, { legacyOk: true }); } catch { return []; }
   return out;
 }
 
