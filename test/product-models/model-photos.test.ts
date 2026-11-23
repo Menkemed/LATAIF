@@ -290,5 +290,74 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
     `R3 Rückgängig nach der Freigabe: sauberes Nein, nichts halb geändert (${code})`);
 }
 
+// ── 9 Offene Bearbeitungsmaske am PRIMARY mit Galerie von VOR dem Merge (letzter Sicherheitsfix) ────────────────
+// Die Maske übergibt, welche Galerie sie gesehen hat (`resolved`). Weicht die gespeicherte Galerie davon ab, wird nichts
+// gespeichert — kein Bild gelöst, keine neue Datei, kein Text. Der reine Textweg berührt Bilder ohnehin nie.
+{
+  const { MEDIA_EDIT_GALLERY_BASELINE_CHANGED } = await import('../../src/stores/productStore.ts');
+  const st = useProductStore.getState();
+  const db5 = freshDb();
+  const a = await variant(db5, '16', 51); const b = await variant(db5, '17', 52);
+  const { modelKey: key } = M.groupProductsInHouse({ productIds: [a, b] }, CTX);
+  const pickA = gallery(a)[0]; const ownB = gallery(b)[0];
+  const gesehen = [{ url: 'blob:alt-ownB', mediaId: ownB }];   // so hat die Maske B geöffnet
+  M.mergeModelPhotosInHouse({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: b, expectedUpdatedAt: upd(db5, b) }] },
+    { ...CTX, now: '2026-11-23T14:00:00.000Z' });
+  ok(gallery(b).join() === [pickA, ownB].join(), 'S0 Merge am PC2: B hat jetzt das gemeinsame Bild vorn, das eigene dahinter');
+  const f1 = files(db5), o1 = objects(db5);
+  const preis = (): number => Number(one(db5, 'SELECT planned_sale_price FROM products WHERE id = ?', [b]) ?? 0);
+  const preis0 = preis();
+  const istKonflikt = (r: unknown): boolean => (r as { status?: string }).status === 'edit_conflict' && (r as { errorCode?: string }).errorCode === MEDIA_EDIT_GALLERY_BASELINE_CHANGED;
+
+  const s1 = await st.editProductWithMedia(b, {} as never, { srcs: ['blob:alt-ownB', url(bild(53))], resolved: gesehen, status: 'media' });
+  ok(istKonflikt(s1), `S1 Foto hinzufügen auf altem Stand: Konflikt statt Speichern (${JSON.stringify(s1)})`);
+  ok(gallery(b).join() === [pickA, ownB].join() && gallery(a).join() === pickA, 'S2 das gemeinsame Bild bleibt an beiden Varianten');
+  ok(files(db5) === f1 && objects(db5) === o1, `S3 keine neue Datei, kein neues Medienobjekt (${files(db5)}/${f1}, ${objects(db5)}/${o1})`);
+  const s2 = await st.editProductWithMedia(b, {} as never, { srcs: [], resolved: gesehen, status: 'media' });
+  ok(istKonflikt(s2) && gallery(b).join() === [pickA, ownB].join(), 'S4 Foto entfernen auf altem Stand: abgewiesen, nichts gelöst');
+  const s3 = await st.editProductWithMedia(b, { plannedSalePrice: 7777 } as never, { srcs: ['blob:alt-ownB', url(bild(53))], resolved: gesehen, status: 'media' });
+  ok(istKonflikt(s3) && preis() === preis0, 'S5 Text und Foto gehen zusammen: auch der Preis wird nicht gespeichert');
+  const t = await st.editProductTextDurably(b, { plannedSalePrice: 4444 } as never);
+  ok(t.status === 'edited' && preis() === 4444 && gallery(b).join() === [pickA, ownB].join() && gallery(a).join() === pickA,
+    'S6 reiner Textweg aus derselben Maske: Preis gespeichert, Bilder unberührt (wie bisher)');
+
+  // Neu geladen: der Entwurf stammt aus der ECHTEN Galerie → Speichern klappt, das gemeinsame Bild bleibt verknüpft.
+  const frisch = gallery(b).map((m, i) => ({ url: `blob:neu-${i}`, mediaId: m }));
+  const s4 = await st.editProductWithMedia(b, {} as never, { srcs: [...frisch.map((x) => x.url), url(bild(53))], resolved: frisch, status: 'media' });
+  ok(s4.status === 'edited' && gallery(b).length === 3 && gallery(b)[0] === pickA && gallery(b)[1] === ownB,
+    `S7 nach dem Neuladen: Foto hinzugefügt, gemeinsames und eigenes Bild bleiben (${JSON.stringify(s4)})`);
+  ok(gallery(a).join() === pickA && n(db5, 'SELECT COUNT(*) FROM media_links WHERE media_id = ? AND deleted_at IS NULL', [pickA]) === 2,
+    'S8 die andere Variante unverändert; ein Medium, zwei aktive Verweise');
+
+  // Nur die Reihenfolge geändert (gleiche Bilder): auch das ist eine andere Galerie.
+  const g3 = gallery(b);
+  const r1 = await st.editProductWithMedia(b, {} as never, {
+    srcs: ['blob:r-1', 'blob:r-0', 'blob:r-2'], resolved: g3.map((m, i) => ({ url: `blob:r-${i}`, mediaId: m })), status: 'media' });
+  ok(r1.status === 'edited' && gallery(b).join() === [g3[1], g3[0], g3[2]].join(), 'S9 Umsortieren auf aktuellem Stand klappt');
+  const r2 = await st.editProductWithMedia(b, {} as never, { srcs: g3.map((_, i) => `blob:o-${i}`).slice(1), resolved: g3.map((m, i) => ({ url: `blob:o-${i}`, mediaId: m })), status: 'media' });
+  ok(istKonflikt(r2) && gallery(b).join() === [g3[1], g3[0], g3[2]].join(), 'S10 Entwurf mit der alten Reihenfolge: Konflikt, nichts geändert');
+
+  // Artikel OHNE Foto bekommt per Merge das gemeinsame Bild — die Maske war mit leerer Galerie offen.
+  const c = await st.createProductWithMedia(
+    { categoryId: 'cat-bgj', brand: 'Cartier', name: 'Love Bracelet', sku: '', taxScheme: 'MARGIN', attributes: { item_type: 'Bracelet', size: '18' }, purchasePrice: 2500 } as never);
+  const cId = (c as { productId?: string }).productId ?? '';
+  M.groupProductsInHouse({ productIds: [cId], modelKey: key }, CTX);
+  ok(gallery(cId).length === 0, 'S11 Variante ohne Foto');
+  M.mergeModelPhotosInHouse({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: cId, expectedUpdatedAt: upd(db5, cId) }] },
+    { ...CTX, now: '2026-11-23T14:30:00.000Z' });
+  const s5 = await st.editProductWithMedia(cId, {} as never, { srcs: [url(bild(54))], resolved: [], status: 'none' });
+  ok(istKonflikt(s5) && gallery(cId).join() === pickA, 'S12 Maske mit leerer Galerie von vorher: Konflikt, das gemeinsame Bild bleibt');
+
+  // Gegenprobe: der PC2-Weg (`products.update` mit Galerie, gerechnet gegen die echte Galerie) läuft unverändert.
+  const productCmd = await import('../../src/core/bridge/product-commands.ts');
+  const deps5 = { db: db5 as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => '2026-11-23T15:00:00.000Z' };
+  const pc2 = await productCmd.runProductUpdate(deps5 as never,
+    { commandId: '00000091-0000-4000-8000-000000000002', tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'SALES', op: 'products.update', payloadHash: 'h91' } as never,
+    { id: cId, expectedUpdatedAt: upd(db5, cId), gallery: [{ keep: pickA }], plannedSalePrice: 5555 });
+  ok(pc2.kind === 'ok' && gallery(cId).join() === pickA && Number(one(db5, 'SELECT planned_sale_price FROM products WHERE id = ?', [cId])) === 5555,
+    `S13 PC2-Galeriespeichern auf aktuellem Stand unverändert erfolgreich (${pc2.kind})`);
+}
+
 console.log(`\nmodel-photos: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

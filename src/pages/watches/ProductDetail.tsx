@@ -14,7 +14,7 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
-import { useProductStore, type EditProductResult } from '@/stores/productStore';
+import { useProductStore, MEDIA_EDIT_GALLERY_BASELINE_CHANGED, type EditProductResult } from '@/stores/productStore';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 // CENTRAL-UI-PARITY R6F — der Bildweg auf PC2: Plätze aus dem Entwurf, neue Fotos über die Ablage.
 import { planRemoteGallery, GalleryPlanError } from '@/core/products/gallery-plan';
@@ -551,6 +551,18 @@ export function ProductDetail() {
       // Legacy cut over durably → re-resolve to the now-materialised media
       // gallery; keep the editor open so the user edits it as media next.
       setMediaReloadNonce(n => n + 1);
+      return;
+    }
+    if (res.status === 'edit_conflict' && res.errorCode === MEDIA_EDIT_GALLERY_BASELINE_CHANGED) {
+      // ARTIKELVARIANTEN — die Fotos wurden inzwischen woanders geändert (z. B. „Merge photos" am PC2). Nichts ist
+      // gespeichert. Artikel und Galerie werden neu geladen; die Fotos bleiben gesperrt, bis der Entwurf wieder aus der
+      // ECHTEN Galerie stammt — sonst würde derselbe Klick erneut auf dem alten Stand beruhen.
+      setImagesDirty(false);
+      setDraftSeeded(false);
+      setMediaReloadNonce(n => n + 1);
+      loadProducts();
+      setErrors(e => ({ ...e, _media: 'The photos of this item were changed in the meantime (for example with “Merge photos” on another computer). '
+        + 'Nothing was saved. The item has been reloaded with its current photos and data — please make your changes again.' }));
       return;
     }
     // blocked / incomplete / conflict → NO refresh; editor stays OPEN, draft

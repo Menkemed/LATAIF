@@ -146,6 +146,13 @@ const retryEditBatches = new Map<string, string>();
 // v0.8.91 — die beim Bildweg schon vergebene SKU („Find Next SKU"): eine Wiederholung DERSELBEN Bearbeitung nimmt sie
 // wieder, statt eine zweite Nummer zu ziehen (wie `retrySku` beim Anlegen).
 const retryEditSkus = new Map<string, string>();
+/**
+ * ARTIKELVARIANTEN — die Galerie, auf der eine Bildbearbeitung beruht, ist nicht mehr die gespeicherte (z. B. hat
+ * „Merge photos" am PC2 inzwischen ein gemeinsames Bild verknüpft, oder das Handy hat ein Foto hinzugefügt). Nichts
+ * wurde gespeichert; die Maske lädt Artikel und Galerie neu. Ohne diese Prüfung hätte der Abgleich das neue Bild als
+ * „vom Benutzer entfernt" gewertet und seinen Verweis gelöst.
+ */
+export const MEDIA_EDIT_GALLERY_BASELINE_CHANGED = 'MEDIA_EDIT_GALLERY_BASELINE_CHANGED';
 
 export type EditProductResult =
   | { status: 'edited'; batchId: string }
@@ -1311,8 +1318,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const hashByClient = new Map(newItems.map((n) => [n.ingestRequestId, n.requestHash]));
 
     try {
-      const env = await orchestrator.prepareAndRegisterEdit(scope, newItems, async (baseline, prepared) =>
-        buildEditPlanEnvelope({
+      const env = await orchestrator.prepareAndRegisterEdit(scope, newItems, async (baseline, prepared) => {
+        // ARTIKELVARIANTEN — dieselbe Baseline-Regel wie beim Anwenden (MEDIA_EDIT_BASELINE_CHANGED), nur eine Stufe
+        // früher: der Entwurf muss auf GENAU der Galerie beruhen, die jetzt (unter der Sperre) gespeichert ist — gleiche
+        // Bilder, gleiche Reihenfolge. Sonst würde ein inzwischen hinzugekommenes Bild (Merge photos, Handy) still gelöst.
+        const jetzt = baseline.slice().sort((a, b) => a.sortOrder - b.sortOrder).map((b) => b.mediaId);
+        if (jetzt.length !== baselineMediaIds.length || jetzt.some((m, i) => m !== baselineMediaIds[i])) {
+          throw new Error(MEDIA_EDIT_GALLERY_BASELINE_CHANGED);
+        }
+        return buildEditPlanEnvelope({
           batchId, tenantId, branchId, scopeKind: 'branch', entityType: 'product', entityId: id, role,
           baseline,
           desired: draftRes.value.map((it) => {
@@ -1323,12 +1337,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
             throw new Error('MEDIA_EDIT_LEGACY_NOT_CUTOVER');
           }),
           prepared, productEdit,
-        }, async (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan')));
+        }, async (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan'));
+      });
       await orchestrator.applyEditDurably(env);
     } catch (e) {
       if (isSkuTakenRefusal(e)) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
       if (msg === MOBILE_PRICE_NOT_ELIGIBLE) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'blocked', errorCode: msg, message: PRICE_LOCK_MESSAGE }; }
+      // Nichts wurde eingefroren (die neuen Bilder sind wieder verworfen): der nächste Versuch beginnt mit einem frischen Vorgang.
+      if (msg === MEDIA_EDIT_GALLERY_BASELINE_CHANGED) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) { retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       return { status: 'edit_incomplete', errorCode: msg, batchId };
     }
