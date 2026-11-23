@@ -23,7 +23,7 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
 
   // POST-PARITY R7B PP-12 — das Aufnahmeprofil steht an EINER Stelle (`capture-profile.ts`). Eine
   // unlesbare Datei wird übersprungen und genannt, statt die gültigen mitzureißen.
-  async function handleFiles(files: FileList | null) {
+  async function handleFiles(files: FileList | File[] | null) {
     if (!files || disabled) return;
     const remaining = maxImages - images.length;
     const toProcess = Array.from(files).slice(0, remaining);
@@ -154,7 +154,9 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
         accept="image/*"
         multiple
         style={{ display: 'none' }}
-        onChange={e => handleFiles(e.target.files)}
+        // Wie beim Ersetzen: das Feld nach dem Einlesen leeren — sonst meldet der Browser dieselbe Datei kein zweites
+        // Mal (z. B. nach „Fotos inzwischen geändert — bitte erneut vornehmen" oder nach Entfernen und erneutem Hinzufügen).
+        onChange={e => { const files = e.target.files ? Array.from(e.target.files) : null; e.target.value = ''; void handleFiles(files); }}
       />
       <input
         ref={replaceRef}
