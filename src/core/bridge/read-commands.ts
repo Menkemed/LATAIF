@@ -267,7 +267,15 @@ registerCommand(OP_PRODUCTS_GET, {
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such product in this branch');
     const r = found[0];
     const gal = galleryOf(actorTenant(p), str(r.id));
+    // ARTIKELVARIANTEN — nur die ANZAHL eingebetteter Altbilder (nie die Bilddaten): „Merge photos" am PC2 kann so ehrlich
+    // ankündigen, dass diese Bilder vorher in den Bildspeicher umziehen. Additiv — ein älterer Client ignoriert das Feld.
+    let legacyPhotos = 0;
+    try {
+      const alt = JSON.parse(str(rows('SELECT images FROM products WHERE id = ?', [str(r.id)])[0]?.images) || '[]');
+      legacyPhotos = Array.isArray(alt) ? alt.length : 0;
+    } catch { legacyPhotos = 1; }
     return {
+      legacyPhotos,
       ...productDto(r),
       attributes: str(r.attributes) || '{}',
       notes: str(r.notes),

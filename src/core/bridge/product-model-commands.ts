@@ -20,6 +20,7 @@ import {
   groupProductsInHouse, mergeModelPhotosInHouse, removeFromModelInHouse,
   type GroupInput, type MergePhotosInput, type ProductModelCtx, type RemoveInput,
 } from '@/core/products/product-models';
+import { convertLegacyMergeTargets } from '@/core/products/product-models-primary';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
@@ -119,8 +120,17 @@ export function runModelRemove(deps: EngineDeps, identity: CommandIdentity, raw:
   const req = parseRemove(raw);
   return runRemoteCommand(deps, identity, () => inHouse(() => removeFromModelInHouse(req, ctxOf(identity, deps.now()))) as unknown as Record<string, unknown>);
 }
-export function runModelMergePhotos(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+export async function runModelMergePhotos(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseMergePhotos(raw);
+  // Vorschritt AUSSERHALB der Transaktion (der exklusive Platz gehört schon diesem Auftrag): Altbild-Ziele ziehen mit dem
+  // bestehenden Umzug in den Bildspeicher — er sichert sich selbst durabel und darf von keinem Rückrollen erfasst werden.
+  // Scheitert er: nicht bewertet (keine eingefrorene Ablehnung), derselbe Auftrag darf erneut; der Artikel bleibt unverändert.
+  try {
+    await convertLegacyMergeTargets(req, ctxOf(identity, deps.now()), true);
+  } catch (err) {
+    if (err instanceof ProductModelRejected) return { kind: 'rejected', code: err.code, message: err.message, frozen: false, replayed: false };
+    throw err;
+  }
   return runRemoteCommand(deps, identity, () => inHouse(() => mergeModelPhotosInHouse(req, ctxOf(identity, deps.now()))) as unknown as Record<string, unknown>);
 }
 

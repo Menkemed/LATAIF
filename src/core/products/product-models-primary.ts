@@ -9,9 +9,10 @@ import { runOnPrimary } from '@/core/data/primary-action';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { remoteRead } from '@/core/bridge/remote-read';
 import { useAuthStore } from '@/stores/authStore';
-import { useProductStore } from '@/stores/productStore';
+import { cutoverLegacyGallery, useProductStore } from '@/stores/productStore';
+import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
 import {
-  activeGallery, attachNewVariantInHouse, checkVariantFits, groupProductsInHouse, mergeModelPhotosInHouse, ProductModelRejected,
+  activeGallery, attachNewVariantInHouse, checkVariantFits, groupProductsInHouse, legacyMergeTargets, mergeModelPhotosInHouse, ProductModelRejected,
   removeFromModelInHouse,
   type GroupInput, type GroupResult, type MergePhotosInput, type MergePhotosResult, type ProductModelCtx,
   type RemoveInput, type RemoveResult, type VariantIntent,
@@ -32,7 +33,33 @@ export function groupProductsOnPrimary(input: GroupInput): Promise<GroupResult> 
 export function removeFromModelOnPrimary(input: RemoveInput): Promise<RemoveResult> {
   return runOnPrimary(() => removeFromModelInHouse(input, localCtx()), reload);
 }
-export function mergeModelPhotosOnPrimary(input: MergePhotosInput): Promise<MergePhotosResult> {
+/**
+ * „Merge Photos" mit Altbild-Zielen: deren eingebettete Bilder ziehen VORHER mit dem bestehenden Umzug in den Bildspeicher
+ * (dieselben Bilder, dieselbe Reihenfolge, je Bild einmal normalisiert wie jedes Hochladen). Jeder Umzug sichert sich
+ * selbst durabel und läuft deshalb AUSSERHALB der Merge-Transaktion — am PC2 als Vorschritt im schon exklusiven Platz des
+ * Auftrags (`alreadySerialised`). Scheitert ein Umzug, bleibt dieser Artikel samt Altbild unverändert und der Merge wird
+ * mit Grund abgelehnt; schon umgezogene Artikel bleiben umgezogen (gleiche Bilder, nichts verloren).
+ */
+export async function convertLegacyMergeTargets(input: MergePhotosInput, ctx: ProductModelCtx, alreadySerialised: boolean): Promise<string[]> {
+  const ids = legacyMergeTargets(input, ctx);
+  if (ids.length === 0) return [];
+  const tenantId = String(query('SELECT tenant_id FROM branches WHERE id = ?', [ctx.branchId])[0]?.tenant_id ?? '');
+  for (const id of ids) {
+    try {
+      if (!tenantId) throw new Error('MEDIA_CUTOVER_SCOPE_REQUIRED');
+      await runExclusiveUnless(alreadySerialised, () => cutoverLegacyGallery(id, { tenantId, branchId: ctx.branchId }));
+    } catch (e) {
+      const name = String(query('SELECT name FROM products WHERE id = ?', [id])[0]?.name ?? id);
+      const code = (e as { code?: string; message?: string })?.code ?? (e as { message?: string })?.message ?? 'MEDIA_CUTOVER_FAILED';
+      throw new ProductModelRejected('MODEL_PHOTO_LEGACY_CONVERT_FAILED',
+        `${name}: its photos in the old format could not be moved to the photo storage (${code}). Nothing was changed for this item — please try again.`);
+    }
+  }
+  return ids;
+}
+
+export async function mergeModelPhotosOnPrimary(input: MergePhotosInput): Promise<MergePhotosResult> {
+  await convertLegacyMergeTargets(input, localCtx(), false);
   return runOnPrimary(() => mergeModelPhotosInHouse(input, localCtx()), reload);
 }
 
@@ -68,8 +95,8 @@ export async function loadVariantGallery(productId: string): Promise<{ mediaIds:
     return {
       mediaIds: Array.isArray(d.mediaIds) ? (d.mediaIds as unknown[]).map(String) : [],
       updatedAt: String(d.updatedAt ?? ''),
-      // Der Primary prüft das Altformat ohnehin; hier nur ein Hinweis, falls bekannt.
-      legacy: false,
+      // Nur ein Hinweis für die Vorschau (ein Primary vor v0.8.110 nennt die Zahl nicht) — den Umzug entscheidet der Primary.
+      legacy: Number(d.legacyPhotos ?? 0) > 0,
     };
   }
   const r = query('SELECT updated_at, images FROM products WHERE id = ?', [productId])[0];

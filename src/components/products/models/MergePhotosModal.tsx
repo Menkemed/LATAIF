@@ -77,12 +77,13 @@ export function MergePhotosModal({ open, modelKey, tenantId, branchId, onClose, 
   const status = (m: Product): { eligible: boolean; note: string } => {
     const g = gal[m.id];
     if (!mayChangeVariantPhoto(String(m.stockStatus))) return { eligible: false, note: 'Sold / closed — keeps its photo (records stay as they are)' };
-    if (g?.legacy) return { eligible: false, note: 'Photos in the old format — open the item and save its photos once first' };
     if (!g) return { eligible: false, note: loading ? 'loading…' : 'Photos could not be read' };
     if (g.mediaIds[0] === pick) return { eligible: false, note: 'already shows this photo' };
     return { eligible: true, note: '' };
   };
   const targets = members.filter((m) => status(m).eligible && !skip[m.id]);
+  // Bilder im alten Format (in der Datenbank eingebettet) ziehen beim Merge zuerst in den Bildspeicher (der Primary macht das).
+  const altformat = targets.filter((m) => gal[m.id]?.legacy);
   const pickOwner = options.find((o) => o.mediaId === pick)?.owner;
 
   async function run(input: MergePhotosInput) {
@@ -160,7 +161,9 @@ export function MergePhotosModal({ open, modelKey, tenantId, branchId, onClose, 
                       <td className="font-mono" style={{ padding: 8 }}>{m.sku || '—'}</td>
                       <td style={{ padding: 8 }}>Size {sizeOf(m) || '—'}</td>
                       <td style={{ padding: 8 }}><StatusDot status={m.stockStatus} /></td>
-                      <td style={{ padding: 8, fontSize: 11.5 }}>{st.eligible ? (skip[m.id] ? 'stays unchanged' : `will show the photo of ${pickOwner?.sku ?? 'the model'}`) : st.note}</td>
+                      <td style={{ padding: 8, fontSize: 11.5 }} data-merge-note={m.id}>{st.eligible
+                        ? (skip[m.id] ? 'stays unchanged' : `will show the photo of ${pickOwner?.sku ?? 'the model'}${gal[m.id]?.legacy ? ' — its photos in the old format move to the photo storage first' : ''}`)
+                        : st.note}</td>
                     </tr>
                   );
                 })}
@@ -177,13 +180,19 @@ export function MergePhotosModal({ open, modelKey, tenantId, branchId, onClose, 
           </div>
           <span style={{ fontSize: 12, color: '#4B5563' }}>
             {detach
-              ? 'The link is only marked as removed; the stored file stays. It is never deleted here — only later via Settings → maintenance (media release) after a full reference check, dry run and quarantine. Undo is possible until then.'
+              ? 'The link is only marked as removed; the stored file stays. It is never deleted here. To free the space later, the owner uses Settings → Data Repairs → “Release old image versions” (dry run, full reference check, verified backup), then Backup & Restore → “Unused media cleanup” (quarantine, confirmation). A photo still used by another item is never released. Undo is possible until then.'
               : 'The previous main photo moves into the item’s gallery (second place). Nothing is deleted; undo is possible at any time.'}
           </span>
         </section>
 
         <div style={{ fontSize: 12.5, padding: '10px 12px', background: '#FAFBFC', border: '1px solid #E5E9EE', borderRadius: 10 }} data-merge-summary>
-          <b>{targets.length}</b> item(s) get a new main photo · new files: <b>0</b> · recalculated: <b>0</b> · deleted: <b>0</b> · items, prices and bookings: unchanged
+          <b>{targets.length}</b> item(s) get a new main photo · new files: <b>{altformat.length ? 'only for old-format photos (below)' : 0}</b> · recalculated: <b>{altformat.length ? 'only those' : 0}</b> · deleted: <b>0</b> · items, prices and bookings: unchanged
+          {altformat.length > 0 ? (
+            <div style={{ marginTop: 6 }} data-merge-legacy={altformat.length}>
+              {altformat.map((m) => m.sku || m.name).join(', ')}: the photos in the old format (stored inside the database) first move to the photo
+              storage — the same photos in the same order, each stored once like any upload. If that fails, the item and its photos stay unchanged.
+            </div>
+          ) : null}
         </div>
         <WriteError text={w.fehler} />
         {confirming ? (

@@ -154,6 +154,27 @@ const retryEditSkus = new Map<string, string>();
  */
 export const MEDIA_EDIT_GALLERY_BASELINE_CHANGED = 'MEDIA_EDIT_GALLERY_BASELINE_CHANGED';
 
+/**
+ * Der bestehende Umzug einer Altgalerie (`products.images`, eingebettete Bilder) in den Bildspeicher — derselbe Dienst,
+ * den „Fotos bearbeiten" und die Speicherwartung benutzen: ALLE Bilder in Reihenfolge importieren, das genaue Manifest
+ * prüfen, erst dann die Altspalte durabel leeren. Scheitert etwas, bleibt die Altspalte unberührt (der Dienst legt dann
+ * keine Verknüpfung an). Idempotent: ein schon umgezogener Artikel ist ein No-op. Läuft im Schreibplatz des Aufrufers.
+ */
+export async function cutoverLegacyGallery(
+  productId: string,
+  scope: { tenantId: string; branchId: string; role?: string },
+  orchestrator?: Awaited<ReturnType<typeof getStockMediaOrchestrator>>,
+): Promise<{ action: string; imported: number }> {
+  const cutoverDb = () => getDatabase() as unknown as { run(sql: string, params?: unknown[]): void; exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> };
+  const cutover = new ProductMediaCutoverService({
+    dbProvider: cutoverDb,
+    orchestrator: orchestrator ?? await getStockMediaOrchestrator(),
+    commitLegacyCleared: async (pid: string) => { getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]); await durableCheckpoint(); },
+    tenantId: scope.tenantId, branchId: scope.branchId, role: scope.role ?? 'stock_image',
+  });
+  return cutover.ensureProductMediaCutover(productId);
+}
+
 export type EditProductResult =
   | { status: 'edited'; batchId: string }
   | { status: 'edit_incomplete'; errorCode: string; batchId?: string }
@@ -1230,14 +1251,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // only make sense post-cutover).
     if (editImages.status === 'legacy') {
       try {
-        const cutoverDb = () => getDatabase() as unknown as { run(sql: string, params?: unknown[]): void; exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> };
-        const cutover = new ProductMediaCutoverService({
-          dbProvider: cutoverDb,
-          orchestrator,
-          commitLegacyCleared: async (pid: string) => { getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]); await durableCheckpoint(); },
-          tenantId, branchId, role,
-        });
-        await cutover.ensureProductMediaCutover(id);
+        await cutoverLegacyGallery(id, { tenantId, branchId, role }, orchestrator);
       } catch (e) {
         return { status: 'edit_incomplete', errorCode: (e as { message?: string })?.message ?? 'MEDIA_EDIT_CUTOVER_FAILED' };
       }

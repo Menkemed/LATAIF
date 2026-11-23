@@ -418,7 +418,9 @@ function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx): PhotoSt
     const r = rows.get(req.productId)!;
     if (!mayChangeVariantPhoto(String(r.stock_status ?? ''))) nein('MODEL_PHOTO_SOLD', `${String(r.name ?? req.productId)}: sold or closed items keep their photos.`);
     if (legacyImages(r.images) > 0) {
-      nein('MODEL_PHOTO_LEGACY', `${String(r.name ?? req.productId)}: photos are still in the old format — open the item and save its photos once first.`);
+      // Der Umzug in den Bildspeicher läuft VOR dieser Transaktion (convertLegacyMergeTargets); hier kommt ein Altbild nur
+      // an, wenn er nicht laufen durfte (z. B. veralteter Stand) — dann ändert dieser Merge nichts.
+      nein('MODEL_PHOTO_LEGACY', `${String(r.name ?? req.productId)}: photos are still in the old format — reload and try again (they are moved to the photo storage first).`);
     }
     if (String(r.updated_at ?? '') !== req.expectedUpdatedAt) {
       nein('PRODUCT_RECORD_CHANGED', `${String(r.name ?? req.productId)} was changed in the meantime — reload and try again.`);
@@ -444,6 +446,30 @@ function planMergePhotos(input: MergePhotosInput, ctx: ProductModelCtx): PhotoSt
     steps.push({ productId: req.productId, previous, next });
   }
   return steps;
+}
+
+/**
+ * Welche Ziele eines „Merge Photos" tragen noch Bilder im alten Format (in `products.images` eingebettet) und dürfen
+ * VORHER in den Bildspeicher umziehen? Nur, was der Merge selbst anfassen würde: Recht `products.edit`, Mitglied DIESES
+ * Modells in der eigenen Filiale, verfügbar (verkaufte/abgeschlossene bleiben unberührt) und mit dem Stand, den der
+ * Auftrag nennt (ein veralteter oder schon ausgeführter Auftrag zieht nichts um). Rückgängig zieht nie um. Liest nur.
+ */
+export function legacyMergeTargets(input: MergePhotosInput, ctx: ProductModelCtx): string[] {
+  if (input.restore || !input.targets?.length) return [];
+  try { assertMayEdit(ctx); } catch { return []; }
+  const key = String(input.modelKey ?? '');
+  const members = key ? membersOf(key) : [];
+  if (members.length < 2) return [];
+  const rows = new Map(productRows(members).map((r) => [String(r.id), r]));
+  const out: string[] = [];
+  for (const t of input.targets) {
+    const r = rows.get(String(t.productId));
+    if (!r || String(r.branch_id) !== ctx.branchId) continue;
+    if (!mayChangeVariantPhoto(String(r.stock_status ?? ''))) continue;
+    if (String(r.updated_at ?? '') !== String(t.expectedUpdatedAt ?? '')) continue;
+    if (legacyImages(r.images) > 0 && !out.includes(String(r.id))) out.push(String(r.id));
+  }
+  return out;
 }
 
 /** Prüft, ohne zu schreiben: `null` = möglich, sonst der Grund. */

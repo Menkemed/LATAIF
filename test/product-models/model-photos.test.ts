@@ -398,5 +398,73 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
     'G4 „Add variant" mit gewünschtem Modellfoto legt bei unlesbarer Bildfolge nichts an (statt still ohne Foto)');
 }
 
+// ── 11 Altbild-Artikel: beim Merge zuerst mit dem BESTEHENDEN Umzug in den Bildspeicher (Primary und PC2) ────────────
+{
+  const { convertLegacyMergeTargets, mergeModelPhotosOnPrimary } = await import('../../src/core/products/product-models-primary.ts');
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  const db7 = freshDb();
+  const a = await variant(db7, '16', 71);
+  const pickA = gallery(a)[0];
+  const alt = (id: string, size: string, bilder: string[], status = 'in_stock'): void => {
+    db7.run(`INSERT INTO products (id, branch_id, category_id, brand, name, purchase_price, stock_status, source_type, attributes, images, created_at, updated_at)
+             VALUES (?,'branch-main','cat-bgj','Cartier','Love Bracelet',2500,?,'OWN',?,?,?,?)`, [id, status, JSON.stringify({ item_type: 'Bracelet', size }), JSON.stringify(bilder), NOW, NOW]);
+  };
+  const altBilder = [url(bild(72)), url(bild(73))];
+  alt('alt-1', '17', altBilder);
+  alt('alt-kaputt', '18', ['https://example.invalid/foto.jpg']);   // kein data:-Bild → der Umzug lehnt VOR jeder Verknüpfung ab
+  alt('alt-verkauft', '19', [url(bild(74))], 'sold');
+  const { modelKey: key } = M.groupProductsInHouse({ productIds: [a, 'alt-1', 'alt-kaputt', 'alt-verkauft'] }, CTX);
+  const imagesOf = (id: string): string => String(one(db7, 'SELECT images FROM products WHERE id = ?', [id]));
+  const o0 = objects(db7), f0 = files(db7);
+  ok(rejectCode(() => M.checkMergePhotos({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] }, CTX)
+    ? (() => { throw Object.assign(new Error('x'), { code: M.checkMergePhotos({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] }, CTX)!.code }); })() : null) === 'MODEL_PHOTO_LEGACY',
+    'A0 die Hausregel selbst nimmt weiter kein Altbild an (der Umzug läuft davor)');
+  ok(JSON.stringify(M.legacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [
+    { productId: 'alt-1', expectedUpdatedAt: NOW }, { productId: 'alt-verkauft', expectedUpdatedAt: NOW }, { productId: a, expectedUpdatedAt: upd(db7, a) },
+    { productId: 'alt-kaputt', expectedUpdatedAt: '2000-01-01T00:00:00.000Z' }] }, CTX)) === JSON.stringify(['alt-1']),
+    'A1 umgezogen wird nur, was der Merge anfasst: verfügbar, Stand stimmt, mit Altbildern (nicht verkauft, nicht veraltet)');
+  ok(M.legacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] }, { ...CTX, role: 'ACCOUNTANT' }).length === 0
+    && M.legacyMergeTargets({ modelKey: key, restore: [{ productId: 'alt-1', mediaIds: [], expectedUpdatedAt: NOW }] }, CTX).length === 0,
+    'A2 ohne products.edit und bei Rückgängig wird nichts umgezogen');
+
+  // Scheitert der Umzug: nicht bewertet (derselbe Auftrag darf erneut), Artikel und Altbild unverändert, nichts angelegt.
+  const deps7 = { db: db7 as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => '2026-11-23T17:00:00.000Z' };
+  const ident7 = (x: string) => ({ commandId: `${x.padStart(8, '0')}-0000-4000-8000-000000000071`, tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'SALES', op: cmd.OP_PRODUCT_MODELS_MERGE_PHOTOS, payloadHash: 'hm' + x });
+  const kaputtVor = [imagesOf('alt-kaputt'), upd(db7, 'alt-kaputt')].join('|');
+  const bad = await cmd.runModelMergePhotos(deps7 as never, ident7('701'), { modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-kaputt', expectedUpdatedAt: NOW }] });
+  ok(bad.kind === 'rejected' && (bad as { code?: string }).code === 'MODEL_PHOTO_LEGACY_CONVERT_FAILED' && (bad as { frozen?: boolean }).frozen === false,
+    `A3 PC2: Umzug gescheitert → klare Ablehnung, nicht eingefroren (${JSON.stringify(bad).slice(0, 160)})`);
+  ok([imagesOf('alt-kaputt'), upd(db7, 'alt-kaputt')].join('|') === kaputtVor && gallery('alt-kaputt').length === 0 && objects(db7) === o0 && commandCount(db7 as never) === 0,
+    'A4 …Altbild, Artikel und Medien unverändert, kein Auftragsnachweis');
+
+  // PC2 merge mit Altbild-Ziel: Umzug (2 Bilder, Reihenfolge), dann Merge (Behalten) in EINEM Auftrag.
+  const ok7 = await cmd.runModelMergePhotos(deps7 as never, ident7('702'), { modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] });
+  const g1 = gallery('alt-1');
+  ok(ok7.kind === 'ok' && imagesOf('alt-1') === '[]' && g1.length === 3 && g1[0] === pickA,
+    `A5 PC2: Altbilder umgezogen, dann gemerged — gemeinsames Bild vorn, die zwei eigenen dahinter (${JSON.stringify(ok7).slice(0, 120)}; ${g1.length})`);
+  ok(objects(db7) === o0 + 2 && files(db7) >= f0 + 2, `A6 je Altbild genau ein neues Medium (${objects(db7) - o0}), keine weitere Kopie`);
+  const conv = g1.slice(1);
+  const restore = (ok7 as { value?: { products?: Array<{ productId: string; previousMediaIds: string[]; updatedAt: string }> } }).value?.products ?? [];
+  ok(restore.length === 1 && restore[0].previousMediaIds.join() === conv.join(), 'A7 die Vorher-Galerie des Merge sind genau die umgezogenen Bilder (in Reihenfolge) — Rückgängig stellt sie her');
+  ok(imagesOf('alt-verkauft') !== '[]' && gallery('alt-verkauft').length === 0, 'A8 der verkaufte Altbild-Artikel bleibt unberührt (kein Umzug, kein Merge)');
+  const again = await cmd.runModelMergePhotos(deps7 as never, ident7('702'), { modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: NOW }] });
+  ok(again.kind === 'ok' && (again as { replayed?: boolean }).replayed === true && objects(db7) === o0 + 2, 'A9 Wiederholung derselben Kennung: eingefrorenes Ergebnis, kein zweiter Umzug');
+
+  // Primary (lokal): derselbe Weg, mit Lösen — die umgezogenen Altbilder werden erst über die bestehende Medien-Freigabe frei.
+  alt('alt-2', '20', [url(bild(75))]);
+  M.groupProductsInHouse({ productIds: ['alt-2'], modelKey: key }, CTX);
+  useAuthStore.setState({ session: { ...(useAuthStore.getState().session ?? {}), role: 'ADMIN', branchId: 'branch-main', userId: 'user-test' } } as never);
+  const res2 = await mergeModelPhotosOnPrimary({ modelKey: key, pickMediaId: pickA, detachOld: true, targets: [{ productId: 'alt-2', expectedUpdatedAt: NOW }] });
+  const umgezogen = res2.products[0]?.previousMediaIds ?? [];
+  ok(imagesOf('alt-2') === '[]' && gallery('alt-2').join() === pickA && umgezogen.length === 1, 'A10 Primary: umgezogen und gemerged (Lösen) — nur noch das gemeinsame Bild aktiv');
+  const plan7 = planDeadMediaRelease(db7 as never);
+  const c7 = new Set(plan7.candidates.map((c) => c.mediaId));
+  ok(c7.has(umgezogen[0]) && !c7.has(pickA) && !conv.some((m) => c7.has(m)),
+    'A11 Freigabe: nur das gelöste (umgezogene) Altbild ist Kandidat — nie das gemeinsame, nie noch verknüpfte');
+  ok(await convertLegacyMergeTargets({ modelKey: key, pickMediaId: pickA, detachOld: false, targets: [{ productId: 'alt-1', expectedUpdatedAt: upd(db7, 'alt-1') }] }, CTX, false).then((x) => x.length) === 0,
+    'A12 ein schon umgezogener Artikel wird nicht erneut umgezogen');
+}
+
 console.log(`\nmodel-photos: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);
