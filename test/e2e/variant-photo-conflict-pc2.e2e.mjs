@@ -18,7 +18,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
-import { maus, mausText } from './_e2e-mouse.mjs';
+import { maus, mausText, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -122,6 +122,14 @@ async function mausAuf(c, findeJs, name) {
   if (!da) return 'FEHLT:' + name;
   return maus(c, '[data-e2e-ziel]');
 }
+const chipIn = (box, text) => `const b=document.querySelector(${S(box)}); return b ? [...b.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(text)}) : null;`;
+/** Tippt mit der echten Tastatur in das Eingabefeld, das ein JS-Ausdruck findet. */
+async function tippeIn(c, findeJs, wert, name) {
+  const da = await c.ev(`document.querySelectorAll('[data-e2e-feld]').forEach(x=>x.removeAttribute('data-e2e-feld')); const e=(()=>{ ${findeJs} })(); if(!e) return false; e.setAttribute('data-e2e-feld','1'); return true;`);
+  if (!da) return 'FEHLT:' + name;
+  return tippe(c, '[data-e2e-feld]', wert);
+}
+const inputUnterLabel = (label) => `const l=[...document.querySelectorAll('label')].filter(x=>x.textContent.trim().replace(/\\*$/,'').trim()===${S(label)}).pop(); return l ? l.parentElement.querySelector('input,textarea') : null;`;
 
 // Fernaufträge mitschreiben, Dialoge abfangen.
 const HAKEN = `
@@ -348,6 +356,30 @@ try {
     ok((await befehle(client)).some((x) => x.op === 'product_models.merge_photos'), 'P8 PC2 hat über den Primary gemerged (product_models.merge_photos)');
   }
 
+  // ── V  „Add variant" am PC2 mit dem Modellfoto: ein Auftrag, Zuordnung + derselbe Medienverweis ────────────────────
+  if (!NUR_ALTER_PC2) {
+    const vorher = new Set(dbQ('SELECT id FROM products').map((x) => x.id));
+    const m0 = medien(), d0 = dateien();
+    await gehFrisch(client, `/collection/${A}`);
+    const r = [(await warteBis(client, q('[data-model-add-variant]'), 30000)) ? 'OK' : 'KEIN-KNOPF'];
+    r.push(await maus(client, '[data-model-add-variant]'));
+    r.push((await warteBis(client, q('[data-variant-hint]'), 30000)) ? 'OK' : 'KEIN-VARIANTEN-MODUS');
+    const reuse = await client.ev(`return !!document.querySelector('[data-variant-reuse-photo] input')?.checked;`);
+    r.push(await mausAuf(client, chipIn('#new-field-taxScheme', 'Margin'), 'Margin'));
+    r.push(await tippeIn(client, inputUnterLabel('SALE PRICE (BHD)'), '4100', 'Sale'));
+    r.push(await maus(client, '[data-create-product]'));
+    const zu = await warteBis(client, `!document.querySelector('#new-field-categoryId')`, 60000);
+    let neu = null;
+    await warteAuf(() => { neu = dbQ('SELECT id FROM products').map((x) => x.id).find((id) => !vorher.has(id)) || null; return !!neu; }, 30000);
+    if (!zu || !neu) console.log('      Maske: ' + S(await client.ev(`return document.body.innerText.slice(0, 400);`)));
+    await warteAuf(() => !!neu && galerie(neu).length === 1, 15000);
+    ok(alleOk(r) === 'OK' && reuse && zu && !!neu && zahl(`SELECT COUNT(*) AS n FROM product_models WHERE product_id = ? AND model_key = ?`, [neu, MODELL]) === 1,
+      `V1 PC2 „Add variant" (echte Maus): angelegt und dem Modell zugeordnet (${alleOk(r)}, Modellfoto vorgewählt: ${reuse})`);
+    ok(!!neu && galerie(neu).join() === fa && medien() === m0 && dateien() === d0,
+      `V2 das Modellfoto wird verwendet — dasselbe Medium, keine neue Datei (${neu ? galerie(neu).join() : '-'}; ${medien()}/${m0}, ${dateien()}/${d0})`);
+    ok((await befehle(client)).filter((x) => x.op === 'products.create').length === 1, 'V3 EIN Auftrag products.create (mit der Variante im Rumpf)');
+  }
+
   // ── O  Maske am PC2 offen, der PRIMARY führt „Merge photos" aus ────────────────────────────────────────
   {
     const r0 = [await bearbeiten(client, C, 1)];
@@ -370,7 +402,7 @@ try {
       `O5 neu geöffnet und gespeichert: C = gemeinsames + eigenes + neues Bild, A unverändert (${alleOk(r1)})`);
     ok((await befehle(client)).filter((x) => x.op === 'products.update').length >= 2, 'O6 PC2 speichert über products.update (Primary == PC2)');
   }
-  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === 3, 'ENDE die Gruppierung ist unverändert');
+  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === (NUR_ALTER_PC2 ? 3 : 4), 'ENDE die Gruppierung ist vollständig (A, B, C und ggf. die neue Variante)');
   ok((await client.ev('return window.__alerts.length;')) === 0 && (await primary.ev('return window.__alerts.length;')) === 0, 'ENDE keine Fehler-Dialoge');
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);

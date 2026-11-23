@@ -6,7 +6,8 @@
 
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
 import { runOnPrimary } from '@/core/data/primary-action';
-import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
+import { readsFromPrimary } from '@/core/data/primary-source';
+import { remoteRead } from '@/core/bridge/remote-read';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductStore } from '@/stores/productStore';
 import {
@@ -59,8 +60,11 @@ export function createVariantOnPrimary(data: Partial<Product>, intent: VariantIn
 /** Die aktive Bildfolge (Medienkennungen, Hauptbild zuerst) und die Fassung eines Artikels — Primary lokal, PC2 über den Primary. */
 export async function loadVariantGallery(productId: string): Promise<{ mediaIds: string[]; updatedAt: string; legacy: boolean } | null> {
   if (readsFromPrimary()) {
-    const d = await fetchFromPrimary('products.get', { id: productId });
-    if (!d) return null;
+    // `products.get` antwortet mit den Feldern SELBST (wie in client-media-source), nicht in `{ data }` wie die
+    // Store-Auskünfte — `fetchFromPrimary` hätte hier immer `null` geliefert (Merge photos am PC2 ohne Bilder).
+    let d: Record<string, unknown>;
+    try { d = await remoteRead<Record<string, unknown>>('products.get', { id: productId }); } catch { return null; }
+    if (!d || typeof d !== 'object') return null;
     return {
       mediaIds: Array.isArray(d.mediaIds) ? (d.mediaIds as unknown[]).map(String) : [],
       updatedAt: String(d.updatedAt ?? ''),

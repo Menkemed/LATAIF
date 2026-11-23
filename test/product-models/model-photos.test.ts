@@ -359,5 +359,44 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
     `S13 PC2-Galeriespeichern auf aktuellem Stand unverändert erfolgreich (${pc2.kind})`);
 }
 
+// ── 10 PC2 liest die Bildfolge über `products.get` — mit der ECHTEN Antwort des Primary ─────────────────────────────
+// (Befund im Oberflächentest: die Auskunft antwortet mit den Feldern selbst, nicht in `{ data }`; vorher kam am PC2
+// immer `null` zurück — Merge photos ohne Bilder, „Add variant" ohne Modellfoto.)
+{
+  await import('../../src/core/bridge/read-commands.ts');
+  const cm = await import('../../src/core/bridge/client-mode.ts');
+  const { loadVariantGallery } = await import('../../src/core/products/product-models-primary.ts');
+  const db6 = freshDb();
+  const a = await variant(db6, '16', 61); const b = await variant(db6, '17', 62);
+  const { modelKey: key } = M.groupProductsInHouse({ productIds: [a, b] }, CTX);
+  M.mergeModelPhotosInHouse({ modelKey: key, pickMediaId: gallery(a)[0], detachOld: false, targets: [{ productId: b, expectedUpdatedAt: upd(db6, b) }] },
+    { ...CTX, now: '2026-11-23T16:00:00.000Z' });
+  const lokal = await loadVariantGallery(b);
+  // So reicht der Bridge-Listener eine Auskunft weiter: Absender (aus dem geprüften Token) und Eingabe getrennt.
+  const antwort = await registry.executeCommand('products.get',
+    { actor: { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'SALES' }, input: { id: b } }, undefined);
+  ok(antwort.kind === 'ok', `G0 echte Auskunft products.get am Primary (${JSON.stringify(antwort).slice(0, 200)})`);
+  const gefragt: string[] = [];
+  const echtFetch = globalThis.fetch;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+    const op = JSON.parse(String(init?.body ?? '{}')).op as string;
+    gefragt.push(op);
+    return new Response(JSON.stringify({ ok: true, value: (antwort as { value?: unknown }).value }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+  cm.enterClientMode('http://127.0.0.1:65500'); cm.setClientToken('t-pc2');
+  try {
+    const pc2 = await loadVariantGallery(b);
+    ok(!!pc2 && pc2.mediaIds.join() === gallery(b).join() && pc2.mediaIds.length === 2 && pc2.updatedAt === upd(db6, b),
+      `G1 PC2 erhält dieselbe Bildfolge und Fassung wie der Primary lokal (${JSON.stringify(pc2)} / ${JSON.stringify(lokal)})`);
+    ok(gefragt.join() === 'products.get', 'G2 genau eine Auskunft products.get');
+    globalThis.fetch = (async () => { throw new Error('offline'); }) as typeof fetch;
+    ok(await loadVariantGallery(b) === null, 'G3 Primary nicht erreichbar: null (Merge zeigt „Photos could not be read", Add variant legt nichts an)');
+  } finally {
+    globalThis.fetch = echtFetch; cm.leaveClientMode();
+  }
+  ok(src('src/pages/watches/WatchList.tsx').includes("The model photo could not be read from the main computer. Nothing was created"),
+    'G4 „Add variant" mit gewünschtem Modellfoto legt bei unlesbarer Bildfolge nichts an (statt still ohne Foto)');
+}
+
 console.log(`\nmodel-photos: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

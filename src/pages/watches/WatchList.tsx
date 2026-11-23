@@ -535,6 +535,11 @@ export function WatchList() {
       if (variantCtx) {
         const own = (form.images || []).length > 0;
         const g = variantCtx.reusePhoto && !own ? await loadVariantGallery(variantCtx.templateId) : null;
+        // Gewünscht, aber nicht lesbar (Primary nicht erreichbar): nichts anlegen statt still ohne Modellbild.
+        if (variantCtx.reusePhoto && !own && !g) {
+          setCreateWarning('The model photo could not be read from the main computer. Nothing was created — please try again.');
+          return;
+        }
         variantIntent = { modelKey: variantCtx.modelKey, pickMediaId: g?.mediaIds[0] ?? null };
       }
       const r = await w.save('products.create', {
