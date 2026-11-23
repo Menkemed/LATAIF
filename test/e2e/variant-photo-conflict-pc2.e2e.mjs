@@ -21,7 +21,7 @@ import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestW
 import { maus, mausText, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -193,7 +193,7 @@ async function speichern(c) { return maus(c, '[data-save-product]'); }
 const fehlerText = (c) => c.ev(`return document.querySelector('[data-save-error]')?.textContent || '';`);
 const maskeZu = (c) => warteBis(c, `!document.querySelector('[data-save-product]')`, 40000);
 /** „Merge photos" im Modell-Abschnitt von `vonPid`: Bild `pick` auf genau `ziele` (echte Maus). */
-async function mergePhotos(c, vonPid, pick, ziele) {
+async function mergePhotos(c, vonPid, pick, ziele, vorBestaetigen) {
   await gehFrisch(c, `/collection/${vonPid}`);
   const r = [];
   r.push((await warteBis(c, q('[data-model-merge-photos]'), 30000)) ? 'OK' : 'KEIN-MERGE-KNOPF');
@@ -206,6 +206,7 @@ async function mergePhotos(c, vonPid, pick, ziele) {
   for (const h of haken) {
     if (h.frei && h.an !== ziele.includes(h.id)) r.push(await maus(c, `[data-merge-target="${h.id}"]`));
   }
+  if (vorBestaetigen) await vorBestaetigen(c);
   r.push(await maus(c, '[data-merge-open-confirm]'));
   r.push((await warteBis(c, q('[data-merge-ack]'), 10000)) ? 'OK' : 'KEINE-BESTAETIGUNG');
   r.push(await maus(c, '[data-merge-ack]'));
@@ -229,17 +230,18 @@ function insert(db, tabelle, werte) {
   const nutzbar = Object.keys(daten).filter((k) => namen.includes(k));
   db.prepare(`INSERT INTO ${tabelle} (${nutzbar.join(', ')}) VALUES (${nutzbar.map(() => '?').join(', ')})`).run(...nutzbar.map((k) => daten[k]));
 }
-const A = 'vk-a', B = 'vk-b', C = 'vk-c', MODELL = 'model-vk-e2e';
-function seed() {
+const A = 'vk-a', B = 'vk-b', C = 'vk-c', E = 'vk-e', MODELL = 'model-vk-e2e';
+// E trägt sein Foto noch im alten Format (eingebettet in products.images) — für Teil L.
+function seed(altbild) {
   const db = new DatabaseSync(BIZ_DB);
   try {
     const branch_id = (db.prepare('SELECT id FROM branches LIMIT 1').get() || {}).id || 'branch-main';
     const now = new Date().toISOString();
     insert(db, 'categories', { id: 'cat-vk', branch_id, name: 'Variant Bracelets', icon: 'Gem', color: '#000', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: 0, created_at: now, updated_at: now });
-    for (const [id, sku] of [[A, 'VK-16'], [B, 'VK-17'], [C, 'VK-18']]) {
+    for (const [id, sku] of [[A, 'VK-16'], [B, 'VK-17'], [C, 'VK-18'], [E, 'VK-19']]) {
       insert(db, 'products', { id, branch_id, category_id: 'cat-vk', brand: 'Cartier', name: 'Love Bracelet', sku, condition: 'Pre-Owned', scope_of_delivery: '[]',
         purchase_price: 2500, purchase_currency: 'BHD', planned_sale_price: 4000, stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, quantity: 1,
-        images: '[]', attributes: '{}', source_type: 'OWN', created_at: now, updated_at: now });
+        images: id === E ? JSON.stringify([altbild]) : '[]', attributes: '{}', source_type: 'OWN', created_at: now, updated_at: now });
       insert(db, 'stock_lots', { id: 'lot-' + id, branch_id, product_id: id, unit_cost: 2500, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', acquired_at: now, created_at: now });
       db.prepare('INSERT INTO product_models (product_id, model_key) VALUES (?, ?)').run(id, MODELL);
     }
@@ -254,7 +256,7 @@ try {
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
   console.log(NUR_ALTER_PC2 ? '  (nur Teil O — alter PC2)' : '  (Teile P und O)');
-  const FOTO = { a: pngFile('a.png', [240, 236, 228]), b: pngFile('b.png', [222, 232, 242]), c: pngFile('c.png', [236, 242, 226]), c2: pngFile('c2.png', [250, 220, 220]), d: pngFile('d.png', [210, 250, 230]) };
+  const FOTO = { a: pngFile('a.png', [240, 236, 228]), b: pngFile('b.png', [222, 232, 242]), c: pngFile('c.png', [236, 242, 226]), c2: pngFile('c2.png', [250, 220, 220]), d: pngFile('d.png', [210, 250, 230]), e: pngFile('e.png', [235, 225, 200]) };
 
   // ── Einrichten ───────────────────────────────────────────────────────────
   primary = await attach(APP_CDP, APP, appEnv());
@@ -278,7 +280,7 @@ try {
   const onboardingPid = startedPids().pop();
   primary.close(); primary = null;
   await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
-  seed();
+  seed('data:image/png;base64,' + readFileSync(FOTO.e).toString('base64'));
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 
   primary = await attach(APP_CDP, APP, appEnv());
@@ -316,7 +318,7 @@ try {
   await waitFor(client, SHELL, 90000);
   await hakenLegen(client);
   ok(!existsSync(join(CLIENT_DATA_DIR, 'lataif.db')), 'SETUP PC2 ohne Geschäftsdatenbank, angemeldet');
-  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === 3, 'SETUP drei Varianten in einem Modell');
+  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === 4, 'SETUP vier Varianten in einem Modell (E mit Altbild)');
 
   // A und C bekommen ihr eigenes Foto über die echte Maske am Primary (B bleibt ohne Foto).
   for (const [pid, foto] of [[A, FOTO.a], [C, FOTO.c]]) {
@@ -396,6 +398,24 @@ try {
     ok((await befehle(client)).filter((x) => x.op === 'products.create').length === 1, 'V3 EIN Auftrag products.create (mit der Variante im Rumpf)');
   }
 
+  // ── L  „Merge photos" am PC2 auf einen Artikel mit Altbild (eingebettet): erst Umzug in den Bildspeicher, dann Merge ──
+  if (!NUR_ALTER_PC2) {
+    const altVor = String(dbQ('SELECT images FROM products WHERE id = ?', [E])[0]?.images ?? '');
+    const m0 = medien(), d0 = dateien();
+    let hinweis = '';
+    const rm = await mergePhotos(client, A, fa, [E], async (c) => {
+      hinweis = await c.ev(`const n=document.querySelector('[data-merge-legacy]'); return n ? n.getAttribute('data-merge-legacy') + '|' + n.textContent : '';`);
+    });
+    ok(altVor.includes('data:image/png') && /^1\|/.test(hinweis) && /move to the photo\s+storage/i.test(hinweis),
+      `L1 PC2-Dialog kündigt den Umzug der Altbilder an (${hinweis.slice(0, 80)}…)`);
+    const ok2 = await warteAuf(() => galerie(E).length === 2, 30000);
+    const gE = galerie(E);
+    ok(rm === 'OK' && ok2 && gE[0] === fa && String(dbQ('SELECT images FROM products WHERE id = ?', [E])[0]?.images) === '[]',
+      `L2 umgezogen und gemerged: E = gemeinsames Bild + sein bisheriges Foto (jetzt im Bildspeicher), Altspalte leer (${rm})`);
+    ok(medien() === m0 + 1 && galerie(A).join() === fa && verweise(fa) >= 3,
+      `L3 genau ein neues Medium (das umgezogene Altbild), keine weitere Kopie; das gemeinsame Bild an A, B, E (${medien() - m0} neu, Dateien ${dateien() - d0})`);
+  }
+
   // ── O  Maske am PC2 offen, der PRIMARY führt „Merge photos" aus ────────────────────────────────────────
   {
     const r0 = [await bearbeiten(client, C, 1)];
@@ -433,7 +453,7 @@ try {
       `O5 gespeichert: C = gemeinsames + eigenes + neues Bild${NUR_ALTER_PC2 ? '' : ', Preis 4500'}, A unverändert (${alleOk(r1)})`);
     ok((await befehle(client)).filter((x) => x.op === 'products.update').length >= 2, 'O6 PC2 speichert über products.update (Primary == PC2)');
   }
-  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === (NUR_ALTER_PC2 ? 3 : 4), 'ENDE die Gruppierung ist vollständig (A, B, C und ggf. die neue Variante)');
+  ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === (NUR_ALTER_PC2 ? 4 : 5), 'ENDE die Gruppierung ist vollständig (A, B, C, E und ggf. die neue Variante)');
   ok((await client.ev('return window.__alerts.length;')) === 0 && (await primary.ev('return window.__alerts.length;')) === 0, 'ENDE keine Fehler-Dialoge');
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
