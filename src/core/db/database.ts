@@ -442,6 +442,7 @@ function runMigrations(database: Database): void {
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":true,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
       {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Earrings","Brooch","Bar","Coin"],"required":true,"showInList":true},
+      {"key":"size","label":"Size","type":"text","required":false,"showInList":true},
       {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver","Platinum"],"required":true,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-gold-jewelry'`,
@@ -2812,6 +2813,15 @@ function runMigrations(database: Database): void {
     // Owner 12.11.2026 — das Kostendatum einer Reparatur-Kostenzeile (JJJJ-MM-TT): Ausgabe und Kostenbuchung stehen an
     // diesem Tag (Vorgabe: Annahmedatum), unabhängig vom Zahlungstag. NULL = Altbestand (gebucht am Tag der Buchung).
     `ALTER TABLE repair_lines ADD COLUMN cost_date TEXT`,
+    // ARTIKELVARIANTEN (Owner 23.11.2026, Lösung E) — Modellgruppen: je gruppiertem Artikel EINE Zeile (Artikel → Modell-
+    // kennung). Bestehende Artikel, Lose, Rechnungen und Buchungen bleiben unberührt; das Gruppieren schreibt nur hier und
+    // ins Audit. Nur am Primary, nicht im Abgleichsvertrag (wie vat_filings / item_participations): der Primary ist die
+    // Quelle, PC2 liest dort. Ohne Zusatzindex — die Liste ist klein und wird als Ganzes gelesen. Additiv — eine ältere App
+    // kennt sie nicht und braucht sie nicht.
+    `CREATE TABLE IF NOT EXISTS product_models (
+      product_id TEXT PRIMARY KEY,
+      model_key TEXT NOT NULL
+    ) WITHOUT ROWID`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -3437,8 +3447,8 @@ function sweepProductLeftovers(database: Database): boolean {
     try {
       const r = sweepDeletedProductLeftovers(database as unknown as LeftoverDb);
       database.run('RELEASE product_leftovers_sweep');
-      const changed = r.receipts + r.links > 0;
-      if (changed) console.info(`[Migration] product leftovers: ${r.products} geloeschte Artikel — ${r.receipts} Belege, ${r.links} Foto-Verknuepfungen entfernt.`);
+      const changed = r.receipts + r.links + r.models > 0;
+      if (changed) console.info(`[Migration] product leftovers: ${r.products} geloeschte Artikel — ${r.receipts} Belege, ${r.links} Foto-Verknuepfungen, ${r.models} Modell-Zuordnungen entfernt.`);
       return changed;
     } catch (err) {
       database.run('ROLLBACK TO product_leftovers_sweep');

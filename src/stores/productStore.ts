@@ -50,7 +50,8 @@ import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
 import { PRODUCT_EDIT_REASON_REQUIRED, purchaseBoundRefusal, soldItemEditNeedsReason } from '@/core/products/purchase-bound';
 import { SKU_TAKEN, SkuTakenError, assertSkuFree, assertSkuChangeFree, skuTakenBy, skuChangeTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
-import { purgeProductLeftoversSafely, type LeftoverDb } from '@/core/products/product-leftovers';
+import { purgeProductLeftoversSafely, purgeModelRows, type LeftoverDb } from '@/core/products/product-leftovers';
+import { loadProductModelsFor } from '@/core/products/product-models';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -421,6 +422,11 @@ export interface WriteContext {
 
 interface ProductStore {
   products: Product[];
+  /**
+   * ARTIKELVARIANTEN — Modell-Zuordnungen der Filiale: productId → modelKey (`product_models`, nur am Primary gespeichert;
+   * PC2 bekommt sie mit `store.products.get`). Ein Artikel ohne Eintrag gehört zu keinem Modell.
+   */
+  productModels: Record<string, string>;
   /** Nur AKTIVE Kategorien — das ist die Auswahl fuer Anlegen und Bearbeiten. */
   categories: Category[];
   /**
@@ -660,10 +666,11 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
  * Genau deshalb koennen der Primary und ein zweiter Rechner dieselbe Funktion benutzen, ohne dass
  * das Lesen des einen den Bildschirm des anderen anfasst.
  */
-export function loadProductsFor(ctx: BusinessReadContext): { products: Product[] } {
+export function loadProductsFor(ctx: BusinessReadContext): { products: Product[]; productModels: Record<string, string> } {
   // BULK METAL V1 — die Bulk-Systemartikel gehören nicht in Collection, Auswahlen, Dubletten, Import oder KI.
   const rows = query("SELECT * FROM products WHERE branch_id = ? AND id NOT LIKE 'bulk-%' ORDER BY updated_at DESC", [ctx.branchId]);
-  return { products: rows.map(rowToProduct) };
+  // ARTIKELVARIANTEN — die Modell-Zuordnungen kommen mit (ein alter PC2 ignoriert den zusätzlichen Schlüssel).
+  return { products: rows.map(rowToProduct), productModels: loadProductModelsFor(ctx.branchId) };
 }
 
 /**
@@ -831,6 +838,7 @@ function skuEditRefusal(id: string, set: ReadonlyArray<readonly [string, unknown
 
 export const useProductStore = create<ProductStore>((set, get) => ({
   products: [],
+  productModels: {},
   categories: [],
   categorySchema: [],
   loading: false,
@@ -858,8 +866,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   loadProducts: () => {
     if (hydrateFromPrimary('store.products.get', (d) => set(d as never))) return;
     try {
-      const { products } = loadProductsFor(localReadContext());
-      set({ products, loading: false });
+      const { products, productModels } = loadProductsFor(localReadContext());
+      set({ products, productModels, loading: false });
       // Lazy-Backfill für pHash auf bestehende Produkte mit Bild aber ohne Hash.
       // Im Hintergrund, in Batches von 5, damit die Main-Thread nicht stockt.
       backfillImageHashes(products);
@@ -1609,6 +1617,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     }
 
     db.run('DELETE FROM products WHERE id = ?', [sourceId]);
+    // ARTIKELVARIANTEN — die Modell-Zuordnung der Quelle geht mit; ein dadurch einzeln gewordenes Modell löst sich auf.
+    purgeModelRows(db as unknown as LeftoverDb, [sourceId]);
     saveDatabase();
 
     // Sync-Tracking: andere Peers sollen Source ebenfalls droppen + Target-Qty sehen.

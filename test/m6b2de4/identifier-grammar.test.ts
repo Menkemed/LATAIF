@@ -89,9 +89,10 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // reversal_payment_id, reverse_reason) — canonical; partners.linked_customer_id and party_offsets.settlement_number are
 // ALTER TABLE columns (linked_customer_id already known from suppliers).
 // v0.8.101 S5: +1 local table `customer_credit_offsets` (primary-only, not synced) with 1 previously-unseen column identifier (movement_id) — canonical.
-check(tables.size === 66, `frontend table count is 66 (got ${tables.size})`);
+// ARTIKELVARIANTEN (23.11.2026): +1 local table `product_models` (primary-only) with 1 previously-unseen column identifier (model_key) — canonical.
+check(tables.size === 67, `frontend table count is 67 (got ${tables.size})`);
 // CUSTOM-ORDER Review: gold_payable_settlements.cost_mode (vat_status gibt es schon) — +1 → 272; party_offsets +10 → 282.
-check(columns.size === 283, `frontend distinct column count is 283 (got ${columns.size})`);
+check(columns.size === 284, `frontend distinct column count is 284 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +

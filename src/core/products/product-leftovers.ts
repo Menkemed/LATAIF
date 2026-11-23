@@ -28,6 +28,8 @@ export interface LeftoverResult {
   receipts: number;
   /** entfernt markierte Foto-Verknüpfungen */
   links: number;
+  /** gelöschte Modell-Zuordnungen (`product_models`): die des Artikels und die eines dadurch einzeln gewordenen Modells */
+  models: number;
 }
 
 function values(db: LeftoverDb, sql: string, params: unknown[] = []): unknown[][] {
@@ -45,7 +47,7 @@ const marks = (n: number): string => Array.from({ length: n }, () => '?').join('
  */
 export function purgeProductLeftovers(db: LeftoverDb, productIds: readonly string[], now = new Date().toISOString()): LeftoverResult {
   const ids = [...new Set(productIds.filter((id) => typeof id === 'string' && id !== ''))];
-  const res: LeftoverResult = { receipts: 0, links: 0 };
+  const res: LeftoverResult = { receipts: 0, links: 0, models: 0 };
   if (ids.length === 0) return res;
   const ph = marks(ids.length);
 
@@ -58,7 +60,49 @@ export function purgeProductLeftovers(db: LeftoverDb, productIds: readonly strin
     res.links = Number(values(db, `SELECT COUNT(*) FROM media_links WHERE ${active}`, ids)[0][0]);
     if (res.links) db.run(`UPDATE media_links SET deleted_at = ?, is_primary = 0 WHERE ${active}`, [now, ...ids]);
   }
+  res.models = purgeModelRows(db, ids);
   return res;
+}
+
+/**
+ * ARTIKELVARIANTEN — die Modell-Zuordnung GELÖSCHTER Artikel entfernen. Bleibt in einem Modell nur EIN Artikel übrig, ist
+ * es kein Modell mehr: auch dessen Zuordnung geht (der Artikel selbst bleibt unverändert). Gibt die Zahl gelöschter Zeilen zurück.
+ */
+export function purgeModelRows(db: LeftoverDb, productIds: readonly string[]): number {
+  const ids = [...new Set(productIds.filter((id) => typeof id === 'string' && id !== ''))];
+  if (ids.length === 0 || !hasTable(db, 'product_models')) return 0;
+  const ph = marks(ids.length);
+  const keys = values(db, `SELECT DISTINCT model_key FROM product_models WHERE product_id IN (${ph})`, ids).map(([k]) => String(k));
+  const own = Number(values(db, `SELECT COUNT(*) FROM product_models WHERE product_id IN (${ph})`, ids)[0][0]);
+  if (own) db.run(`DELETE FROM product_models WHERE product_id IN (${ph})`, ids);
+  return own + dissolveSingleMemberModels(db, keys);
+}
+
+/** Modelle mit nur noch einem (oder keinem) Artikel auflösen. Gibt die Zahl gelöschter Zuordnungen zurück. */
+export function dissolveSingleMemberModels(db: LeftoverDb, keys: readonly string[]): number {
+  let n = 0;
+  for (const key of new Set(keys)) {
+    const rest = Number(values(db, `SELECT COUNT(*) FROM product_models WHERE model_key = ?`, [key])[0][0]);
+    if (rest === 1) {
+      db.run(`DELETE FROM product_models WHERE model_key = ?`, [key]);
+      n += 1;
+    }
+  }
+  return n;
+}
+
+/**
+ * ARTIKELVARIANTEN — Zuordnungen, deren Artikel es nicht mehr gibt (gleich welcher Löschweg: Abgleich, Safe Purge, Testseite),
+ * und dadurch einzeln gewordene Modelle. Eine Zuordnung entsteht nur für einen bestehenden Artikel; fehlt er, ist sie wertlos.
+ */
+export function sweepOrphanModelRows(db: LeftoverDb): number {
+  if (!hasTable(db, 'product_models') || !hasTable(db, 'products')) return 0;
+  const orphans = values(db, `SELECT product_id, model_key FROM product_models m
+                               WHERE NOT EXISTS (SELECT 1 FROM products p WHERE p.id = m.product_id)`);
+  if (orphans.length === 0) return 0;
+  const ids = orphans.map(([id]) => String(id));
+  db.run(`DELETE FROM product_models WHERE product_id IN (${marks(ids.length)})`, ids);
+  return ids.length + dissolveSingleMemberModels(db, orphans.map(([, k]) => String(k)));
 }
 
 /**
@@ -102,7 +146,8 @@ export function sweepDeletedProductLeftovers(db: LeftoverDb, now = new Date().to
                                     WHERE NOT EXISTS (SELECT 1 FROM products p WHERE p.id = r.product_id)`)) candidates.add(String(id));
   }
   const ids = [...candidates].filter((id) => productWasDeleted(db, id));
-  return { products: ids.length, ...purgeProductLeftovers(db, ids, now) };
+  const r = purgeProductLeftovers(db, ids, now);
+  return { products: ids.length, ...r, models: r.models + sweepOrphanModelRows(db) };
 }
 
 /**

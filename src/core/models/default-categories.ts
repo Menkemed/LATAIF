@@ -67,6 +67,9 @@ const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Earrings', 'Brooch', 'Bar', 'Coin'],
     required: true, showInList: true },
+  // ARTIKELVARIANTEN (Owner 23.11.2026) — optionale Größe, damit Varianten eines Modells (z. B. Armreif 16/17) sich
+  // unterscheiden lassen; wie Branded/Original. Kein Pflichtfeld, bestehende Artikel bleiben unverändert.
+  { key: 'size', label: 'Size', type: 'text', required: false, showInList: true },
   { key: 'karat', label: 'Karat & Color', type: 'select',
     options: [
       '24K Yellow', '22K Yellow', '21K Yellow',

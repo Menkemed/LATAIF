@@ -83,6 +83,8 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'customer_credit_refunds',
   // v0.8.101 S5: Store Credit gegen Partnerforderung (Variante B) — primary-only wie customer_credit_refunds.
   'customer_credit_offsets',
+  // ARTIKELVARIANTEN (23.11.2026): Modell-Zuordnung je Artikel — primary-only wie vat_filings; PC2 liest sie über store.products.get.
+  'product_models',
 ]);
 const LOCAL_INACTIVE_MEDIA = new Set<string>(MEDIA_TABLES);
 const DEPRECATED_OR_UNREACHABLE_DDL = new Set<string>(); // none; see §2 note below.
@@ -125,7 +127,8 @@ for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t
 // CONSIGNMENT D3: +1 primary-only table supplier_credit_refunds → 30.
 // MIXED-INVOICE P1c: +1 primary-only table customer_credit_refunds → 31.
 // v0.8.101 S5: +1 primary-only table customer_credit_offsets → 32.
-ok(LEGACY_LOCAL_NON_SYNC.size === 32, `legacy_local_non_sync = 32 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+// ARTIKELVARIANTEN: +1 primary-only table product_models → 33.
+ok(LEGACY_LOCAL_NON_SYNC.size === 33, `legacy_local_non_sync = 33 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

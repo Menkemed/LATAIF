@@ -128,7 +128,8 @@ ok(plan.kind === 'ok' && (plan.data.attributes as Record<string, unknown>).diamo
 const nein = pc.planProductCreate({ categoryId: GOLD, attributes: { weight: 1, item_type: 'Ring', karat: '18K White', stones: [{ type: 'other', qty: 1 }] } } as never,
   { category: kat as never, isSkuTaken: () => false, allocateSku: () => 'X-1' });
 ok(nein.kind === 'invalid' && pc.productCreateRefusal(nein as never).code === 'STONES_INVALID', 'ANLAGE eine falsche Liste → STONES_INVALID');
-ok(S(fc.editableAttributes(kat as never, {}).map((a) => a.key)) === S(['weight', 'stones', 'item_type', 'karat', 'description']),
+// ARTIKELVARIANTEN (23.11.2026): + optionales `size` nach item_type.
+ok(S(fc.editableAttributes(kat as never, {}).map((a) => a.key)) === S(['weight', 'stones', 'item_type', 'size', 'karat', 'description']),
   'MASKE Diamond Weight ist bei Gold kein eigenes Eingabefeld');
 ok(fc.editableAttributes(DEFAULT_CATEGORIES.find((c) => c.id === 'cat-branded-gold-jewelry') as never, {}).some((a) => a.key === 'diamond_weight'), 'MASKE Branded Gold behält Diamond Weight');
 

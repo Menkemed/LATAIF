@@ -172,6 +172,12 @@
           "required": true
         },
         {
+          "key": "size",
+          "label": "Size",
+          "type": "text",
+          "required": false
+        },
+        {
           "key": "karat",
           "label": "Karat & Color",
           "type": "select",

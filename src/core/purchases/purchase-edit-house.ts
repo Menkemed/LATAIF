@@ -430,8 +430,9 @@ function hinzufuegenSperre(k: Kontext): EditLock {
 
 /** Spalten, die auf einen Artikel zeigen — und was davon beim Entfernen NICHT als Bindung zählt. */
 const ARTIKEL_SPALTE = /(^|_)product_id$/;
-// Der Upload-Beleg des Handys geht mit dem Artikel (`purgeProductLeftovers`), wie beim normalen Löschen.
-const KEINE_BINDUNG = new Set(['mobile_upload_receipts']);
+// Der Upload-Beleg des Handys geht mit dem Artikel (`purgeProductLeftovers`), wie beim normalen Löschen. Ebenso die
+// Modell-Zuordnung (Artikelvarianten): eine Gruppierung ist keine Buchung und bindet den Artikel nicht.
+const KEINE_BINDUNG = new Set(['mobile_upload_receipts', 'product_models']);
 
 /**
  * Teil 3 — woran hängt ein Artikel außer an der Zeile `exceptLineId` und ihrem Los? JEDE Tabelle mit einer Spalte
