@@ -18,6 +18,7 @@ This version adds **item variants**: several single items of the same model — 
 - **Open item forms are protected:** if the photos of an item are changed while its edit form is open somewhere else (for example "Merge photos" on another computer, or a photo from the phone), saving that form changes nothing and says so. The form reloads the current photos; the change can then be made again. The form on the second computer is protected the same way.
 - **Gold-Diamond Jewellery** has a new optional field "Size". Existing items are not changed.
 - **New Item** is unchanged (Margin preset, tax rules, stock and booking rules as before).
+- **Photo fields:** choosing the same photo file again (for example after removing it, or after the message above) now adds it; before, nothing happened.
 
 **Database:** one new table that stores the model of each grouped item (empty until items are grouped; added automatically at the first start). The category Gold-Diamond Jewellery gets the optional "Size" field. No other change; no existing item, invoice, payment, booking or stock row is changed.
 
