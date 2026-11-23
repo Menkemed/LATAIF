@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { applyChoiceSelection } from '@/core/products/choice-value';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { StockCheckInventoryModal } from '@/components/products/StockCheckInventoryModal';
@@ -25,6 +25,11 @@ import { currentBranchId } from '@/core/db/helpers';
 import { resolvePrimaryImageForExport } from '@/core/media/product-image-export';
 import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
+import { ModelCard } from '@/components/products/models/ModelCard';
+import { GroupItemsModal } from '@/components/products/models/GroupItemsModal';
+import { modelMembers, summarizeModel } from '@/core/products/product-models-view';
+import { PRODUCT_MODELS_GROUP_OP, PRODUCT_MODELS_MERGE_PHOTOS_OP, modelDisplayName } from '@/core/products/product-models';
+import { groupProductsOnPrimary, loadVariantGallery, mergeModelPhotosOnPrimary } from '@/core/products/product-models-primary';
 import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
 import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
 import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
@@ -149,7 +154,7 @@ export function WatchList() {
   const navigate = useNavigate();
   const perm = usePermission();
   const {
-    products, categories, loadProducts, loadCategories, createProductWithMedia,
+    products, productModels, categories, loadProducts, loadCategories, createProductWithMedia,
     allocateSkuOnCreate,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
@@ -187,6 +192,14 @@ export function WatchList() {
   // product.sourceType, damit auch bereits verkaufte Consignment-Items
   // korrekt zugeordnet bleiben.
   const [filterOwnership, setFilterOwnership] = useListState<'own' | 'consignment' | 'all'>('filterOwnership', 'own');
+  // ARTIKELVARIANTEN — Ansicht: ein Modell als eine Karte (Standard) oder jeder Artikel einzeln.
+  const [collectionView, setCollectionView] = useListState<'grouped' | 'single'>('collectionView', 'grouped');
+  const [groupItemsOpen, setGroupItemsOpen] = useState(false);
+  // ARTIKELVARIANTEN — „Add variant": dieselbe New-Item-Maske, vorbefüllt aus dem Modell; danach Zuordnung (+ Modellbild).
+  const [variantCtx, setVariantCtx] = useState<null | { modelKey: string; modelName: string; templateId: string; reusePhoto: boolean }>(null);
+  const [variantNote, setVariantNote] = useState<string | null>(null);
+  const wVariant = useSharedWrites();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
@@ -283,11 +296,12 @@ export function WatchList() {
     if (fp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
-      const possible = findPossibleDuplicates(form);
+      // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind beim „Add variant" erwartet ähnlich: keine Warnung (wie beim Speichern).
+      const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || productModels[m.product.id] !== variantCtx.modelKey);
       if (possible.length > 0) setDuplicateMatches(possible);
     }, 800);
     return () => clearTimeout(t);
-  }, [fp, showNew, duplicateMatches.length, form, findPossibleDuplicates]);
+  }, [fp, showNew, duplicateMatches.length, form, findPossibleDuplicates, variantCtx, productModels]);
 
   const filtered = useMemo(() => {
     // Interne Service-Produkte (Repair Service) sind immer ausgeblendet.
@@ -333,6 +347,27 @@ export function WatchList() {
   const s = (n: number): string => (n === 1 ? '' : 's');
   const getCat = (id: string) => categories.find(c => c.id === id);
 
+  // ARTIKELVARIANTEN — was das Raster zeigt: in der gruppierten Ansicht eine Karte je Modell (an der Stelle seines ersten
+  // sichtbaren Artikels; sie fasst ALLE Artikel des Modells zusammen, verkaufte sichtbar), sonst jeden Artikel einzeln.
+  // Auswahl-, Lösch- und Druckmodus arbeiten immer je Artikel.
+  const gridEntries = useMemo(() => {
+    type Entry = { kind: 'item'; p: Product } | { kind: 'model'; summary: ReturnType<typeof summarizeModel> };
+    const out: Entry[] = [];
+    const grouped = collectionView === 'grouped' && !selectMode && !printMode;
+    const seen = new Set<string>();
+    for (const p of filtered) {
+      const key = grouped ? productModels[p.id] : undefined;
+      if (key) {
+        if (seen.has(key)) continue;
+        const members = modelMembers(products, productModels, key)
+          .filter((m) => m.stockStatus !== 'consumed' && m.stockStatus !== 'CONSUMED');
+        if (members.length >= 2) { seen.add(key); out.push({ kind: 'model', summary: summarizeModel(key, members) }); continue; }
+      }
+      out.push({ kind: 'item', p });
+    }
+    return out;
+  }, [filtered, products, productModels, collectionView, selectMode, printMode]);
+
   function openNew(cat?: Category) {
     setSelectedCat(cat || categories[0] || null);
     setForm({
@@ -345,8 +380,47 @@ export function WatchList() {
     setRetryProductId(null);
     setRetrySku('');
     w.clear();
+    setVariantCtx(null);
     setShowNew(true);
   }
+
+  // ARTIKELVARIANTEN — „Add variant": die New-Item-Maske mit den GEMEINSAMEN Angaben des Modells (Marke, Name, Kategorie,
+  // Zustand, Lieferumfang, Warenart, Karat …). Individuell bleiben Größe, Gewicht, Seriennummer, Steine, Preise, SKU — und
+  // die Steuerart wird NICHT vorbelegt (keine automatische Margin-Wahl): der Mensch wählt sie. Angelegt wird über DENSELBEN
+  // Weg wie „New Item"; danach nur die Zuordnung zum Modell und auf Wunsch der Verweis auf das Modellbild.
+  function openVariant(template: Product, modelKey: string) {
+    const cat = categories.find((c) => c.id === template.categoryId) || null;
+    const shared = { ...copiedAttributes(template) } as Record<string, unknown>;
+    for (const k of ['size', 'weight', 'serial_number', 'diamond_weight', 'stones']) delete shared[k];
+    setSelectedCat(cat);
+    setForm({
+      categoryId: template.categoryId, brand: template.brand, name: template.name,
+      condition: template.condition || cat?.conditionOptions?.[0] || '', taxScheme: undefined,
+      scopeOfDelivery: [...(template.scopeOfDelivery || [])], purchaseCurrency: 'BHD',
+      attributes: shared as Product['attributes'],
+    });
+    setCreateWarning(null);
+    setRetryProductId(null);
+    setRetrySku('');
+    setErrors({});
+    w.clear();
+    wVariant.clear();
+    setVariantNote(null);
+    const members = modelMembers(products, productModels, modelKey);
+    setVariantCtx({ modelKey, modelName: modelDisplayName(members.map((m) => m.name)), templateId: template.id, reusePhoto: true });
+    setShowNew(true);
+  }
+
+  // Einstieg über die Artikelseite: /collection?variantOf=<Artikel des Modells>
+  useEffect(() => {
+    const id = searchParams.get('variantOf');
+    if (!id || products.length === 0 || categories.length === 0) return;
+    const template = products.find((p) => p.id === id);
+    const key = template ? productModels[template.id] : undefined;
+    setSearchParams({}, { replace: true });
+    if (template && key) openVariant(template, key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, products, categories, productModels]);
 
   function validateForm(): Record<string, string> {
     // DESKTOP-CONTRACT: requiredness + dependsOn come from the ONE shared contract
@@ -377,6 +451,8 @@ export function WatchList() {
     if (!skuIsEmpty(form.sku) && isSkuTaken(String(form.sku).trim())) {
       errs.sku = 'Diese SKU / Reference ist bereits vergeben.';
     }
+    // ARTIKELVARIANTEN — keine automatische Steuerart: bei „Add variant" wählt der Mensch sie selbst.
+    if (variantCtx && !form.taxScheme) errs.taxScheme = 'Choose the tax scheme for this item.';
     return errs;
   }
 
@@ -395,7 +471,8 @@ export function WatchList() {
     if (stopOnErrors(blockingErrors())) return;
     // Score-basierte Duplicate Detection (nicht-blockierend): wenn ähnliche
     // Items im Bestand existieren, Modal zeigen — User kann trotzdem anlegen.
-    const possible = findPossibleDuplicates(form);
+    // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind erwartet ähnlich (nur ein Hinweis, keine Warnung); eine doppelte SKU bleibt gesperrt.
+    const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || productModels[m.product.id] !== variantCtx.modelKey);
     if (possible.length > 0) {
       lastCheckedFp.current = fp;          // the live detector must not ask the same question again
       setDuplicateMatches(possible);
@@ -464,6 +541,9 @@ export function WatchList() {
       // wiederholt DIESELBE Absicht (ein offener Ausgang behält seine Kennung).
       if (r.kind !== 'ok') return;
       setErrors({});
+      const createdId = String((r.value as { productId?: string } | null)?.productId ?? '');
+      const variantDone = variantCtx && createdId ? await attachVariant(createdId, variantCtx) : null;
+      if (variantDone) setVariantNote(variantDone);
       if (w.remote) {
         // Der Primary hat Artikel, Nummer und Bilder in EINER Transaktion angelegt.
         setCreateWarning(null);
@@ -495,6 +575,28 @@ export function WatchList() {
       createInFlight.current = false;
       setCreateBusy(false);
     }
+  }
+
+  // ARTIKELVARIANTEN — der neue Artikel ist angelegt (über den gewöhnlichen Weg). Jetzt: Zuordnung zum Modell und, wenn
+  // gewünscht und der Artikel ohne eigenes Foto angelegt wurde, der Verweis auf das bestehende Modellbild (keine neue Datei).
+  // Schlägt einer der Schritte fehl, bleibt der Artikel bestehen — die Meldung sagt, was nachzuholen ist.
+  async function attachVariant(newId: string, ctx: { modelKey: string; templateId: string; reusePhoto: boolean }): Promise<string | null> {
+    const grouped = await wVariant.save(PRODUCT_MODELS_GROUP_OP, {
+      local: () => groupProductsOnPrimary({ productIds: [newId], modelKey: ctx.modelKey }),
+      remote: () => ({ productIds: [newId], modelKey: ctx.modelKey }),
+    });
+    if (grouped.kind !== 'ok') return 'The item was created, but it could not be added to the model. Open it and use “Group with other items”.';
+    if (!ctx.reusePhoto || (form.images || []).length > 0) return null;
+    const tpl = await loadVariantGallery(ctx.templateId);
+    const fresh = await loadVariantGallery(newId);
+    const pick = tpl?.mediaIds[0];
+    if (!pick || !fresh) return 'The item was added to the model. The model photo could not be linked — use “Merge photos” on the item.';
+    const merged = await wVariant.save(PRODUCT_MODELS_MERGE_PHOTOS_OP, {
+      local: () => mergeModelPhotosOnPrimary({ modelKey: ctx.modelKey, pickMediaId: pick, detachOld: false, targets: [{ productId: newId, expectedUpdatedAt: fresh.updatedAt }] }),
+      remote: () => ({ modelKey: ctx.modelKey, pickMediaId: pick, detachOld: false, targets: [{ productId: newId, expectedUpdatedAt: fresh.updatedAt }] }),
+    });
+    if (merged.kind !== 'ok') return 'The item was added to the model. The model photo could not be linked — use “Merge photos” on the item.';
+    return null;
   }
 
   function updateAttr(key: string, value: string | number | boolean) {
@@ -578,6 +680,9 @@ export function WatchList() {
                 title={primaryOnlyLocked() ? primaryOnlyText('The Excel import') : undefined}
                 data-primary-only={primaryOnlyLocked() ? 'import' : undefined}
                 onClick={() => navigate('/import')}>Import Excel</Button>
+              {perm.canEditProducts && (
+                <Button variant="ghost" onClick={() => setGroupItemsOpen(true)} data-open-group-items>Group items</Button>
+              )}
               <Button variant="primary" onClick={() => openNew()}>New Item</Button>
             </>
           )}
@@ -600,6 +705,18 @@ export function WatchList() {
                 color: filterOwnership === o ? '#0F0F10' : '#6B7280',
                 background: filterOwnership === o ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
               }}>{o === 'own' ? 'Own' : o === 'consignment' ? 'Consignment' : 'All'}</button>
+          ))}
+        </FilterGroup>
+        <FilterGroup label="View">
+          {(['grouped', 'single'] as const).map(v => (
+            <button key={v} onClick={() => setCollectionView(v)} data-collection-view={v}
+              className="cursor-pointer transition-all duration-200"
+              style={{
+                padding: '6px 12px', borderRadius: 999, fontSize: 12,
+                border: `1px solid ${collectionView === v ? '#0F0F10' : '#D5D9DE'}`,
+                color: collectionView === v ? '#0F0F10' : '#6B7280',
+                background: collectionView === v ? 'rgba(15,15,16,0.06)' : '#FFFFFF',
+              }}>{v === 'grouped' ? 'Grouped by model' : 'Single items'}</button>
           ))}
         </FilterGroup>
         <FilterGroup label="Category">
@@ -654,7 +771,16 @@ export function WatchList() {
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20 }}>
-          {filtered.map(p => {
+          {gridEntries.map(entry => {
+            if (entry.kind === 'model') {
+              const sm = entry.summary;
+              return (
+                <ModelCard key={`model:${sm.key}:${sm.members.map((m) => m.updatedAt).join('|')}`} summary={sm}
+                  category={getCat(sm.representative.categoryId)} tenantId={mediaTenantId} branchId={sessionBranchId}
+                  onOpen={() => navigate(`/collection/${sm.representative.id}`)} />
+              );
+            }
+            const p = entry.p;
             const cat = getCat(p.categoryId);
             // Show some dynamic attributes in the card
             // Zahlen mit Einheit (\u201e6.40 g \u00b7 0.80 ct \u00b7 Ring \u00b7 18K Yellow"), nicht roh.
@@ -671,7 +797,7 @@ export function WatchList() {
 
             return (
               <Card
-                key={p.id}
+                key={`${p.id}:${p.updatedAt}`}
                 hoverable={printMode ? true : (!selectMode || !linked)}
                 noPadding
                 onClick={() => printMode ? togglePrintSelect(p.id) : selectMode ? toggleSelect(p.id) : navigate(`/collection/${p.id}`)}
@@ -792,9 +918,15 @@ export function WatchList() {
       )}
 
       {/* New Product Modal */}
-      <Modal open={showNew} onClose={() => { setShowNew(false); setErrors({}); }} title="New Item" width={660}>
+      <Modal open={showNew} onClose={() => { setShowNew(false); setErrors({}); setVariantCtx(null); }} title={variantCtx ? `Add Variant — ${variantCtx.modelName}` : 'New Item'} width={660}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '65vh', overflowY: 'auto', paddingRight: 4 }}>
 
+          {variantCtx && (
+            <div data-variant-hint style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(113,93,227,0.09)', border: '1px solid rgba(113,93,227,0.35)', color: '#0F0F10', fontSize: 12, lineHeight: 1.5 }}>
+              New variant of <b>{variantCtx.modelName}</b>. Shared details are prefilled from the model — enter this piece’s own size, weight and prices,
+              and choose the tax scheme. It is created exactly like “New Item” and then added to the model; no existing item is copied.
+            </div>
+          )}
           {/* Required-fields hint */}
           <div style={{
             padding: '8px 12px', borderRadius: 8,
@@ -1096,6 +1228,14 @@ export function WatchList() {
             <div style={{ marginTop: 0 }}>
               <ImageUpload images={form.images || []} onChange={imgs => setForm({ ...form, images: imgs })} maxImages={6} />
             </div>
+            {variantCtx && (
+              <label data-variant-reuse-photo style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10, fontSize: 12, color: '#0F0F10' }}>
+                <input type="checkbox" checked={variantCtx.reusePhoto && (form.images || []).length === 0} disabled={(form.images || []).length > 0}
+                  onChange={() => setVariantCtx((v) => (v ? { ...v, reusePhoto: !v.reusePhoto } : v))} />
+                <span>Use the existing model photo (no upload, no new file — the new item only references it).
+                  {(form.images || []).length > 0 ? ' Not used: this piece has its own photo.' : ''}</span>
+              </label>
+            )}
           </div>
 
           {/* Pricing */}
@@ -1123,7 +1263,7 @@ export function WatchList() {
           </div>
 
           {/* Tax Scheme */}
-          <div>
+          <div id="new-field-taxScheme" style={{ padding: errors.taxScheme ? 8 : 0, border: errors.taxScheme ? '1px solid #DC2626' : 'none', borderRadius: 8 }}>
             <span className="text-overline" style={{ marginBottom: 8 }}>TAX SCHEME</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {(['MARGIN', 'VAT_10', 'ZERO'] as TaxScheme[]).map(scheme => (
@@ -1137,6 +1277,7 @@ export function WatchList() {
                   }}>{scheme === 'MARGIN' ? 'Margin' : scheme === 'VAT_10' ? 'VAT 10%' : 'Zero'}</button>
               ))}
             </div>
+            {errors.taxScheme && <span style={{ fontSize: 11, color: '#DC2626', marginTop: 6, display: 'block' }}>{errors.taxScheme}</span>}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
@@ -1173,6 +1314,16 @@ export function WatchList() {
         </div>
       </Modal>
 
+      <GroupItemsModal open={groupItemsOpen} onClose={() => setGroupItemsOpen(false)} />
+      {variantNote && (
+        <Modal open onClose={() => setVariantNote(null)} title="Add variant" width={480}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13 }}>
+            <span data-variant-note>{variantNote}</span>
+            <WriteError text={wVariant.fehler} />
+            <div className="flex justify-end"><Button variant="primary" onClick={() => setVariantNote(null)}>OK</Button></div>
+          </div>
+        </Modal>
+      )}
       <DuplicateWarningModal
         open={duplicateMatches.length > 0}
         matches={duplicateMatches}

@@ -23,6 +23,7 @@ import type { GallerySlot } from '@/core/bridge/product-commands';
 import { confirmAiIdentificationInHouse } from '@/core/products/ai-confirm';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { StockAdjustmentPanel } from '@/components/products/StockAdjustmentPanel';
+import { ModelSection } from '@/components/products/models/ModelSection';
 import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -1264,6 +1265,12 @@ export function ProductDetail() {
               ))}
             </div>
           </Card></div>
+        )}
+
+        {/* ARTIKELVARIANTEN — das Modell dieses Artikels mit allen Varianten (oder „Mit anderen Artikeln gruppieren"). */}
+        {!editing && (
+          <ModelSection product={product} tenantId={tenantId} branchId={sessionBranchId}
+            onMediaChanged={() => { setMediaReloadNonce((n) => n + 1); loadProducts(); }} />
         )}
 
         {/* Sales History — alle Invoices mit diesem Produkt, neueste zuerst.
