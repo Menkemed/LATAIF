@@ -254,7 +254,7 @@ try {
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
   console.log(NUR_ALTER_PC2 ? '  (nur Teil O — alter PC2)' : '  (Teile P und O)');
-  const FOTO = { a: pngFile('a.png', [240, 236, 228]), b: pngFile('b.png', [222, 232, 242]), c: pngFile('c.png', [236, 242, 226]), c2: pngFile('c2.png', [250, 220, 220]) };
+  const FOTO = { a: pngFile('a.png', [240, 236, 228]), b: pngFile('b.png', [222, 232, 242]), c: pngFile('c.png', [236, 242, 226]), c2: pngFile('c2.png', [250, 220, 220]), d: pngFile('d.png', [210, 250, 230]) };
 
   // ── Einrichten ───────────────────────────────────────────────────────────
   primary = await attach(APP_CDP, APP, appEnv());
@@ -333,27 +333,43 @@ try {
   if (!NUR_ALTER_PC2) {
     const r0 = [await bearbeiten(primary, B, 0)];
     r0.push(await fotoWaehlen(primary, FOTO.b));
+    r0.push(await tippeIn(primary, inputUnterLabel('SALE PRICE (BHD)'), '4400', 'Sale'));
     ok(alleOk(r0) === 'OK' && await primary.ev(`return document.querySelector('[data-product-images]')?.getAttribute('data-product-images-dirty');`) === '1',
-      `P1 Primary: Maske von B offen, neues Foto gewählt, noch nicht gespeichert (${alleOk(r0)})`);
+      `P1 Primary: Maske von B offen, neues Foto gewählt und Preis 4400 getippt, noch nicht gespeichert (${alleOk(r0)})`);
     const rm = await mergePhotos(client, A, fa, [B]);
     ok(rm === 'OK' && await warteAuf(() => galerie(B).join() === fa, 20000) && galerie(C).join() === ownC,
       `P2 PC2: „Merge photos" (echte Maus) verknüpft das A-Bild mit B, C unverändert (${rm})`);
+    await sleep(2500);   // der Primary lädt B neu (geänderter Stand) — die Eingabe muss stehen bleiben
+    const preisFeld = () => primary.ev(`const l=[...document.querySelectorAll('label')].find(x=>x.textContent.trim()==='SALE PRICE (BHD)'); return l ? l.parentElement.querySelector('input').value : null;`);
+    ok(await preisFeld() === '4400', `P2b das Neuladen von B lässt die getippte Eingabe stehen (Feld: ${await preisFeld()})`);
     const m0 = medien(), d0 = dateien();
     const rs = await speichern(primary);
     const meldung = (await warteBis(primary, q('[data-save-error]'), 20000)) ? await fehlerText(primary) : '';
-    ok(rs === 'OK' && /changed in the meantime/i.test(meldung) && /Nothing was saved/i.test(meldung),
+    ok(rs === 'OK' && /changed elsewhere while this form was open/i.test(meldung) && /Nothing was saved/i.test(meldung),
       `P3 Primary speichert auf altem Stand: klare Meldung, nichts gespeichert („${meldung.slice(0, 90)}…")`);
     await sleep(1500);
     ok(galerie(B).join() === fa && galerie(A).join() === fa && verweise(fa) === 2, 'P4 das gemeinsame Bild bleibt an A und B (zwei aktive Verweise)');
-    ok(medien() === m0 && dateien() === d0, `P5 kein neues Medium, keine neue Datei (${medien()}/${m0}, ${dateien()}/${d0})`);
-    const neu = await warteBis(primary, `document.querySelector('[data-product-images="ready"]') && document.querySelector('[data-product-images]').getAttribute('data-product-images-dirty') === '0' && document.querySelectorAll(${S(MASKE + ' img')}).length === 1`, 30000);
-    ok(neu && await exists(primary, '[data-save-product]'), 'P6 die Maske bleibt offen und zeigt jetzt die echte Galerie (das gemeinsame Bild)');
-    const r1 = [await fotoWaehlen(primary, FOTO.b), await speichern(primary)];
+    ok(medien() === m0 && dateien() === d0 && Number(dbQ('SELECT planned_sale_price AS p FROM products WHERE id = ?', [B])[0]?.p) === 4000,
+      `P5 nichts gespeichert: kein neues Medium, keine Datei, Preis unverändert (${medien()}/${m0}, ${dateien()}/${d0})`);
+    const liste = await primary.ev(`return JSON.stringify({ felder: [...document.querySelectorAll('[data-edit-pending-field]')].map(x=>x.getAttribute('data-edit-pending-field')), fotos: document.querySelector('[data-edit-pending-photos]')?.getAttribute('data-edit-pending-photos') || '' });`);
+    ok(/plannedSalePrice/.test(liste) && /"fotos":"1"/.test(liste), `P6 Hinweis: der Preis und 1 neues Foto sind als ungespeichert aufgeführt (${liste})`);
+    const neu = await warteBis(primary, `document.querySelector('[data-product-images="ready"]') && document.querySelector('[data-product-images]').getAttribute('data-product-images-dirty') === '1' && document.querySelectorAll(${S(MASKE + ' img')}).length === 2`, 30000);
+    ok(neu && await preisFeld() === '4400' && await exists(primary, '[data-save-product]'),
+      'P6b die Maske zeigt die echte Galerie (gemeinsames Bild) mit dem wartenden neuen Foto dahinter, der Preis steht noch');
+    const r1 = [await speichern(primary)];
     r1.push((await maskeZu(primary)) ? 'OK' : 'MASKE-OFFEN:' + await fehlerText(primary));
     r1.push((await warteAuf(() => galerie(B).length === 2, 20000)) ? 'OK' : 'NICHT-GESPEICHERT');
-    ok(alleOk(r1) === 'OK' && galerie(B)[0] === fa && galerie(A).join() === fa && verweise(fa) === 2,
-      `P7 dasselbe Foto erneut: gespeichert — B = gemeinsames Bild + eigenes, A unverändert (${alleOk(r1)})`);
+    ok(alleOk(r1) === 'OK' && galerie(B)[0] === fa && galerie(A).join() === fa && verweise(fa) === 2
+      && Number(dbQ('SELECT planned_sale_price AS p FROM products WHERE id = ?', [B])[0]?.p) === 4400,
+      `P7 ein Klick auf Save übernimmt alles: B = gemeinsames Bild + neues Foto, Preis 4400, A unverändert (${alleOk(r1)})`);
     ok((await befehle(client)).some((x) => x.op === 'product_models.merge_photos'), 'P8 PC2 hat über den Primary gemerged (product_models.merge_photos)');
+    // Dasselbe Foto entfernen und erneut wählen (ImageUpload leert das Dateifeld nach dem Einlesen).
+    const r2 = [await bearbeiten(primary, B, 2), await fotoWaehlen(primary, FOTO.d)];
+    r2.push(await mausAuf(primary, `return [...document.querySelectorAll(${S(MASKE + ' .relative')})].pop()?.querySelector('button:not([title])');`, 'Entfernen'));
+    r2.push((await warteBis(primary, `document.querySelectorAll(${S(MASKE + ' img')}).length === 2`, 10000)) ? 'OK' : 'NICHT-ENTFERNT');
+    r2.push(await fotoWaehlen(primary, FOTO.d));
+    ok(alleOk(r2) === 'OK' && await maskenBilder(primary) === 3, `P9 dieselbe Datei nach dem Entfernen erneut gewählt: wird übernommen (${alleOk(r2)})`);
+    await mausText(primary, 'Cancel').catch(() => null); await sleep(800);
   }
 
   // ── V  „Add variant" am PC2 mit dem Modellfoto: ein Auftrag, Zuordnung + derselbe Medienverweis ────────────────────
@@ -384,22 +400,37 @@ try {
   {
     const r0 = [await bearbeiten(client, C, 1)];
     r0.push(await fotoWaehlen(client, FOTO.c2));
-    ok(alleOk(r0) === 'OK', `O1 PC2: Maske von C offen, neues Foto gewählt (${alleOk(r0)})`);
+    if (!NUR_ALTER_PC2) r0.push(await tippeIn(client, inputUnterLabel('SALE PRICE (BHD)'), '4500', 'Sale'));
+    ok(alleOk(r0) === 'OK', `O1 PC2: Maske von C offen, neues Foto gewählt${NUR_ALTER_PC2 ? '' : ', Preis 4500 getippt'} (${alleOk(r0)})`);
     const rm = await mergePhotos(primary, A, fa, [C]);
     ok(rm === 'OK' && await warteAuf(() => galerie(C).join() === [fa, ownC].join(), 20000), `O2 Primary: „Merge photos" (echte Maus) — C zeigt das gemeinsame Bild vorn (${rm})`);
     const m0 = medien(), vorC = galerie(C).join();
     const rs = await speichern(client);
     const meldung = (await warteBis(client, q('[data-save-error]'), 30000)) ? await fehlerText(client) : '';
     await sleep(1500);
-    ok(rs === 'OK' && /changed after this form was opened|not saved/i.test(meldung) && galerie(C).join() === vorC && verweise(fa) >= 2,
-      `O3 PC2 speichert auf altem Stand: abgewiesen, das gemeinsame Bild bleibt („${meldung.slice(0, 90)}")`);
-    ok(medien() === m0, `O4 nichts hinzugefügt (${medien()}/${m0})`);
-    await mausText(client, 'Cancel').catch(() => null); await sleep(800);
-    const r1 = [await bearbeiten(client, C, 2), await fotoWaehlen(client, FOTO.c2), await speichern(client)];
+    ok(rs === 'OK' && /changed after this form was opened|changed elsewhere while this form was open/i.test(meldung) && /not saved|Nothing was saved/i.test(meldung)
+      && galerie(C).join() === vorC && verweise(fa) >= 2,
+      `O3 PC2 speichert auf altem Stand: abgewiesen (bestehende Standprüfung), das gemeinsame Bild bleibt („${meldung.slice(0, 90)}")`);
+    ok(medien() === m0 && Number(dbQ('SELECT planned_sale_price AS p FROM products WHERE id = ?', [C])[0]?.p) === 4000, `O4 nichts gespeichert (${medien()}/${m0})`);
+    let r1;
+    if (NUR_ALTER_PC2) {
+      // Alter PC2 (v0.8.101): bisheriger Weg — schließen, neu öffnen, erneut wählen.
+      await mausText(client, 'Cancel').catch(() => null); await sleep(800);
+      r1 = [await bearbeiten(client, C, 2), await fotoWaehlen(client, FOTO.c2), await speichern(client)];
+    } else {
+      // Neuer PC2: die Maske hat neu geladen, Preis und neues Foto stehen noch — EIN Klick auf Save.
+      const preisC = () => client.ev(`const l=[...document.querySelectorAll('label')].find(x=>x.textContent.trim()==='SALE PRICE (BHD)'); return l ? l.parentElement.querySelector('input').value : null;`);
+      const bereit = await warteBis(client, `document.querySelector('[data-product-images="ready"]') && document.querySelector('[data-product-images]').getAttribute('data-product-images-dirty') === '1' && document.querySelectorAll(${S(MASKE + ' img')}).length === 3`, 30000);
+      const liste = await client.ev(`return [...document.querySelectorAll('[data-edit-pending-field]')].map(x=>x.getAttribute('data-edit-pending-field')).join(',');`);
+      ok(bereit && await preisC() === '4500' && /plannedSalePrice/.test(liste),
+        `O4b PC2: aktuelle Galerie (gemeinsam + eigen) mit wartendem neuen Foto, Preis 4500 steht, als ungespeichert aufgeführt (${liste})`);
+      r1 = [await speichern(client)];
+    }
     r1.push((await maskeZu(client)) ? 'OK' : 'MASKE-OFFEN:' + await fehlerText(client));
     r1.push((await warteAuf(() => galerie(C).length === 3, 30000)) ? 'OK' : 'NICHT-GESPEICHERT');
-    ok(alleOk(r1) === 'OK' && galerie(C)[0] === fa && galerie(C)[1] === ownC && galerie(A).join() === fa,
-      `O5 neu geöffnet und gespeichert: C = gemeinsames + eigenes + neues Bild, A unverändert (${alleOk(r1)})`);
+    ok(alleOk(r1) === 'OK' && galerie(C)[0] === fa && galerie(C)[1] === ownC && galerie(A).join() === fa
+      && (NUR_ALTER_PC2 || Number(dbQ('SELECT planned_sale_price AS p FROM products WHERE id = ?', [C])[0]?.p) === 4500),
+      `O5 gespeichert: C = gemeinsames + eigenes + neues Bild${NUR_ALTER_PC2 ? '' : ', Preis 4500'}, A unverändert (${alleOk(r1)})`);
     ok((await befehle(client)).filter((x) => x.op === 'products.update').length >= 2, 'O6 PC2 speichert über products.update (Primary == PC2)');
   }
   ok(zahl(`SELECT COUNT(*) AS n FROM product_models WHERE model_key = ?`, [MODELL]) === (NUR_ALTER_PC2 ? 3 : 4), 'ENDE die Gruppierung ist vollständig (A, B, C und ggf. die neue Variante)');

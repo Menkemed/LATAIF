@@ -15,6 +15,7 @@ import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore, MEDIA_EDIT_GALLERY_BASELINE_CHANGED, type EditProductResult } from '@/stores/productStore';
+import { pendingEdits, pendingList, rebaseOnFresh, type EditBasis, type PendingEntry } from '@/core/products/edit-pending';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 // CENTRAL-UI-PARITY R6F — der Bildweg auf PC2: Plätze aus dem Entwurf, neue Fotos über die Ablage.
 import { planRemoteGallery, GalleryPlanError } from '@/core/products/gallery-plan';
@@ -126,6 +127,20 @@ export function ProductDetail() {
   const [e2eSeedTick, setE2eSeedTick] = useState(0);
   aiImgRef.current = form.images?.[0]; // R1: mirror current picked image for the stale guard
   const [formAttrs, setFormAttrs] = useState<Record<string, AttributeValue>>({});
+  // KONFLIKT-RÜCKWEG — der Ausgangsstand dieser Maske (beim Öffnen; nach einem Konflikt der neu geladene Stand). Ungespeichert
+  // ist, was der Benutzer gegenüber ihm geändert hat; lädt der Artikel neu, bleiben genau diese Eingaben über den aktuellen
+  // Daten stehen (vorher verwarf das Neuladen sie still).
+  const basis = useRef<EditBasis | null>(null);
+  const formRef = useRef(form); formRef.current = form;
+  const attrsRef = useRef(formAttrs); attrsRef.current = formAttrs;
+  /** Nach einem Konflikt: der nächste neu geladene Stand wird die Grundlage, die Liste zeigt, was noch offen ist. */
+  const neuBasieren = useRef(false);
+  /** Primary: dasselbe Feld wurde auch woanders geändert — der nächste Klick auf Save zeigt das erst und speichert nicht. */
+  const zweiterKlick = useRef(false);
+  /** Neue, noch nicht gespeicherte Fotos warten, bis die Galerie nach einem Konflikt neu geladen ist. */
+  const wartendeFotos = useRef<{ neu: string[]; alteDarstellung: unknown } | null>(null);
+  const [offen, setOffen] = useState<PendingEntry[] | null>(null);
+  const [fotoHinweis, setFotoHinweis] = useState<{ neu: number; verworfen: boolean } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -168,6 +183,7 @@ export function ProductDetail() {
     setImagesDirty(false);
     setDraftSeeded(false);
     gesehenerStand.current = product.updatedAt;
+    basis.current = { form: { ...product } as Record<string, unknown>, attrs: { ...(product.attributes ?? {}) } as Record<string, unknown> };
     setEditing(true);
   }, [searchParams, product, perm.canEditProducts]);
 
@@ -214,6 +230,12 @@ export function ProductDetail() {
   // gate and the save gate can never disagree: media/legacy/empty are final, idle/loading/pending/error
   // are not. No array-length heuristic — an empty gallery is a fact here, not a guess.
   const mediaAuthoritative = !editSaveFailsClosed(media.status);
+  /** Den Bildentwurf setzen (nur wenn er sich wirklich ändert) — vom Seed-Effekt unten benutzt. */
+  const seedDraftImages = (next: string[]) => setForm(f => {
+    const cur = f.images || [];
+    if (cur.length === next.length && cur.every((s, i) => s === next[i])) return f;
+    return { ...f, images: next };
+  });
   // MEDIA-EDIT-PRESERVE-R2 — seed the editor's image list from the FINAL gallery, exactly once per edit
   // session, and only while the user has not touched the images. Setting `draftSeeded` together with the
   // seed is what makes "the draft is based on the real gallery" provable: if a mutation ever slipped in
@@ -231,16 +253,19 @@ export function ProductDetail() {
       w.__e2eResumeGallerySeed = () => setE2eSeedTick(n => n + 1);
       return;
     }
+    // Konflikt-Rückweg: neue, noch nicht gespeicherte Fotos warten, bis die Galerie WIRKLICH neu geladen ist (eine andere
+    // Darstellung als beim Konflikt) — dann kommen sie hinter die echte Galerie, und der Entwurf beruht wieder auf ihr.
+    const warten = wartendeFotos.current;
+    const frisch = !!warten && media !== warten.alteDarstellung;
+    const anhang = frisch ? warten!.neu : [];
     if (media.status === 'media') {
-      const next = media.srcs;
-      setForm(f => {
-        const cur = f.images || [];
-        if (cur.length === next.length && cur.every((s, i) => s === next[i])) return f;
-        return { ...f, images: next };
-      });
+      seedDraftImages([...media.srcs, ...anhang]);
+    } else if (anhang.length > 0 && media.status === 'empty') {
+      seedDraftImages(anhang);
     }
     // 'empty'/'legacy' need no seed: form.images already mirrors products.images ('[]' after a cutover,
     // the legacy data URLs before one — and a legacy product cuts over first on save).
+    if (frisch) { wartendeFotos.current = null; if (anhang.length > 0) setImagesDirty(true); }
     if (!draftSeeded) setDraftSeeded(true);
   }, [editing, imagesDirty, media, mediaAuthoritative, draftSeeded, e2eSeedTick]);
   const hasAuthorisedKey = !!id && !!tenantId && !!sessionBranchId;
@@ -308,6 +333,13 @@ export function ProductDetail() {
     return cid ? categories.find(c => c.id === cid) : null;
   }, [product, categories, editing, form.categoryId]);
 
+  // Maske zu (gespeichert oder abgebrochen): kein Ausgangsstand, keine offenen Hinweise mehr.
+  useEffect(() => {
+    if (editing) return;
+    basis.current = null; neuBasieren.current = false; zweiterKlick.current = false; wartendeFotos.current = null;
+    setOffen(null); setFotoHinweis(null);
+  }, [editing]);
+
   useEffect(() => {
     if (!product) return;
     // AI-IDENTIFY-EDIT §17 — this effect re-syncs the form whenever the store hands back a new
@@ -319,8 +351,36 @@ export function ProductDetail() {
     // The preservation is deliberately narrow: ONLY a draft that has actually been seeded from the
     // final gallery is protected. Before the seed the form legitimately mirrors `product.images`, and
     // the locked-state contract (photo editing disabled until `draftSeeded`) depends on that.
-    setForm((f) => (editing && draftSeeded ? { ...product, images: f.images } : { ...product }));
-    setFormAttrs({ ...product.attributes });
+    const b = basis.current;
+    if (!editing || !b) {
+      setForm((f) => (editing && draftSeeded ? { ...product, images: f.images } : { ...product }));
+      setFormAttrs({ ...product.attributes });
+      return;
+    }
+    // KONFLIKT-RÜCKWEG — aktuelle Artikeldaten, darüber NUR die Eingaben dieser Maske (gegenüber ihrem Ausgangsstand).
+    // Was der Benutzer nicht angefasst hat, kommt frisch vom Artikel; die Bilder bleiben, wie oben beschrieben.
+    const frischAttrs = (product.attributes ?? {}) as Record<string, unknown>;
+    const eingaben = pendingEdits(formRef.current as Record<string, unknown>, attrsRef.current as Record<string, unknown>, b);
+    const neu = rebaseOnFresh(product as unknown as Record<string, unknown>, frischAttrs, eingaben);
+    setForm((f) => ({ ...(neu.form as Partial<Product>), images: draftSeeded ? f.images : product.images }));
+    setFormAttrs(neu.attrs as Record<string, AttributeValue>);
+    if (product.updatedAt === b.form.updatedAt) return;   // derselbe Stand — nichts Neues zu melden
+    const liste = pendingList(eingaben, b, product as unknown as Record<string, unknown>, frischAttrs);
+    if (neuBasieren.current) {
+      // Nach einem Konflikt: die Maske beruht jetzt auf DIESEM Stand (auch die Standprüfung des Fernauftrags); die Liste
+      // zeigt, was noch nicht gespeichert ist. Gespeichert wird erst auf einen erneuten Klick.
+      neuBasieren.current = false;
+      basis.current = { form: { ...product } as Record<string, unknown>, attrs: { ...frischAttrs } };
+      gesehenerStand.current = product.updatedAt;
+      setOffen(liste);
+    } else if (!aendern.remote && liste.some((e) => e.changedElsewhere)) {
+      // Primary: dasselbe Feld wurde inzwischen auch woanders geändert. Nicht still überschreiben — zeigen und einen
+      // ausdrücklichen zweiten Klick verlangen (am PC2 übernimmt das die bestehende Standprüfung des Primary).
+      basis.current = { form: { ...product } as Record<string, unknown>, attrs: { ...frischAttrs } };
+      zweiterKlick.current = true;
+      setOffen(liste);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product, editing, draftSeeded]);
 
   if (!product) {
@@ -368,8 +428,47 @@ export function ProductDetail() {
     return e;
   }
 
+  /** Stand-Konflikte, nach denen die Maske neu lädt und die Eingaben behält (Primary: Galerie; PC2: Standprüfung des Primary). */
+  const STAND_KONFLIKT = new Set([MEDIA_EDIT_GALLERY_BASELINE_CHANGED, 'PRODUCT_RECORD_CHANGED', 'PRODUCT_GALLERY_BASELINE_STALE']);
+  const KONFLIKT_MELDUNG = 'This item was changed elsewhere while this form was open (for example with “Merge photos” on another computer). '
+    + 'Nothing was saved. The form now shows the current data and photos; your entries are kept and listed below — check them and click Save again.';
+  /**
+   * KONFLIKT-RÜCKWEG — nichts wurde gespeichert. Die Maske lädt Artikel (und bei einem Bildvorgang die Galerie) neu und
+   * behält die Eingaben: Felder bleiben über den aktuellen Daten stehen (Effekt oben), neue Fotos warten, bis die echte
+   * Galerie geladen ist, und kommen dann dahinter. Entfernte oder umsortierte Fotos werden NICHT wiederholt (sie könnten
+   * das neue gemeinsame Bild betreffen) — der Hinweis sagt das. Gespeichert wird erst auf einen erneuten Klick.
+   */
+  function konfliktRueckweg(): void {
+    const b = basis.current;
+    if (b && product) {
+      setOffen(pendingList(pendingEdits(form as Record<string, unknown>, formAttrs as Record<string, unknown>, b), b,
+        product as unknown as Record<string, unknown>, (product.attributes ?? {}) as Record<string, unknown>));
+    }
+    if (imagesDirty) {
+      const vorher = media.status === 'media' ? media.items.map((i) => i.url) : [];
+      const entwurf = form.images || [];
+      const neu = entwurf.filter((s) => s.startsWith('data:'));
+      const bestehend = entwurf.filter((s) => !s.startsWith('data:'));
+      const verworfen = !(bestehend.length === vorher.length && bestehend.every((s, i) => s === vorher[i]));
+      wartendeFotos.current = { neu, alteDarstellung: media };
+      setFotoHinweis({ neu: neu.length, verworfen });
+      setImagesDirty(false);
+      setDraftSeeded(false);
+      setMediaReloadNonce((n) => n + 1);
+    }
+    neuBasieren.current = true;
+    loadProducts();
+    setErrors((e) => ({ ...e, _save: KONFLIKT_MELDUNG }));
+  }
+
   async function handleSave() {
     if (!id) return;
+    // KONFLIKT-RÜCKWEG (Primary) — dasselbe Feld wurde inzwischen auch woanders geändert: erst zeigen, dann speichern.
+    if (zweiterKlick.current) {
+      zweiterKlick.current = false;
+      setErrors((e) => ({ ...e, _save: 'Some of your entries were also changed elsewhere in the meantime (see the list below). Click Save again to apply your entries.' }));
+      return;
+    }
     // DESKTOP-CONTRACT severity rule: what the UI presents as an ERROR must actually
     // stop the save — the previous behaviour (show "Required"/"Must be > 0" and save
     // regardless) is exactly the contradiction the live test hit. The required set is
@@ -465,6 +564,7 @@ export function ProductDetail() {
       });
       if (!mountedRef.current || idRef.current !== startId) return;
       if (r.kind !== 'ok') {
+        if ('code' in r && STAND_KONFLIKT.has(String(r.code))) { konfliktRueckweg(); return; }
         if ('code' in r && r.code === 'PRODUCT_EDIT_REASON_REQUIRED') setReasonAsked(true);
         setErrors(e => ({ ...e, _save: fehlertext(r) }));
         return;
@@ -529,6 +629,7 @@ export function ProductDetail() {
     // different/gone product (no stale state, no foreign gallery).
     if (!mountedRef.current || idRef.current !== startId) return;
     if (r.kind !== 'ok') {
+      if (STAND_KONFLIKT.has(String(r.code))) { konfliktRueckweg(); return; }
       // PC2: der Primary hat eine Altgalerie erst umgezogen (nicht bewertet) — die Galerie neu lesen,
       // die Maske bleibt offen, derselbe Klick versucht es erneut.
       if (r.code === 'PRODUCT_CUTOVER_RELOAD') { setMediaReloadNonce(n => n + 1); loadProducts(); }
@@ -556,13 +657,8 @@ export function ProductDetail() {
     if (res.status === 'edit_conflict' && res.errorCode === MEDIA_EDIT_GALLERY_BASELINE_CHANGED) {
       // ARTIKELVARIANTEN — die Fotos wurden inzwischen woanders geändert (z. B. „Merge photos" am PC2). Nichts ist
       // gespeichert. Artikel und Galerie werden neu geladen; die Fotos bleiben gesperrt, bis der Entwurf wieder aus der
-      // ECHTEN Galerie stammt — sonst würde derselbe Klick erneut auf dem alten Stand beruhen.
-      setImagesDirty(false);
-      setDraftSeeded(false);
-      setMediaReloadNonce(n => n + 1);
-      loadProducts();
-      setErrors(e => ({ ...e, _media: 'The photos of this item were changed in the meantime (for example with “Merge photos” on another computer). '
-        + 'Nothing was saved. The item has been reloaded with its current photos and data — please make your changes again.' }));
+      // ECHTEN Galerie stammt — sonst würde derselbe Klick erneut auf dem alten Stand beruhen. Die Eingaben bleiben.
+      konfliktRueckweg();
       return;
     }
     // blocked / incomplete / conflict → NO refresh; editor stays OPEN, draft
@@ -570,6 +666,24 @@ export function ProductDetail() {
     // draft changed under the same batch id).
     if (res.status === 'blocked' && res.errorCode === 'PRODUCT_EDIT_REASON_REQUIRED') setReasonAsked(true);
     setErrors(e => ({ ...e, _media: ('message' in res && res.message) || res.errorCode }));
+  }
+
+  const OFFEN_LABEL: Record<string, string> = {
+    categoryId: 'Category', brand: 'Brand', name: 'Name / Model', sku: 'SKU / Reference', condition: 'Condition',
+    scopeOfDelivery: 'Scope of delivery', storageLocation: 'Storage location', purchaseDate: 'Purchase date',
+    purchasePrice: 'Purchase price', plannedSalePrice: 'Sale price', minSalePrice: 'Min sale price', maxSalePrice: 'Max sale price',
+    taxScheme: 'Tax scheme', supplierName: 'Supplier', purchaseSource: 'Purchase source', paidFrom: 'Paid from', notes: 'Notes',
+  };
+  function offenFeldName(e: PendingEntry): string {
+    if (!e.attr) return OFFEN_LABEL[e.key] ?? e.key;
+    return category?.attributes.find((a) => a.key === e.key)?.label ?? e.key;
+  }
+  function offenWert(key: string, v: unknown): string {
+    if (v === undefined || v === null || v === '') return '—';
+    if (key === 'categoryId') return categories.find((c) => c.id === v)?.name ?? String(v);
+    if (Array.isArray(v)) return v.length ? v.map((x) => (typeof x === 'object' ? JSON.stringify(x) : String(x))).join(', ') : '—';
+    if (typeof v === 'object') return JSON.stringify(v);
+    return String(v);
   }
 
   function labelFor(key: string): string {
@@ -646,6 +760,7 @@ export function ProductDetail() {
                   // Until the user touches an image the save is text-only and never reconciles the
                   // gallery; the image controls stay disabled until the seed effect has run against the
                   // FINAL gallery, so an image edit can never be based on a half-loaded baseline.
+                  basis.current = { form: { ...product } as Record<string, unknown>, attrs: { ...(product.attributes ?? {}) } as Record<string, unknown> };
                   setImagesDirty(false);
                   setDraftSeeded(false);
                   gesehenerStand.current = product.updatedAt;
@@ -683,6 +798,36 @@ export function ProductDetail() {
             marginBottom: 16, padding: '12px 16px', borderRadius: 8, fontSize: 13,
             background: 'rgba(220,80,60,0.08)', border: '1px solid rgba(220,80,60,0.30)', color: '#8B2E22',
           }}>{errors._save || errors._media}</div>
+        )}
+        {/* KONFLIKT-RÜCKWEG — welche Eingaben noch nicht gespeichert sind (gegenüber den jetzt angezeigten aktuellen Daten). */}
+        {editing && ((offen && offen.length > 0) || fotoHinweis) && (
+          <div data-edit-pending style={{
+            marginBottom: 16, padding: '12px 16px', borderRadius: 8, fontSize: 13,
+            background: 'rgba(113,93,227,0.08)', border: '1px solid rgba(113,93,227,0.35)', color: '#0F0F10',
+          }}>
+            <b>Not saved yet — your entries:</b>
+            {offen && offen.length > 0 && (
+              <ul style={{ margin: '6px 0 0 18px', padding: 0 }}>
+                {offen.map((e) => (
+                  <li key={(e.attr ? 'a:' : 'f:') + e.key} data-edit-pending-field={e.key}>
+                    {offenFeldName(e)}: <b>{offenWert(e.key, e.mine)}</b>
+                    {e.changedElsewhere
+                      ? <span data-edit-pending-elsewhere style={{ color: '#8B2E22' }}> — also changed elsewhere, now {offenWert(e.key, e.now)}; saving uses your entry</span>
+                      : <span style={{ color: '#6B7280' }}> — now {offenWert(e.key, e.now)}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {fotoHinweis && fotoHinweis.neu > 0 && (
+              <div data-edit-pending-photos={fotoHinweis.neu} style={{ marginTop: 6 }}>
+                {fotoHinweis.neu} new photo{fotoHinweis.neu === 1 ? '' : 's'} kept — added after the current photos.
+              </div>
+            )}
+            {fotoHinweis?.verworfen && (
+              <div style={{ marginTop: 6, color: '#8B2E22' }}>Removed photos or a new photo order were not kept — please redo them if still wanted.</div>
+            )}
+            <div style={{ marginTop: 6, color: '#4B5563' }}>Click Save to apply them to the current data, or Cancel to drop them.</div>
+          </div>
         )}
 
         {/* Validation banner — appears when Save was clicked with missing required fields. */}
