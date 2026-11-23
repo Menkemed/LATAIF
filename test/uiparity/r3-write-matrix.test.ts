@@ -198,11 +198,15 @@ const MATRIX: Record<string, Zeile> = {
   'transfers.remove': { ui: 'TransferTable/TransferDetail — Edit Transfer: Remove this transfer', gleich: true },
   // Owner 19.11.2026 — „Correct final date" (nur ADMIN): abschließende Zahlung + Endrechnungsdatum, Primary == PC2.
   'invoices.correct_final_date': { ui: 'InvoiceDetail — Correct final date: Correct date', gleich: true },
+  // Owner 23.11.2026 — Artikelvarianten (Primary == PC2): Modell verbinden, aus dem Modell nehmen, gemeinsame Bilder.
+  'product_models.group': { ui: 'Collection/ProductDetail — Group items: Save model', gleich: true },
+  'product_models.ungroup': { ui: 'ProductDetail — Edit group: Remove from model / Dissolve', gleich: true },
+  'product_models.merge_photos': { ui: 'ProductDetail — Merge photos: Merge photos / Undo', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 132, `A 127 Buchungen (v0.8.94 + purchases.correct_payment_date; vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 135, `A 127 Buchungen (v0.8.94 + purchases.correct_payment_date; vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

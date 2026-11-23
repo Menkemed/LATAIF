@@ -66,6 +66,8 @@ import './purchase-lifecycle-commands';
 import './purchase-edit-commands';
 // R6F — die Kommission nach dem Verkauf: Rückgabe nach Verkauf, Verkaufsstorno (R6E-Storno-Grundlage).
 import './consignment-lifecycle-commands';
+// Owner 23.11.2026 — Artikelvarianten: Modellgruppen und gemeinsame Bilder (Hausfolge am Primary, Primary == PC2).
+import './product-model-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
 // fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2
 // bliebe leer.

@@ -112,6 +112,11 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   // ProductDetail: perm.canEditProducts / CustomerDetail: perm.canEditCustomers.
   'products.create': perm('products.edit', 'ProductDetail: perm.canEditProducts'),
   'products.update': perm('products.edit', 'ProductDetail: perm.canEditProducts'),
+  // Owner 23.11.2026 — Artikelvarianten: wer Artikel bearbeiten darf, darf sie zu Modellen verbinden, aus Modellen nehmen
+  // und deren Bilder zusammenführen (die Hausfolge prüft dasselbe Recht auch am Primary).
+  'product_models.group': perm('products.edit', 'Collection/ProductDetail: perm.canEditProducts (Group items)'),
+  'product_models.ungroup': perm('products.edit', 'ProductDetail: perm.canEditProducts (Edit group)'),
+  'product_models.merge_photos': perm('products.edit', 'ProductDetail: perm.canEditProducts (Merge photos)'),
   'customers.create': perm('customers.edit', 'CustomerDetail: perm.canEditCustomers'),
   'customers.update': perm('customers.edit', 'CustomerDetail: perm.canEditCustomers'),
 

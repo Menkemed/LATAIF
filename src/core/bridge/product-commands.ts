@@ -648,3 +648,7 @@ registerCommand(OP_PRODUCTS_UPDATE, {
   kind: 'mutation',
   handler: (payload, actor?: CommandActor) => execute(runProductUpdate, OP_PRODUCTS_UPDATE, payload, actor),
 });
+
+// Owner 23.11.2026 — Artikelvarianten: die Modellgruppen-Befehle gehoeren zu den Artikel-Befehlen (gleiches Recht,
+// gleiche Gegenstelle); wer die Artikel-Befehle laedt, kennt auch sie.
+import './product-model-commands';

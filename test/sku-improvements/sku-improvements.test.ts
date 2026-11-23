@@ -409,7 +409,7 @@ const vorschau = (input: Record<string, unknown>, actor: Record<string, unknown>
   ok(/const FORBIDDEN = \[[\s\S]*?'sku'/.test(pc), 'F products.update: sku bleibt verboten');
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_PRODUCTS_SKU_PREVIEW_GET: &str = "products\.sku_preview\.get";/.test(rs)
-    && /OP_PAGE_COST_CORRECTIONS_GET,\s*\/\/ v0\.8\.91[^\n]*\n\s*OP_PRODUCTS_SKU_PREVIEW_GET,\s*(?:\/\/[^\n]*\n\s*)?(?:OP_CUSTOMERS_SETTLE_BALANCE,\s*OP_CUSTOMERS_SETTLEMENT_REVERSE,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_PURCHASES_CANCEL_RETURN,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_TRANSFERS_REMOVE,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_INVOICES_CORRECT_FINAL_DATE,\s*)?\];/.test(rs),
+    && /OP_PAGE_COST_CORRECTIONS_GET,\s*\/\/ v0\.8\.91[^\n]*\n\s*OP_PRODUCTS_SKU_PREVIEW_GET,\s*(?:\/\/[^\n]*\n\s*)?(?:OP_CUSTOMERS_SETTLE_BALANCE,\s*OP_CUSTOMERS_SETTLEMENT_REVERSE,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_PURCHASES_CANCEL_RETURN,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_TRANSFERS_REMOVE,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_INVOICES_CORRECT_FINAL_DATE,\s*)?(?:\/\/[^\n]*\n\s*)?(?:OP_PRODUCT_MODELS_GROUP,\s*OP_PRODUCT_MODELS_UNGROUP,\s*OP_PRODUCT_MODELS_MERGE_PHOTOS,\s*)?\];/.test(rs),
   'F Rust lässt die Vorschau namentlich durch (am Ende der Liste; seither folgen nur die zwei Befehle aus CUSTOMER ACCOUNT C, „Cancel return" v0.8.101, das Transfer-Remove 14.11. und die Endrechnungsdatum-Korrektur 19.11.)');
 }
 

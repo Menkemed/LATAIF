@@ -202,6 +202,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // Owner 19.11.2026 — „Correct final invoice date" (nur ADMIN): abschließende Zahlung und festes Endrechnungsdatum gemeinsam
   // berichtigen, die Nummer bleibt; Hausfolge `correctFinalInvoiceDateInHouse` mit Grund, Fassung, Stichtag und VAT-Sperren.
   'invoices.correct_final_date',
+  // Owner 23.11.2026 — Artikelvarianten (Lösung E): Artikel zu einem Modell verbinden, aus dem Modell nehmen bzw. die
+  // Gruppierung aufheben, „Merge Photos" (gemeinsames bestehendes Bild, Rückgängig). Hausfolge `product-models.ts` —
+  // nur die Zuordnung bzw. die Bildverweise; Artikel, Lose und Buchungen bleiben unberührt.
+  'product_models.group', 'product_models.ungroup', 'product_models.merge_photos',
 ];
 
 export interface CommandSpec {

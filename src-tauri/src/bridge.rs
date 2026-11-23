@@ -318,6 +318,12 @@ pub const OP_TRANSFERS_REMOVE: &str = "transfers.remove";
 // Owner 19.11.2026 — „Correct final invoice date" (nur ADMIN): abschliessende Zahlung und festes Endrechnungsdatum
 // gemeinsam berichtigen, die Nummer bleibt; geprueft und gespeichert am Primary.
 pub const OP_INVOICES_CORRECT_FINAL_DATE: &str = "invoices.correct_final_date";
+// Owner 23.11.2026 — Artikelvarianten (Loesung E): Artikel zu einem Modell verbinden, aus dem Modell nehmen bzw. die
+// Gruppierung aufheben, und „Merge Photos" (gemeinsames bestehendes Bild, Rueckgaengig). Nur die Zuordnung bzw. die
+// Bildverweise; geprueft und gespeichert am Primary, Primary == PC2.
+pub const OP_PRODUCT_MODELS_GROUP: &str = "product_models.group";
+pub const OP_PRODUCT_MODELS_UNGROUP: &str = "product_models.ungroup";
+pub const OP_PRODUCT_MODELS_MERGE_PHOTOS: &str = "product_models.merge_photos";
 pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
 pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
@@ -603,6 +609,10 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_TRANSFERS_REMOVE,
     // Owner 19.11.2026 — das Endrechnungsdatum berichtigen (nur ADMIN, Primary == PC2).
     OP_INVOICES_CORRECT_FINAL_DATE,
+    // Owner 23.11.2026 — Artikelvarianten: Modellgruppen und gemeinsame Bilder (Primary == PC2).
+    OP_PRODUCT_MODELS_GROUP,
+    OP_PRODUCT_MODELS_UNGROUP,
+    OP_PRODUCT_MODELS_MERGE_PHOTOS,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

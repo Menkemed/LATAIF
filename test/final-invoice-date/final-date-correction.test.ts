@@ -499,7 +499,7 @@ const nbrMonat = (inv: string): string => nbrMonthTotals([storeInv(inv)], new Ma
   'K8 freigegeben und nur für ADMIN (isOwner) eingetragen');
   // Zeilenenden vereinheitlichen: ein Windows-Checkout (core.autocrlf) liefert CRLF, die Prüfung „steht am Ende der Liste" gilt für beide.
   const rust = src('src-tauri/src/bridge.rs').replace(/\r\n/g, '\n');
-  ok(/OP_INVOICES_CORRECT_FINAL_DATE: &str = "invoices\.correct_final_date"/.test(rust) && /\n\s+OP_INVOICES_CORRECT_FINAL_DATE,\n\];/.test(rust),
+  ok(/OP_INVOICES_CORRECT_FINAL_DATE: &str = "invoices\.correct_final_date"/.test(rust) && /\n\s+OP_INVOICES_CORRECT_FINAL_DATE,\n(?:\s*\/\/[^\n]*\n)?(?:\s+OP_PRODUCT_MODELS_GROUP,\n\s+OP_PRODUCT_MODELS_UNGROUP,\n\s+OP_PRODUCT_MODELS_MERGE_PHOTOS,\n)?\];/.test(rust),
     'K8 Rust-Brücke lässt den Befehl durch (REMOTE_OPS)');
 }
 
