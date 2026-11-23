@@ -269,12 +269,15 @@ try {
   // ── Der Client bestimmt nichts ──────────────────────────────────────────
   const missing = await clientRead('products.get', { id: 'does-not-exist' });
   ok(missing.status === 409, `GUARD an unknown id is a business answer, not a crash (${missing.status})`);
-  const forbidden = await clientRead('products.create', { brand: 'X' });
+  // Seit C3B/C3C (05.09.2026) sind products.create, invoices.create und customers.update freigegebene Fernaufträge — die
+  // ursprünglichen C2-Erwartungen (04.09.) waren damit veraltet (seit v0.8.x rot, auch gegen v0.8.101 selbst: 36/3).
+  // Die Absicht bleibt und wird geschärft: ein NICHT freigegebener Name und jedes Löschen von außen werden abgewiesen.
+  const forbidden = await clientRead('products.merge_duplicates', { sourceId: 'x', targetId: 'y' });
   ok(forbidden.status === 400 && forbidden.body.error === 'BRIDGE_OP_NOT_ALLOWED',
     `GUARD a name that is not allow-listed is refused (${forbidden.status} ${forbidden.body.error})`);
   const sqlish = await clientRead('SELECT * FROM products', {});
   ok(sqlish.status === 400, `GUARD and SQL is not an operation (${sqlish.status})`);
-  for (const op of ['invoices.create', 'products.delete', 'customers.update']) {
+  for (const op of ['invoices.delete', 'products.delete', 'customers.delete', 'transfers.delete', 'product_models.delete']) {
     const r = await clientRead(op, {});
     ok(r.status === 400 && r.body.error === 'BRIDGE_OP_NOT_ALLOWED', `GUARD ${op} cannot be called`);
   }
