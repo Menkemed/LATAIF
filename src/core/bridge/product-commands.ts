@@ -67,6 +67,7 @@ import {
 } from './remote-create-support';
 import { planProductCreate, productCreateRefusal } from '@/core/products/product-create';
 import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
+import { attachNewVariantInHouse, checkVariantFits, ProductModelRejected, type VariantIntent } from '@/core/products/product-models';
 
 // R5B — die Bausteine der Zwischenablage wohnen jetzt in `remote-create-support` (die Kommission
 // braucht dieselben). Die Namen bleiben hier erreichbar, damit kein Leser umziehen muss.
@@ -175,6 +176,12 @@ export interface ProductCreateRequest {
   /** R5B — eine eingetippte SKU, getrimmt. Fehlt sie, vergibt der Primary eine. */
   sku?: string;
   stagingIds: string[];
+  /**
+   * ARTIKELVARIANTEN — „Add variant": der neue Artikel tritt in DERSELBEN Transaktion dem Modell bei (und verweist auf
+   * Wunsch auf das bestehende Modellbild). Gelingt das nicht, wird auch der Artikel nicht angelegt. Ein alter Client
+   * schickt das Feld nie; ein alter Primary weist es als unbekanntes Feld ab (nichts geschieht).
+   */
+  variant?: VariantIntent;
 }
 
 /**
@@ -189,8 +196,8 @@ export interface ProductCreateRequest {
  */
 export function parseProductCreate(raw: unknown): ProductCreateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { categoryId, stagingIds, sku, ...rest } = raw as {
-    categoryId?: unknown; stagingIds?: unknown; sku?: unknown;
+  const { categoryId, stagingIds, sku, variant, ...rest } = raw as {
+    categoryId?: unknown; stagingIds?: unknown; sku?: unknown; variant?: unknown;
   };
   if (typeof categoryId !== 'string' || categoryId.trim() === '') {
     throw new ProductPayloadError('categoryId is required');
@@ -207,7 +214,17 @@ export function parseProductCreate(raw: unknown): ProductCreateRequest {
   // Kein Pfad, kein Dateiname, keine URL — nur ein Inhaltshash; abgewiesen, bevor daraus irgendwo
   // ein Dateizugriff wird.
   const ids = parseStagingIds(stagingIds, (m) => new ProductPayloadError(m));
-  return { categoryId, data, sku: typed, stagingIds: ids };
+  return { categoryId, data, sku: typed, stagingIds: ids, ...(variant !== undefined ? { variant: parseVariantIntent(variant) } : {}) };
+}
+
+/** ARTIKELVARIANTEN — streng: nur {modelKey, pickMediaId?}, beide Kennungen. */
+function parseVariantIntent(v: unknown): VariantIntent {
+  if (!isPlain(v)) throw new ProductPayloadError('variant must be an object');
+  for (const k of Object.keys(v)) if (k !== 'modelKey' && k !== 'pickMediaId') throw new ProductPayloadError(`unknown field: variant.${k}`);
+  const ok = (x: unknown): x is string => typeof x === 'string' && x.trim() !== '' && x.length <= 200;
+  if (!ok(v.modelKey)) throw new ProductPayloadError('variant.modelKey is required');
+  if (v.pickMediaId !== undefined && v.pickMediaId !== null && !ok(v.pickMediaId)) throw new ProductPayloadError('variant.pickMediaId must be an id');
+  return { modelKey: v.modelKey.trim(), pickMediaId: ok(v.pickMediaId) ? v.pickMediaId.trim() : null };
 }
 
 /** Ein Platz in der gewünschten Galerie: ein behaltenes Bild oder ein neues aus der Ablage. */
@@ -314,6 +331,8 @@ export type ProductCommandResult = {
   sku: string;
   name: string;
   imageCount: number;
+  /** ARTIKELVARIANTEN — gesetzt, wenn der Artikel als Variante einem Modell beigetreten ist */
+  modelKey?: string;
 };
 
 export interface ProductEngineExtras {
@@ -408,6 +427,16 @@ export async function runProductCreate(
       const refusal = productCreateRefusal(plan);
       throw new CommandRejected(refusal.code, refusal.message);
     }
+    // ARTIKELVARIANTEN — VOR dem Anlegen: passt der neue Artikel in das Modell? Ein Nein lässt alles unverändert.
+    const variantCtx = { branchId: identity.branchId, userId: identity.userId, now: deps.now(), role: (identity as CommandIdentity & { role?: string }).role ?? null };
+    if (req.variant) {
+      try {
+        checkVariantFits(req.variant, { categoryId: req.categoryId, brand: plan.data.brand as string, attributes: plan.data.attributes as Record<string, unknown> }, variantCtx);
+      } catch (err) {
+        if (err instanceof ProductModelRejected) throw new CommandRejected(err.code, err.message);
+        throw err;
+      }
+    }
     const sku = plan.data.sku;
     const result = await store.createProductWithMedia(
       plan.data as never,
@@ -427,11 +456,22 @@ export async function runProductCreate(
       // die gibt es die Medien-Müllabfuhr; ein Produkt ohne seine Bilder gibt es nicht.
       throw new CommandNotEvaluated('PRODUCT_MEDIA_INCOMPLETE', `${result.status}: ${result.errorCode}`);
     }
+    // ARTIKELVARIANTEN — Zuordnung (und Modellbild) in DERSELBEN Transaktion: ein Nein rollt auch die Anlage zurück.
+    let modelKey: string | undefined;
+    if (req.variant) {
+      try {
+        modelKey = attachNewVariantInHouse(result.productId, req.variant, variantCtx).modelKey;
+      } catch (err) {
+        if (err instanceof ProductModelRejected) throw new CommandRejected(err.code, err.message);
+        throw err;
+      }
+    }
     const value: ProductCommandResult = {
       productId: result.productId,
       sku,
       name: String(plan.data.name ?? ''),
       imageCount: images.length,
+      ...(modelKey ? { modelKey } : {}),
     };
     return value;
   });

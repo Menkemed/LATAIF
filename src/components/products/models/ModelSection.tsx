@@ -71,7 +71,10 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
         </div>
         {canEdit && (
           <div className="flex items-center gap-2" style={{ flexWrap: 'wrap' }}>
-            <Button variant="primary" onClick={() => navigate(`/collection?variantOf=${encodeURIComponent(product.id)}`)} data-model-add-variant>+ Add variant</Button>
+            {/* „Add variant" legt über „New Item" EIGENE Ware an — ein Kommissionsmodell wächst nur über die Kommissionsaufnahme. */}
+            {!s.members.some((m) => m.sourceType === 'CONSIGNMENT') && (
+              <Button variant="primary" onClick={() => navigate(`/collection?variantOf=${encodeURIComponent(product.id)}`)} data-model-add-variant>+ Add variant</Button>
+            )}
             <Button variant="ghost" onClick={() => setMergeOpen(true)} data-model-merge-photos>Merge photos</Button>
             <Button variant="ghost" onClick={() => setEditOpen(true)} data-model-edit-group>Edit group</Button>
           </div>

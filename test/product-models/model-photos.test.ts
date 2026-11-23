@@ -265,5 +265,30 @@ ok(gallery(p2).join() === pick, 'X8 die andere Variante behält das gemeinsame B
   ok(n(db3, 'SELECT COUNT(*) FROM product_models') === modelsVor, 'O4 die Gruppierung übersteht jede Bearbeitung des alten PC2');
 }
 
+// ── 8 Medien-Freigabe (Wartung) nach „Lösen": nur das gelöste Altbild wird frei; Rückgängig lehnt danach sauber ab ──────
+{
+  const { releaseDeadMedium } = await import('../../src/core/media/old-version-release.ts');
+  const db4 = freshDb();
+  const a = await variant(db4, '16', 41); const b = await variant(db4, '17', 42);
+  const { modelKey: key } = M.groupProductsInHouse({ productIds: [a, b] }, CTX);
+  const pickA = M.activeGallery(a, 'branch-main')[0]; const ownB = M.activeGallery(b, 'branch-main')[0];
+  const res = M.mergeModelPhotosInHouse({ modelKey: key, pickMediaId: pickA, detachOld: true, targets: [{ productId: b, expectedUpdatedAt: upd(db4, b) }] },
+    { ...CTX, now: '2026-11-23T13:00:00.000Z' });
+  const plan = planDeadMediaRelease(db4 as never);
+  const cand = plan.candidates.find((c) => c.mediaId === ownB);
+  ok(!!cand && !plan.candidates.some((c) => c.mediaId === pickA), 'R1 Freigabe-Plan: nur das gelöste Altbild ist frei, das gemeinsame nie');
+  releaseDeadMedium(db4 as never, cand!, '2026-11-23T13:10:00.000Z');
+  ok(n(db4, 'SELECT COUNT(*) FROM media_objects WHERE media_id = ? AND deleted_at IS NOT NULL', [ownB]) === 1
+    && n(db4, 'SELECT COUNT(*) FROM media_objects WHERE media_id = ? AND deleted_at IS NULL', [pickA]) === 1,
+    'R2 Freigabe (Wartung) markiert NUR das gelöste Altbild; das gemeinsame Bild bleibt in Gebrauch');
+  const vorher = [M.activeGallery(a, 'branch-main').join(), M.activeGallery(b, 'branch-main').join(), upd(db4, b)].join('|');
+  let code = '';
+  try {
+    M.mergeModelPhotosInHouse({ modelKey: key, restore: res.products.map((x) => ({ productId: x.productId, mediaIds: x.previousMediaIds, expectedUpdatedAt: x.updatedAt })) }, CTX);
+  } catch (e) { code = (e as { code?: string }).code ?? String(e); }
+  ok(code === 'MODEL_PHOTO_RESTORE_UNAVAILABLE' && [M.activeGallery(a, 'branch-main').join(), M.activeGallery(b, 'branch-main').join(), upd(db4, b)].join('|') === vorher,
+    `R3 Rückgängig nach der Freigabe: sauberes Nein, nichts halb geändert (${code})`);
+}
+
 console.log(`\nmodel-photos: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

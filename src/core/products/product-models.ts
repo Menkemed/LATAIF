@@ -241,6 +241,60 @@ export function groupProductsInHouse(input: GroupInput, ctx: ProductModelCtx): G
   return { modelKey: p.modelKey, added: p.add };
 }
 
+// ── Add Variant: ein NEUER Artikel tritt einem Modell bei (in DERSELBEN Transaktion wie seine Anlage) ──────────────
+
+export interface VariantIntent {
+  modelKey: string;
+  /** auf Wunsch das bestehende Modellbild (ein Medium, das an einem Artikel dieses Modells hängt) */
+  pickMediaId?: string | null;
+}
+export interface VariantCandidateData {
+  categoryId: string;
+  brand?: string | null;
+  attributes?: Record<string, unknown> | null;
+}
+
+/**
+ * Passt ein NEU anzulegender Artikel in das Modell? „Add variant" legt über den gewöhnlichen Weg („New Item") an —
+ * und der legt eigene Ware an. Eine Kommissions-Variante entsteht nur über die Kommissionsaufnahme. Wirft vor jedem Schreiben.
+ */
+export function checkVariantFits(intent: VariantIntent, data: VariantCandidateData, ctx: ProductModelCtx): void {
+  assertMayEdit(ctx);
+  const members = membersOf(String(intent.modelKey ?? ''));
+  if (members.length < 2) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
+  const anchorRow = productRows([members[0]])[0];
+  if (!anchorRow) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
+  const anchor = candidateOf(anchorRow!);
+  if (anchor.branchId !== ctx.branchId) nein('PRODUCT_MODEL_OTHER_BRANCH', 'Models can only be changed in their own branch.');
+  if (norm(anchor.ownership) === 'consignment') {
+    nein('PRODUCT_MODEL_VARIANT_CONSIGNMENT', 'This model is consignment stock — add further pieces through the consignment intake, not as a new own item.');
+  }
+  const reason = modelCompatibilityReason(anchor, {
+    id: '__new__', branchId: ctx.branchId, categoryId: String(data.categoryId ?? ''), brand: String(data.brand ?? ''),
+    attributes: (data.attributes ?? {}) as Record<string, unknown>, ownership: 'OWN', stockStatus: 'in_stock',
+  });
+  if (reason) nein('PRODUCT_MODEL_INCOMPATIBLE', `The new item does not fit this model: ${reason}`);
+}
+
+/**
+ * Den eben angelegten Artikel dem Modell zuordnen und — auf Wunsch — auf das bestehende Modellbild verweisen. Läuft in
+ * der Transaktion der Anlage (Primary: `createVariantOnPrimary`, PC2: `products.create` mit `variant`): wirft es, ist
+ * auch der Artikel nicht angelegt. So gibt es nie einen Artikel, der still ohne seine Zuordnung bleibt.
+ */
+export function attachNewVariantInHouse(productId: string, intent: VariantIntent, ctx: ProductModelCtx): { modelKey: string; photoLinked: boolean } {
+  const g = groupProductsInHouse({ productIds: [productId], modelKey: intent.modelKey }, ctx);
+  let photoLinked = false;
+  if (intent.pickMediaId) {
+    const updatedAt = String(query('SELECT updated_at FROM products WHERE id = ?', [productId])[0]?.updated_at ?? '');
+    mergeModelPhotosInHouse({
+      modelKey: intent.modelKey, pickMediaId: intent.pickMediaId, detachOld: false,
+      targets: [{ productId, expectedUpdatedAt: updatedAt }],
+    }, ctx);
+    photoLinked = true;
+  }
+  return { modelKey: g.modelKey, photoLinked };
+}
+
 // ── Entfernen / Auflösen ──────────────────────────────────────────────────────────────────────────────────
 
 export interface RemoveInput { productIds: string[] }

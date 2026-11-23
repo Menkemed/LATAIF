@@ -28,8 +28,9 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { ModelCard } from '@/components/products/models/ModelCard';
 import { GroupItemsModal } from '@/components/products/models/GroupItemsModal';
 import { modelMembers, summarizeModel } from '@/core/products/product-models-view';
-import { PRODUCT_MODELS_GROUP_OP, PRODUCT_MODELS_MERGE_PHOTOS_OP, modelDisplayName } from '@/core/products/product-models';
-import { groupProductsOnPrimary, loadVariantGallery, mergeModelPhotosOnPrimary } from '@/core/products/product-models-primary';
+import { modelCompatibilityReason, modelDisplayName } from '@/core/products/product-models';
+import { candidateOfProduct } from '@/core/products/product-models-view';
+import { createVariantOnPrimary, loadVariantGallery } from '@/core/products/product-models-primary';
 import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
 import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
 import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
@@ -197,8 +198,6 @@ export function WatchList() {
   const [groupItemsOpen, setGroupItemsOpen] = useState(false);
   // ARTIKELVARIANTEN — „Add variant": dieselbe New-Item-Maske, vorbefüllt aus dem Modell; danach Zuordnung (+ Modellbild).
   const [variantCtx, setVariantCtx] = useState<null | { modelKey: string; modelName: string; templateId: string; reusePhoto: boolean }>(null);
-  const [variantNote, setVariantNote] = useState<string | null>(null);
-  const wVariant = useSharedWrites();
   const [searchParams, setSearchParams] = useSearchParams();
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
@@ -404,8 +403,6 @@ export function WatchList() {
     setRetrySku('');
     setErrors({});
     w.clear();
-    wVariant.clear();
-    setVariantNote(null);
     const members = modelMembers(products, productModels, modelKey);
     setVariantCtx({ modelKey, modelName: modelDisplayName(members.map((m) => m.name)), templateId: template.id, reusePhoto: true });
     setShowNew(true);
@@ -453,6 +450,15 @@ export function WatchList() {
     }
     // ARTIKELVARIANTEN — keine automatische Steuerart: bei „Add variant" wählt der Mensch sie selbst.
     if (variantCtx && !form.taxScheme) errs.taxScheme = 'Choose the tax scheme for this item.';
+    // ARTIKELVARIANTEN — dieselbe Regel wie am Primary, schon vor dem Speichern: passt das neue Stück in das Modell?
+    if (variantCtx) {
+      const tpl = products.find((x) => x.id === variantCtx.templateId);
+      const why = tpl ? modelCompatibilityReason(candidateOfProduct(tpl, currentBranchId()), {
+        id: '__new__', branchId: currentBranchId(), categoryId: String(form.categoryId ?? ''), brand: String(form.brand ?? ''),
+        attributes: (form.attributes ?? {}) as Record<string, unknown>, ownership: 'OWN', stockStatus: 'in_stock',
+      }) : null;
+      if (why) errs.categoryId = `This piece does not fit the model: ${why}`;
+    }
     return errs;
   }
 
@@ -524,6 +530,13 @@ export function WatchList() {
       // gestrichen (eine Stahluhr trägt keine Goldfarbe), eine eingetippte SKU getrimmt und gegen
       // den Bestand geprüft, sonst die Nummer HIER beansprucht — nie aus der Vorschau. Ein Retry
       // nutzt die schon beanspruchte weiter: eine Anlage verbraucht genau eine Nummer.
+      // ARTIKELVARIANTEN — auf Wunsch das bestehende Modellbild (nur ohne eigenes Foto). Gelesen VOR dem Auftrag.
+      let variantIntent: { modelKey: string; pickMediaId: string | null } | null = null;
+      if (variantCtx) {
+        const own = (form.images || []).length > 0;
+        const g = variantCtx.reusePhoto && !own ? await loadVariantGallery(variantCtx.templateId) : null;
+        variantIntent = { modelKey: variantCtx.modelKey, pickMediaId: g?.mediaIds[0] ?? null };
+      }
       const r = await w.save('products.create', {
         local: async () => {
           const plan = planProductCreate(form, {
@@ -533,17 +546,17 @@ export function WatchList() {
           }, retrySku);
           if (plan.kind !== 'ok') throw new Error(productCreateRefusal(plan).message);
           if (plan.allocated) setRetrySku(plan.data.sku);
+          // ARTIKELVARIANTEN — Anlage, Zuordnung und Modellbild in EINER Transaktion (gelingt ein Teil nicht: nichts angelegt).
+          if (variantIntent) return createVariantOnPrimary(plan.data, variantIntent);
           return createProductWithMedia(plan.data, retryProductId ?? undefined);
         },
-        remote: () => productCreateRequest(form, stagingIds),
+        // PC2: DERSELBE eine Auftrag `products.create`, mit der Variante im Rumpf — eine Kennung, ein Nachweis, ein Klären.
+        remote: () => (variantIntent ? { ...productCreateRequest(form, stagingIds), variant: variantIntent } : productCreateRequest(form, stagingIds)),
       });
       // Nicht geglückt: der Grund steht in `w.fehler`, die Maske bleibt offen, und derselbe Klick
       // wiederholt DIESELBE Absicht (ein offener Ausgang behält seine Kennung).
       if (r.kind !== 'ok') return;
       setErrors({});
-      const createdId = String((r.value as { productId?: string } | null)?.productId ?? '');
-      const variantDone = variantCtx && createdId ? await attachVariant(createdId, variantCtx) : null;
-      if (variantDone) setVariantNote(variantDone);
       if (w.remote) {
         // Der Primary hat Artikel, Nummer und Bilder in EINER Transaktion angelegt.
         setCreateWarning(null);
@@ -575,28 +588,6 @@ export function WatchList() {
       createInFlight.current = false;
       setCreateBusy(false);
     }
-  }
-
-  // ARTIKELVARIANTEN — der neue Artikel ist angelegt (über den gewöhnlichen Weg). Jetzt: Zuordnung zum Modell und, wenn
-  // gewünscht und der Artikel ohne eigenes Foto angelegt wurde, der Verweis auf das bestehende Modellbild (keine neue Datei).
-  // Schlägt einer der Schritte fehl, bleibt der Artikel bestehen — die Meldung sagt, was nachzuholen ist.
-  async function attachVariant(newId: string, ctx: { modelKey: string; templateId: string; reusePhoto: boolean }): Promise<string | null> {
-    const grouped = await wVariant.save(PRODUCT_MODELS_GROUP_OP, {
-      local: () => groupProductsOnPrimary({ productIds: [newId], modelKey: ctx.modelKey }),
-      remote: () => ({ productIds: [newId], modelKey: ctx.modelKey }),
-    });
-    if (grouped.kind !== 'ok') return 'The item was created, but it could not be added to the model. Open it and use “Group with other items”.';
-    if (!ctx.reusePhoto || (form.images || []).length > 0) return null;
-    const tpl = await loadVariantGallery(ctx.templateId);
-    const fresh = await loadVariantGallery(newId);
-    const pick = tpl?.mediaIds[0];
-    if (!pick || !fresh) return 'The item was added to the model. The model photo could not be linked — use “Merge photos” on the item.';
-    const merged = await wVariant.save(PRODUCT_MODELS_MERGE_PHOTOS_OP, {
-      local: () => mergeModelPhotosOnPrimary({ modelKey: ctx.modelKey, pickMediaId: pick, detachOld: false, targets: [{ productId: newId, expectedUpdatedAt: fresh.updatedAt }] }),
-      remote: () => ({ modelKey: ctx.modelKey, pickMediaId: pick, detachOld: false, targets: [{ productId: newId, expectedUpdatedAt: fresh.updatedAt }] }),
-    });
-    if (merged.kind !== 'ok') return 'The item was added to the model. The model photo could not be linked — use “Merge photos” on the item.';
-    return null;
   }
 
   function updateAttr(key: string, value: string | number | boolean) {
@@ -1315,15 +1306,6 @@ export function WatchList() {
       </Modal>
 
       <GroupItemsModal open={groupItemsOpen} onClose={() => setGroupItemsOpen(false)} />
-      {variantNote && (
-        <Modal open onClose={() => setVariantNote(null)} title="Add variant" width={480}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13 }}>
-            <span data-variant-note>{variantNote}</span>
-            <WriteError text={wVariant.fehler} />
-            <div className="flex justify-end"><Button variant="primary" onClick={() => setVariantNote(null)}>OK</Button></div>
-          </div>
-        </Modal>
-      )}
       <DuplicateWarningModal
         open={duplicateMatches.length > 0}
         matches={duplicateMatches}
