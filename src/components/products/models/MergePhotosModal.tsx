@@ -12,7 +12,8 @@ import { useProductStore } from '@/stores/productStore';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { mayChangeVariantPhoto, PRODUCT_MODELS_MERGE_PHOTOS_OP, type MergePhotosInput, type MergePhotosResult } from '@/core/products/product-models';
 import { loadVariantGallery, mergeModelPhotosOnPrimary } from '@/core/products/product-models-primary';
-import { modelMembers, sizeOf } from '@/core/products/product-models-view';
+import { karatOf, modelMembers, sizeOf } from '@/core/products/product-models-view';
+import { sameKarat } from '@/core/products/variant-seed';
 import type { Product } from '@/core/models/types';
 
 interface Props {
@@ -85,6 +86,8 @@ export function MergePhotosModal({ open, modelKey, tenantId, branchId, onClose, 
   // Bilder im alten Format (in der Datenbank eingebettet) ziehen beim Merge zuerst in den Bildspeicher (der Primary macht das).
   const altformat = targets.filter((m) => gal[m.id]?.legacy);
   const pickOwner = options.find((o) => o.mediaId === pick)?.owner;
+  // PURCHASE ADD VARIANT — ein Bild über verschiedene Goldfarben/Karate nur nach sichtbarer Warnung.
+  const andereFarbe = pickOwner ? targets.filter((m) => !sameKarat(m, pickOwner)) : [];
 
   async function run(input: MergePhotosInput) {
     const r = await w.save<MergePhotosResult>(PRODUCT_MODELS_MERGE_PHOTOS_OP, {
@@ -198,6 +201,11 @@ export function MergePhotosModal({ open, modelKey, tenantId, branchId, onClose, 
         {confirming ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: '10px 12px', borderLeft: '3px solid #715DE3', background: 'rgba(113,93,227,0.09)', borderRadius: '0 8px 8px 0', fontSize: 12.5 }}>
             <span>Merge photos for {targets.map((t) => t.sku || t.name).join(', ')}? Sold items, invoices, the audit history and older photo references stay unchanged.</span>
+            {andereFarbe.length > 0 && (
+              <span data-merge-karat-warning style={{ color: '#B45309' }}>
+                Different Karat &amp; Color: the photo shows {karatOf(pickOwner!) || 'no karat'}, but {andereFarbe.map((t) => `${t.sku || t.name} (${karatOf(t) || '—'})`).join(', ')} differ. Use it only if the photo really fits these pieces.
+              </span>
+            )}
             <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <input type="checkbox" checked={ack} onChange={() => setAck((a) => !a)} data-merge-ack /> I have checked the preview.
             </label>

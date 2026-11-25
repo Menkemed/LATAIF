@@ -67,7 +67,7 @@ import {
 } from './remote-create-support';
 import { planProductCreate, productCreateRefusal } from '@/core/products/product-create';
 import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
-import { attachNewVariantInHouse, checkVariantFits, ProductModelRejected, type VariantIntent } from '@/core/products/product-models';
+import { attachNewVariantInHouse, checkVariantFits, parseVariantShape, ProductModelRejected, type VariantIntent } from '@/core/products/product-models';
 
 // R5B — die Bausteine der Zwischenablage wohnen jetzt in `remote-create-support` (die Kommission
 // braucht dieselben). Die Namen bleiben hier erreichbar, damit kein Leser umziehen muss.
@@ -217,14 +217,12 @@ export function parseProductCreate(raw: unknown): ProductCreateRequest {
   return { categoryId, data, sku: typed, stagingIds: ids, ...(variant !== undefined ? { variant: parseVariantIntent(variant) } : {}) };
 }
 
-/** ARTIKELVARIANTEN — streng: nur {modelKey, pickMediaId?}, beide Kennungen. */
+/**
+ * ARTIKELVARIANTEN — streng: {modelKey | anchorProductId, pickMediaId?}, Kennungen. PURCHASE ADD VARIANT — additiv:
+ * `anchorProductId` (Ausgangsartikel, auch ohne Modell). Ein älterer Client schickt weiter nur `modelKey`.
+ */
 function parseVariantIntent(v: unknown): VariantIntent {
-  if (!isPlain(v)) throw new ProductPayloadError('variant must be an object');
-  for (const k of Object.keys(v)) if (k !== 'modelKey' && k !== 'pickMediaId') throw new ProductPayloadError(`unknown field: variant.${k}`);
-  const ok = (x: unknown): x is string => typeof x === 'string' && x.trim() !== '' && x.length <= 200;
-  if (!ok(v.modelKey)) throw new ProductPayloadError('variant.modelKey is required');
-  if (v.pickMediaId !== undefined && v.pickMediaId !== null && !ok(v.pickMediaId)) throw new ProductPayloadError('variant.pickMediaId must be an id');
-  return { modelKey: v.modelKey.trim(), pickMediaId: ok(v.pickMediaId) ? v.pickMediaId.trim() : null };
+  return parseVariantShape(v, (m) => new ProductPayloadError(m));
 }
 
 /** Ein Platz in der gewünschten Galerie: ein behaltenes Bild oder ein neues aus der Ablage. */

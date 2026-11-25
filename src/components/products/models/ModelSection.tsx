@@ -12,7 +12,7 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { isSystemArticle, mayJoinModel } from '@/core/products/product-models';
-import { modelMembers, modelTitle, sizeOf, summarizeModel, weightOf } from '@/core/products/product-models-view';
+import { karatOf, modelMembers, modelTitle, sizeOf, summarizeModel, weightOf } from '@/core/products/product-models-view';
 import type { Product } from '@/core/models/types';
 import { GroupItemsModal } from './GroupItemsModal';
 import { EditGroupModal } from './EditGroupModal';
@@ -45,7 +45,14 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
           <span style={{ fontSize: 13, color: '#4B5563', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Layers size={14} /> This item is not part of a model.
           </span>
-          <Button variant="ghost" onClick={() => setGroupOpen({ target: null, initial: [product.id] })} data-model-group-with>Group with other items</Button>
+          <div className="flex items-center gap-2">
+            {/* PURCHASE ADD VARIANT — auch ohne Modell: beim Speichern entsteht das Modell aus diesem Artikel und der Variante.
+                Nur Eigenware (eine Kommissions-Variante entsteht nur über die Kommissionsaufnahme). */}
+            {String(product.sourceType || 'OWN').toUpperCase() === 'OWN' && (
+              <Button variant="primary" onClick={() => navigate(`/collection?variantOf=${encodeURIComponent(product.id)}`)} data-model-add-variant>+ Add variant</Button>
+            )}
+            <Button variant="ghost" onClick={() => setGroupOpen({ target: null, initial: [product.id] })} data-model-group-with>Group with other items</Button>
+          </div>
         </div>
         <GroupItemsModal open={!!groupOpen} onClose={() => setGroupOpen(null)} initialSelection={groupOpen?.initial} targetKey={groupOpen?.target ?? null} />
       </Card>
@@ -83,7 +90,7 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
         <thead>
           <tr style={{ background: '#FAFBFC', color: '#6B7280', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.05em' }}>
-            <th style={{ padding: '8px 12px' }} /><th style={{ padding: 8, textAlign: 'left' }}>SKU</th><th style={{ padding: 8, textAlign: 'left' }}>Size</th>
+            <th style={{ padding: '8px 12px' }} /><th style={{ padding: 8, textAlign: 'left' }}>SKU</th><th style={{ padding: 8, textAlign: 'left' }}>Size</th><th style={{ padding: 8, textAlign: 'left' }}>Karat &amp; Color</th>
             <th style={{ padding: 8, textAlign: 'right' }}>Weight</th><th style={{ padding: 8, textAlign: 'right' }}>Sale</th><th style={{ padding: 8, textAlign: 'right' }}>Min</th>
             <th style={{ padding: 8, textAlign: 'left' }}>Status</th><th style={{ padding: 8, textAlign: 'left' }}>Ownership</th>
           </tr>
@@ -102,6 +109,7 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
               </td>
               <td className="font-mono" style={{ padding: 8, whiteSpace: 'nowrap' }}>{m.sku || '—'}{m.id === product.id ? <span style={{ marginLeft: 6, fontSize: 10, color: '#5B3DCC' }}>this item</span> : null}</td>
               <td style={{ padding: 8 }}>{sizeOf(m) || '—'}</td>
+              <td style={{ padding: 8, whiteSpace: 'nowrap' }} data-model-row-karat>{karatOf(m) || '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{weightOf(m) != null ? `${weightOf(m)!.toFixed(2)} g` : '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{m.plannedSalePrice ? <Bhd v={m.plannedSalePrice} /> : '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{m.minSalePrice ? <Bhd v={m.minSalePrice} /> : '—'}</td>

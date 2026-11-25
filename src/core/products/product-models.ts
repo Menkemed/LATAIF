@@ -244,7 +244,13 @@ export function groupProductsInHouse(input: GroupInput, ctx: ProductModelCtx): G
 // ── Add Variant: ein NEUER Artikel tritt einem Modell bei (in DERSELBEN Transaktion wie seine Anlage) ──────────────
 
 export interface VariantIntent {
-  modelKey: string;
+  /** das Modell, dem die Variante beitritt (Einstieg über ein bestehendes Modell) */
+  modelKey?: string | null;
+  /**
+   * PURCHASE ADD VARIANT (Owner 25.11.2026) — der Ausgangsartikel. Gehört er schon zu einem Modell, tritt die Variante
+   * diesem bei; sonst entsteht beim Speichern ein neues Modell aus Ausgangsartikel und Variante. Genau eins von beiden.
+   */
+  anchorProductId?: string | null;
   /** auf Wunsch das bestehende Modellbild (ein Medium, das an einem Artikel dieses Modells hängt) */
   pickMediaId?: string | null;
 }
@@ -255,17 +261,53 @@ export interface VariantCandidateData {
 }
 
 /**
+ * Der Rumpf einer Varianten-Absicht, streng — für `products.create` UND die Einkaufszeile von `purchases.create`:
+ * {modelKey | anchorProductId, pickMediaId?}, nur Kennungen. Ein älterer Client schickt weiter nur `modelKey`.
+ */
+export function parseVariantShape(v: unknown, fehler: (m: string) => Error): VariantIntent {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw fehler('variant must be an object');
+  const o = v as Record<string, unknown>;
+  for (const k of Object.keys(o)) if (k !== 'modelKey' && k !== 'anchorProductId' && k !== 'pickMediaId') throw fehler(`unknown field: variant.${k}`);
+  const ok = (x: unknown): x is string => typeof x === 'string' && x.trim() !== '' && x.length <= 200;
+  const hasKey = o.modelKey !== undefined && o.modelKey !== null;
+  const hasAnchor = o.anchorProductId !== undefined && o.anchorProductId !== null;
+  if (hasKey === hasAnchor) throw fehler('variant needs exactly one of modelKey or anchorProductId');
+  if (hasKey && !ok(o.modelKey)) throw fehler('variant.modelKey must be an id');
+  if (hasAnchor && !ok(o.anchorProductId)) throw fehler('variant.anchorProductId must be an id');
+  if (o.pickMediaId !== undefined && o.pickMediaId !== null && !ok(o.pickMediaId)) throw fehler('variant.pickMediaId must be an id');
+  const pick = ok(o.pickMediaId) ? o.pickMediaId.trim() : null;
+  return hasKey ? { modelKey: (o.modelKey as string).trim(), pickMediaId: pick } : { anchorProductId: (o.anchorProductId as string).trim(), pickMediaId: pick };
+}
+
+/** Der Artikel, an dem die Regel für eine neue Variante gemessen wird: ein Mitglied des Modells oder der Ausgangsartikel. */
+function variantAnchor(intent: VariantIntent): ModelCandidate {
+  const hasKey = typeof intent.modelKey === 'string' && intent.modelKey.trim() !== '';
+  const hasAnchor = typeof intent.anchorProductId === 'string' && intent.anchorProductId.trim() !== '';
+  if (hasKey === hasAnchor) nein('PRODUCT_MODEL_VARIANT_TARGET', 'Name either the model or the item the variant belongs to.');
+  if (hasKey) {
+    const members = membersOf(String(intent.modelKey));
+    if (members.length < 2) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
+    const row = productRows([members[0]])[0];
+    if (!row) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
+    return candidateOf(row!);
+  }
+  const row = productRows([String(intent.anchorProductId)])[0];
+  if (!row) nein('PRODUCT_MODEL_ITEM_MISSING', 'The item this variant belongs to no longer exists.');
+  return candidateOf(row!);
+}
+
+/**
  * Passt ein NEU anzulegender Artikel in das Modell? „Add variant" legt über den gewöhnlichen Weg („New Item") an —
  * und der legt eigene Ware an. Eine Kommissions-Variante entsteht nur über die Kommissionsaufnahme. Wirft vor jedem Schreiben.
  */
 export function checkVariantFits(intent: VariantIntent, data: VariantCandidateData, ctx: ProductModelCtx): void {
   assertMayEdit(ctx);
-  const members = membersOf(String(intent.modelKey ?? ''));
-  if (members.length < 2) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
-  const anchorRow = productRows([members[0]])[0];
-  if (!anchorRow) nein('PRODUCT_MODEL_NOT_FOUND', 'This model no longer exists.');
-  const anchor = candidateOf(anchorRow!);
+  const anchor = variantAnchor(intent);
   if (anchor.branchId !== ctx.branchId) nein('PRODUCT_MODEL_OTHER_BRANCH', 'Models can only be changed in their own branch.');
+  // Ein Ausgangsartikel ohne Modell muss selbst in ein Modell dürfen (System-, verbrauchte, abgeschriebene nie).
+  if (!intent.modelKey && (isSystemArticle(anchor.id, anchor.categoryId) || !mayJoinModel(anchor.stockStatus))) {
+    nein('PRODUCT_MODEL_INCOMPATIBLE', 'This item cannot be part of a model.');
+  }
   if (norm(anchor.ownership) === 'consignment') {
     nein('PRODUCT_MODEL_VARIANT_CONSIGNMENT', 'This model is consignment stock — add further pieces through the consignment intake, not as a new own item.');
   }
@@ -282,12 +324,16 @@ export function checkVariantFits(intent: VariantIntent, data: VariantCandidateDa
  * auch der Artikel nicht angelegt. So gibt es nie einen Artikel, der still ohne seine Zuordnung bleibt.
  */
 export function attachNewVariantInHouse(productId: string, intent: VariantIntent, ctx: ProductModelCtx): { modelKey: string; photoLinked: boolean } {
-  const g = groupProductsInHouse({ productIds: [productId], modelKey: intent.modelKey }, ctx);
+  // Frisch gelesen: legt eine frühere Zeile DESSELBEN Einkaufs das Modell des Ausgangsartikels gerade an, tritt diese bei.
+  const key = intent.modelKey ? String(intent.modelKey) : modelKeyOf(String(intent.anchorProductId ?? ''));
+  const g = key
+    ? groupProductsInHouse({ productIds: [productId], modelKey: key }, ctx)
+    : groupProductsInHouse({ productIds: [String(intent.anchorProductId), productId] }, ctx);
   let photoLinked = false;
   if (intent.pickMediaId) {
     const updatedAt = String(query('SELECT updated_at FROM products WHERE id = ?', [productId])[0]?.updated_at ?? '');
     mergeModelPhotosInHouse({
-      modelKey: intent.modelKey, pickMediaId: intent.pickMediaId, detachOld: false,
+      modelKey: g.modelKey, pickMediaId: intent.pickMediaId, detachOld: false,
       targets: [{ productId, expectedUpdatedAt: updatedAt }],
     }, ctx);
     photoLinked = true;
