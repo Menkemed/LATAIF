@@ -9,7 +9,9 @@
 //   2  PC2: zweite Variante desselben Ausgangsartikels → tritt dem Modell bei, EIN Auftrag purchases.create.
 //   3  Anzeige: Variantenliste „Karat & Color", Modellkarte „16 · 18K WG ×1 | 17 · 18K YG ×1 | 18 · 18K YG ×1".
 //   4  Collections: „Add variant" auch für einen Artikel ohne Modell.
-//   5  Je Variante ein Los; keine lokale Datenbank am PC2; keine Fehlermeldung.
+//   6  Echtes Foto: New Item mit Foto + Existing-Zeile (unverändert); PC2 Edit Purchase → Add variant of existing → dasselbe Medium.
+//   7  Kombinierte Suche „Cartier Love WG"; kompakte Detailzeile in New Purchase und Purchase Detail.
+//   5  Je neuem Artikel ein Los; keine lokale Datenbank am PC2; keine Fehlermeldung.
 //
 // PROZESS-ISOLATION: gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf gestartet hat oder was am
 // EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -17,10 +19,11 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
-import { maus, mausText, waehle } from './_e2e-mouse.mjs';
+import { maus, mausText, waehle, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { deflateSync } from 'node:zlib';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -183,6 +186,76 @@ async function ssPick(c, placeholder, optionId) {
   const r = await maus(c, `[data-ss-option=${S(optionId)}]`);
   await sleep(300);
   return r;
+}
+// Echtes Foto (übernommen aus r5e-order-purchase-parity): ein kleines PNG, über das Dateifeld gewählt.
+function writePhoto(file, farbe) {
+  const w = 96, h = 64;
+  const raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) {
+    raw[y * (w * 3 + 1)] = 0;
+    for (let x = 0; x < w; x++) {
+      const o = y * (w * 3 + 1) + 1 + x * 3;
+      raw[o] = (x * 5) & 0xff; raw[o + 1] = (y * 7) & 0xff; raw[o + 2] = farbe;
+    }
+  }
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0;
+  });
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type), data]);
+    const c = Buffer.alloc(4); c.writeUInt32BE(crc(td));
+    return Buffer.concat([len, td, c]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  writeFileSync(file, Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0)),
+  ]));
+}
+
+async function fotoWaehlen(c, file) {
+  await c.send('DOM.enable', {});
+  const { root } = await c.send('DOM.getDocument', { depth: -1 });
+  // Seit f1ae493e (v0.8.87) trägt ImageUpload ein zweites, verstecktes Feld zum ERSETZEN eines Platzes (ohne `multiple`,
+  // es steht zuletzt): ein Foto dort ohne gewählten Platz wird verworfen. Hinzufügen geht über das Feld mit `multiple`.
+  const hinzu = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
+  const { nodeIds } = hinzu.nodeIds?.length ? hinzu : await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
+  await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
+  return 'OK';
+}
+
+const PHOTO = join(RUN, 'pv-photo.png');
+const JPEGS = "[...document.querySelectorAll('img')].filter(i=>/^data:image\\/jpeg/.test(i.src)).length";
+const c2price = (c) => c.ev(`const l=[...document.querySelectorAll('[data-purchase-edit-add-price]')]; const e=l[l.length-1]; if(!e) return 'KEIN-PREISFELD'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'2500'); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+// Collections-Maske (übernommen aus article-variants-ui): Element per JS finden, mit der echten Maus/Tastatur bedienen.
+async function mausAuf(c, findeJs, name) {
+  const da = await c.ev(`document.querySelectorAll('[data-e2e-ziel]').forEach(x=>x.removeAttribute('data-e2e-ziel')); const e=(()=>{ ${findeJs} })(); if(!e) return false; e.setAttribute('data-e2e-ziel','1'); return true;`);
+  if (!da) return 'FEHLT:' + name;
+  return maus(c, '[data-e2e-ziel]');
+}
+const chipIn = (box, text) => `const b=document.querySelector(${S(box)}); return b ? [...b.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(text)}) : null;`;
+async function tippeIn(c, findeJs, wert, name) {
+  const da = await c.ev(`document.querySelectorAll('[data-e2e-feld]').forEach(x=>x.removeAttribute('data-e2e-feld')); const e=(()=>{ ${findeJs} })(); if(!e) return false; e.setAttribute('data-e2e-feld','1'); return true;`);
+  if (!da) return 'FEHLT:' + name;
+  return tippe(c, '[data-e2e-feld]', wert);
+}
+const maskenBilder = (c) => c.ev(`return [...document.querySelectorAll('img')].filter(i=>/^data:image/.test(i.src||'')).length;`);
+async function setFile(c, path) {
+  const vorher = await maskenBilder(c);
+  for (let versuch = 0; versuch < 2; versuch++) {
+    const r = await c.send('Runtime.evaluate', { expression: `document.querySelector('input[type=file][accept="image/*"]')`, returnByValue: false });
+    if (!r.result?.objectId) return 'KEIN-DATEIFELD';
+    await c.send('DOM.setFileInputFiles', { objectId: r.result.objectId, files: [path] });
+    const end = Date.now() + 15000;
+    while (Date.now() < end) { if ((await maskenBilder(c)) > vorher) return 'OK'; await sleep(400); }
+    await c.send('DOM.setFileInputFiles', { objectId: r.result.objectId, files: [] });
+    await sleep(500);
+  }
+  return 'FOTO-NICHT-UEBERNOMMEN';
 }
 /** Purchase → „Variant of existing" → Ausgangsartikel → Maske: Karat & Color, Größe, Gewicht, Verkaufspreis, Steuerart. */
 async function varianteImEinkauf(c, idx, anchorId, { karat, size, weight, sale, tax, price }) {
@@ -354,10 +427,123 @@ try {
       `4 Collections: „Add variant" auch ohne Modell — Maske mit Hinweis „creates the model" und Karat-Bestätigung (${r})`);
   }
 
+
+  // ── 6 Echtes Foto ─────────────────────────────────────────────────────────────────────────────────────────────
+  //   6a Collections → New Item mit echtem Foto (Bildspeicher) = das Foto-Original.
+  //   6b New Purchase: New Item MIT Foto + Existing-Zeile, wie bisher; Detailzeile. Ein Einkaufs-Neuartikel trägt sein Foto
+  //      im alten Format (products.images) — eine Variante davon bietet die Bildübernahme ehrlich NICHT an.
+  //   6c PC2 Edit Purchase → Add variant of existing (Foto-Original aus 6a): dasselbe Medium, keine neue Datei.
+  {
+    writePhoto(PHOTO, 120);
+    const t = [];
+    await gehFrisch(primary, '/collection');
+    t.push(await mausText(primary, 'New Item'));
+    t.push((await warteBis(primary, q('#new-field-categoryId'), 20000)) ? 'OK' : 'KEINE-MASKE');
+    t.push(await mausAuf(primary, chipIn('#new-field-categoryId', 'Branded Gold Jewelry'), 'Kategorie')); await sleep(500);
+    t.push(await mausAuf(primary, chipIn('#new-field-attr_item_type', 'Bracelet'), 'Item type'));
+    t.push(await tippeIn(primary, `return document.querySelector('#new-field-attr_size input');`, '15', 'Size'));
+    t.push(await mausAuf(primary, chipIn('#new-field-attr_karat', '18K Rose'), 'Karat'));
+    t.push(await setFile(primary, PHOTO));
+    t.push(await tippeIn(primary, `return document.querySelector('#new-field-brand input');`, 'Cartier', 'Brand'));
+    t.push(await tippeIn(primary, `return document.querySelector('#new-field-name input');`, 'Love Bracelet', 'Name'));
+    await sleep(900);
+    const anyway = "[...document.querySelectorAll('button')].some(x=>/create anyway/i.test(x.textContent||''))";
+    if (!(await primary.ev(`return ${anyway};`))) t.push(await maus(primary, '[data-create-product]'));
+    await sleep(1200);
+    if (await primary.ev(`return ${anyway};`)) t.push(await mausAuf(primary, "return [...document.querySelectorAll('button')].filter(x=>/create anyway/i.test(x.textContent||'')).pop();", 'Create anyway'));
+    t.push((await warteBis(primary, "!document.querySelector('#new-field-categoryId')", 40000)) ? 'OK' : 'MASKE-BLIEB-OFFEN');
+    await spuelen(primary).catch(() => null);
+    const fotoArtikel = dbQ(BIZ_DB, "SELECT id FROM products WHERE json_extract(attributes, '$.size') = '15' AND json_extract(attributes, '$.karat') = '18K Rose'")[0]?.id;
+    await warteAuf(() => !!fotoArtikel && !!dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [fotoArtikel])[0], 20000);
+    const medium = fotoArtikel ? dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order LIMIT 1", [fotoArtikel])[0]?.m : null;
+    ok(alleOk(t) === 'OK' && !!fotoArtikel && !!medium, `6a Collections → New Item mit echtem Foto (Bildspeicher) — New Stock wie bisher (${alleOk(t)})`);
+
+    // 6b New Purchase: New Item mit Foto + Existing
+    await gehFrisch(primary, '/purchases/new');
+    await warteBis(primary, q('[data-purchase-save]'), 45000);
+    const r = [await ssPick(primary, 'Search suppliers...', 'pv-sup')];
+    r.push(await mausText(primary, '+ Define new item…')); await sleep(400);
+    r.push((await warteBis(primary, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Branded Gold Jewelry')", 15000)) ? 'OK' : 'KEINE-MASKE');
+    r.push(await mausText(primary, 'Branded Gold Jewelry')); await sleep(400);
+    r.push(await setByLabelPrefix(primary, 'BRAND', 'Cartier'));
+    r.push(await setByLabelPrefix(primary, 'NAME / MODEL', 'Love Bracelet'));
+    r.push(await mausText(primary, 'Bracelet'));
+    r.push(await mausText(primary, '18K Rose'));
+    r.push(await setByLabelPrefix(primary, 'SIZE', '14'));
+    const vor = await primary.ev(`return ${JPEGS};`);
+    r.push(await fotoWaehlen(primary, PHOTO));
+    r.push((await warteBis(primary, `${JPEGS} > ${vor}`, 15000)) ? 'OK' : 'KEIN-VORSCHAUBILD');
+    await sleep(300);
+    r.push(await mausText(primary, 'Use this Item'));
+    const trotzdem = "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Create anyway')";
+    if (await warteBis(primary, trotzdem, 2500)) r.push(await mausText(primary, 'Create anyway'));
+    r.push(await setNth(primary, 'input[type="number"][min="0"][step="0.001"]', 0, '2400'));
+    r.push(await mausText(primary, 'Add Item')); await sleep(300);
+    r.push(await waehle(primary, '[data-line-source="1"]', 'existing')); await sleep(300);
+    r.push(await ssPick(primary, 'Pick product...', 'pv-c'));
+    r.push(await setNth(primary, 'input[type="number"][min="0"][step="0.001"]', 1, '1500'));
+    const detail = await primary.ev("return JSON.stringify([...document.querySelectorAll('[data-purchase-line-detail]')].map(e=>e.textContent.trim()));");
+    r.push(await speichern(primary));
+    const pid = dbQ(BIZ_DB, 'SELECT id FROM purchases ORDER BY created_at DESC, rowid DESC LIMIT 1')[0]?.id;
+    const einkaufsArtikel = dbQ(BIZ_DB, "SELECT id, images FROM products WHERE json_extract(attributes, '$.size') = '14'")[0];
+    ok(alleOk(r) === 'OK' && !!einkaufsArtikel && dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM purchase_lines WHERE purchase_id = ? AND product_id = 'pv-c'", [pid])[0]?.n === 1,
+      `6b PRIMARY New Item mit Foto + Existing-Zeile wie bisher gespeichert (${alleOk(r)})`);
+    ok(/Bracelet · 14 · 18K Rose/.test(detail) && /Bracelet · 19 · 18K Rose/.test(detail), `6b Detailzeile unter dem Artikelnamen: New Item und Existing (${detail})`);
+
+    // 6c PC2: Edit Purchase → Add variant of existing
+    await spuelen(primary).catch(() => null);
+        await gehFrisch(client, `/purchases/${pid}/edit`);
+    await warteBis(client, q('[data-purchase-edit-add-variant]'), 45000);
+    const e = [await maus(client, '[data-purchase-edit-add-variant]')];
+    e.push((await warteBis(client, q('[data-variant-picker]'), 10000)) ? 'OK' : 'KEIN-PICKER');
+    e.push(await ssPick(client, 'Search collection...', fotoArtikel));
+    e.push((await warteBis(client, q('[data-variant-hint]'), 10000)) ? 'OK' : 'KEINE-MASKE');
+    e.push(await setByLabelPrefix(client, 'SIZE', '20'));
+    e.push(await setByLabelPrefix(client, 'SALE PRICE', '3100'));
+    e.push(await maus(client, '[data-variant-tax="MARGIN"]'));
+    e.push(await maus(client, '[data-variant-karat-confirm] input'));
+    e.push(await mausText(client, 'Use this Item'));
+    if (await warteBis(client, trotzdem, 2500)) e.push(await mausText(client, 'Create anyway'));
+    e.push((await warteBis(client, '[...document.querySelectorAll("[data-line-variant-photo]")].some(x=>x.checked)', 10000)) ? 'OK' : 'BILD-NICHT-VORGEWAEHLT');
+    e.push(await c2price(client));
+    e.push(await tippe(client, '[data-purchase-edit-reason]', 'forgot the second piece'));
+    await sleep(300);
+    const vorAnzahl = zaehle('products');
+    e.push(await maus(client, '[data-purchase-edit-save]'));
+    await spuelen(primary).catch(() => null);
+    const gespeichert = await warteAuf(() => zaehle('products') === vorAnzahl + 1, 30000);
+    if (!gespeichert) console.log('      Edit: ' + await client.ev("return (document.body.innerText.match(/could not[^\\n]*|New line[^\\n]*|locked[^\\n]*|Only the owner[^\\n]*|Nothing was[^\\n]*/i)||[''])[0];"));
+    const neu = dbQ(BIZ_DB, "SELECT id FROM products WHERE json_extract(attributes, '$.size') = '20'")[0]?.id;
+    const neuMedium = neu ? dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order LIMIT 1", [neu])[0]?.m : null;
+    ok(alleOk(e) === 'OK' && gespeichert && !!neu && !!modelOf(neu) && modelOf(neu) === modelOf(fotoArtikel)
+      && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM purchase_lines WHERE purchase_id = ? AND product_id = ?', [pid, neu])[0]?.n === 1,
+      `6c PC2 Edit Purchase → „Add variant of existing": Zeile DIESES Einkaufs, Modell mit dem Foto-Original (${alleOk(e)})`);
+    // Keine neue Datei FÜR DIE VARIANTE: alle ihre Bildverweise zeigen auf Medien, die es vor der Bearbeitung schon gab.
+    const eigene = neu ? dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links l JOIN media_objects o ON o.media_id = l.media_id WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL AND l.media_id != ?", [neu, medium])[0]?.n : -1;
+    ok(!!neuMedium && neuMedium === medium && eigene === 0,
+      `6c echtes Foto übernommen: dasselbe Medium wie das Original (${neuMedium === medium}), kein eigenes neues Medium (${eigene})`);
+  }
+
+  // ── 7 Kombinierte Suche „Cartier Love WG" und Detailzeile in Purchase Detail ──
+  {
+    await gehFrisch(primary, '/collection');
+    await warteBis(primary, q('[data-model-sizes]'), 30000);
+    const feld = await primary.ev("const i=[...document.querySelectorAll('input')].find(x=>/search/i.test(x.placeholder||'')); if(!i) return ''; i.setAttribute('data-e2e-suche','1'); return 'OK';");
+    const r = feld === 'OK' ? await tippe(primary, '[data-e2e-suche]', 'Cartier Love WG') : 'KEIN-SUCHFELD';
+    await sleep(1200);
+    const text = await primary.ev('return document.body.innerText;');
+    ok(r === 'OK' && /16 · 18K WG/.test(text) && !/Juste un Clou/.test(text), `7 Collections: „Cartier Love WG" findet das Weißgold-Stück, nicht den anderen Artikel (${r})`);
+    const pid = dbQ(BIZ_DB, "SELECT purchase_id AS p FROM purchase_lines WHERE product_id = (SELECT id FROM products WHERE json_extract(attributes, '$.size') = '16' AND id NOT IN ('pv-a','pv-c'))")[0]?.p;
+    await gehFrisch(primary, `/purchases/${pid}`);
+    await warteBis(primary, q('[data-purchase-line-detail]'), 20000);
+    const d = await primary.ev("return [...document.querySelectorAll('[data-purchase-line-detail]')].map(e=>e.textContent.trim()).join(' | ');");
+    ok(/Bracelet · 16 · 18K White · 36\.50 g/.test(d), `7 Purchase Detail: kompakte Zeile unter dem Artikelnamen (${d})`);
+  }
+
   // ── 5 Nichts doppelt gebucht; New Stock unverändert ──
   {
     const lotsNeu = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM stock_lots WHERE product_id NOT IN ('pv-a','pv-c')")[0]?.n;
-    ok(lotsNeu === 2 && zaehle('purchases') === 2, `5 je Variante genau ein Los, zwei Einkäufe (${lotsNeu})`);
+    ok(lotsNeu === 4 && zaehle('purchases') === 3, `5 je neuem Artikel genau ein Los (2 Varianten, New Item, nachgetragene Variante), drei Einkäufe (${lotsNeu})`);
     ok(zaehle('ledger_entries') > vorher.ledger, '5 Einkaufsbuchungen wie üblich vorhanden');
     ok((await client.ev('return window.__dbHits.length;')) === 0, '5 PC2 greift auf keine lokale Datenbank zu');
     const alerts = [...JSON.parse(await primary.ev('return JSON.stringify(window.__alerts);')), ...JSON.parse(await client.ev('return JSON.stringify(window.__alerts);'))];

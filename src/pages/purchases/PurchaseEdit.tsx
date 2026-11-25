@@ -36,6 +36,8 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { viaWrites } from '@/core/payables/payables-save';
 import { latestBusinessDate } from '@/core/utils/business-date';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
+import { PurchaseLineDetail } from '@/components/purchases/PurchaseLineDetail';
+import { makeVariantDraft, variantInitial, variantIntentFor, VariantLineInfo, VariantPickerModal, type VariantDraft } from '@/components/purchases/VariantLine';
 import type { Product, PurchaseIdentityReference } from '@/core/models/types';
 import { loadPurchaseIdentityPhoto, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 import {
@@ -74,6 +76,8 @@ interface AddRow {
   newProduct?: Partial<Product>;
   quantity: string;
   unitPrice: string;
+  /** PURCHASE ADD VARIANT — „Add variant of existing": ein neuer Artikel als Variante eines bestehenden. */
+  variant?: VariantDraft;
 }
 
 export function PurchaseEdit() {
@@ -82,7 +86,7 @@ export function PurchaseEdit() {
   const goBack = useGoBack(`/purchases/${id ?? ''}`);
   const { purchases, loadPurchases } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, productModels } = useProductStore();
   const perm = usePermission();
   const w = useSharedWrites();
   const [tick, setTick] = useState(0);
@@ -116,13 +120,23 @@ export function PurchaseEdit() {
   const [addRows, setAddRows] = useState<AddRow[]>([]);
   const [addSeq, setAddSeq] = useState(1);
   const [modalKey, setModalKey] = useState<number | null>(null);
+  // PURCHASE ADD VARIANT — die Zeile, für die gerade der Ausgangsartikel gesucht wird.
+  const [variantPickKey, setVariantPickKey] = useState<number | null>(null);
   const updateAdd = (key: number, patch: Partial<AddRow>) => setAddRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
-  const addRow = (mode: 'existing' | 'new') => {
+  const addRow = (mode: 'existing' | 'new' | 'variant') => {
     const key = addSeq;
     setAddSeq((n) => n + 1);
-    setAddRows((rs) => [...rs, { key, mode, quantity: '1', unitPrice: '' }]);
+    setAddRows((rs) => [...rs, { key, mode: mode === 'existing' ? 'existing' : 'new', quantity: '1', unitPrice: '' }]);
     if (mode === 'new') setModalKey(key);
+    if (mode === 'variant') setVariantPickKey(key);
   };
+  function pickVariantAnchor(key: number, anchorId: string) {
+    const t = products.find((p) => p.id === anchorId);
+    if (!t) return;
+    updateAdd(key, { variant: makeVariantDraft(t, products, productModels), newProduct: undefined });
+    setVariantPickKey(null);
+    setModalKey(key);
+  }
 
   useEffect(() => {
     if (!purchase || startedFor === purchase.id) return;
@@ -206,6 +220,7 @@ export function PurchaseEdit() {
       addLines.push(r.mode === 'existing'
         ? { mode: 'existing', productId: r.productId, quantity: q, unitPrice: R3(p) }
         : { mode: 'new', newProduct: r.newProduct, quantity: q, unitPrice: R3(p) });
+      // die Varianten-Absicht (mit Bild) entsteht erst beim Speichern — siehe `speichern`.
     });
     if (addLines.length > 0) form.addLines = addLines;
     const anything = form.notes !== undefined || form.staffId !== undefined || form.purchaseDate !== undefined
@@ -300,7 +315,20 @@ export function PurchaseEdit() {
     if (!purchase || !geaendert || blocker || w.busy) return;
     setFehler('');
     const op = isFinancialPurchaseEdit(geaendert.form) ? PURCHASE_EDIT_OP.CORRECT : PURCHASE_EDIT_OP.UPDATE;
-    const r = await savePurchaseEdit(viaWrites(w, op), purchase, geaendert.form);
+    // PURCHASE ADD VARIANT — je Varianten-Zeile die Absicht (Modell bzw. Ausgangsartikel, auf Wunsch das Bild — VOR dem Auftrag gelesen).
+    let form = geaendert.form;
+    if (addRows.some((r) => r.variant) && form.addLines) {
+      const adds = [...form.addLines];
+      for (let i = 0; i < addRows.length; i++) {
+        const r = addRows[i];
+        if (!r.variant || !adds[i]) continue;
+        const intent = await variantIntentFor(r.variant, r.newProduct, products);
+        if (typeof intent === 'string') { setFehler(intent); return; }
+        adds[i] = { ...adds[i], variant: intent };
+      }
+      form = { ...form, addLines: adds };
+    }
+    const r = await savePurchaseEdit(viaWrites(w, op), purchase, form);
     if (r.kind !== 'ok') {
       setFehler(fehlertext(r));
       // Ein Nein (z. B. RECORD_CHANGED) lädt Beleg und Sperren neu — der nächste Klick prüft gegen die neue Fassung.
@@ -385,6 +413,7 @@ export function PurchaseEdit() {
                   data-purchase-edit-line={l.id} data-purchase-edit-removed={weg ? 'true' : undefined}>
                   <div>
                     <div style={{ fontSize: 13, color: '#0F0F10', textDecoration: weg ? 'line-through' : 'none' }}>{l.productId ? labelFor(products, l.productId) : (l.description || '—')}</div>
+                    <PurchaseLineDetail product={l.productId ? products.find((x) => x.id === l.productId) : undefined} categories={categories} dataKey={l.id} />
                     <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                       {l.taxScheme === 'VAT_10' ? 'VAT 10% included' : 'No input VAT'}
                       {c && c.soldUnits > 0 ? ` · ${c.soldUnits} sold` : ''}
@@ -449,7 +478,7 @@ export function PurchaseEdit() {
                   data-purchase-edit-add-row={r.key}>
                   <div>
                     <label className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
-                      NEW LINE {i + 1} · {r.mode === 'existing' ? 'EXISTING ITEM' : 'NEW ITEM'}
+                      NEW LINE {i + 1} · {r.mode === 'existing' ? 'EXISTING ITEM' : r.variant ? 'VARIANT OF EXISTING' : 'NEW ITEM'}
                     </label>
                     {r.mode === 'existing' ? (
                       <SearchSelect placeholder="Pick item..." options={addProductOptions} value={r.productId ?? ''}
@@ -467,6 +496,11 @@ export function PurchaseEdit() {
                       </button>
                     )}
                     {p?.sku && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }} className="font-mono">{p.sku}</div>}
+                    <PurchaseLineDetail product={r.mode === 'existing' ? p : r.newProduct} categories={categories} dataKey={`add-${r.key}`} />
+                    {r.variant && (
+                      <VariantLineInfo draft={r.variant} newProduct={r.newProduct} products={products} dataKey={`edit-${r.key}`}
+                        onPhoto={(on) => updateAdd(r.key, { variant: { ...r.variant!, photo: on ? 'yes' : 'no' } })} />
+                    )}
                   </div>
                   <Input label="UNIT PRICE (BHD)" type="number" step="0.001" min="0" value={r.unitPrice}
                     onChange={(e) => updateAdd(r.key, { unitPrice: e.target.value })} disabled={w.busy} data-purchase-edit-add-price={r.key} />
@@ -487,6 +521,9 @@ export function PurchaseEdit() {
               </Button>
               <Button variant="secondary" onClick={() => addRow('new')} disabled={!addLock?.allowed || w.busy} data-purchase-edit-add-new>
                 <Plus size={13} /> Add new item
+              </Button>
+              <Button variant="secondary" onClick={() => addRow('variant')} disabled={!addLock?.allowed || w.busy} data-purchase-edit-add-variant>
+                <Plus size={13} /> Add variant of existing
               </Button>
             </div>
             <Gesperrt lock={addLock} />
@@ -566,16 +603,20 @@ export function PurchaseEdit() {
         open={modalKey != null && !!modalRow}
         onClose={() => setModalKey(null)}
         onSubmit={(prod) => { if (modalKey != null) updateAdd(modalKey, { newProduct: prod }); setModalKey(null); }}
-        initial={modalRow?.newProduct ?? {
+        initial={modalRow?.newProduct ?? (modalRow?.variant ? variantInitial(modalRow.variant, products, categories) : undefined) ?? {
           categoryId: categories[0]?.id || '', brand: '', name: '', sku: '', condition: '', taxScheme: 'MARGIN',
           scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {}, images: [],
         }}
         title="New Item — Add to this purchase"
         submitLabel="Use this Item"
         hint={<><strong style={{ color: '#0F0F10' }}>Comes into stock with this purchase.</strong> The purchase price comes from the line — do not enter it twice.</>}
-        hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
+        hideFields={{ purchasePrice: true, salePrice: !modalRow?.variant, paidFrom: true, supplier: true, quantity: true }}
+        variant={modalRow?.variant ? { label: modalRow.variant.label, excludeIds: modalRow.variant.excludeIds } : undefined}
         skuAutoAssign
       />
+      <VariantPickerModal open={variantPickKey != null} products={products}
+        onClose={() => { if (variantPickKey != null) setAddRows((rs) => rs.filter((x) => x.key !== variantPickKey || !!x.variant)); setVariantPickKey(null); }}
+        onPick={(pid) => { if (variantPickKey != null) pickVariantAnchor(variantPickKey, pid); }} />
     </div>
   );
 }

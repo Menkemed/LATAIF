@@ -824,7 +824,8 @@ const zustand = (db: Db): string => S({
   const ph = src('src/core/purchases/purchase-house.ts');
   ok(/\|\| \(form\.addLines !== undefined && form\.addLines\.length > 0\) \|\| \(form\.removeLineIds !== undefined && form\.removeLineIds\.length > 0\)/.test(ph),
     'M Positionen ändern ist eine Geldkorrektur (purchases.correct)');
-  ok(/editPurchaseInHouse\(req, localHouseCtx\(\), expectedRevision, PURCHASE_LINE_OPS\)/.test(ph) && /stageSpecImages\(pickProductSpec\(l\.newProduct, EMBEDDED_PRODUCT_FIELDS\), stage\)/.test(ph),
+  // PURCHASE ADD VARIANT — der Kontext trägt die Rolle (Modellregel), die Feldliste den Verkaufspreis (PURCHASE_PRODUCT_FIELDS).
+  ok(/editPurchaseInHouse\(req, \{ \.\.\.localHouseCtx\(\), role: editRole \}, expectedRevision, PURCHASE_LINE_OPS\)/.test(ph) && /stageSpecImages\(pickProductSpec\(l\.newProduct, PURCHASE_PRODUCT_FIELDS\), stage\)/.test(ph),
     'M Primary: dieselbe Zeilenfolge; PC2: Fotos vorab in die Ablage');
   const pc = src('src/core/bridge/purchase-edit-commands.ts');
   ok(/editPurchaseInHouse\(request, ctx, req\.expectedRevision, PURCHASE_LINE_OPS\)/.test(pc) && /mitFotos\(spec, owner, read\)/.test(pc),

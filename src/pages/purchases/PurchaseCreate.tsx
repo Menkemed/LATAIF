@@ -43,10 +43,9 @@ import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSe
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
-import { variantSeed, sameKarat } from '@/core/products/variant-seed';
-import { isSystemArticle, mayJoinModel, type VariantIntent } from '@/core/products/product-models';
-import { loadVariantGallery } from '@/core/products/product-models-primary';
-import { modelMembers } from '@/core/products/product-models-view';
+import type { VariantIntent } from '@/core/products/product-models';
+import { PurchaseLineDetail } from '@/components/purchases/PurchaseLineDetail';
+import { makeVariantDraft, variantInitial, variantIntentFor, VariantLineInfo, VariantPickerModal, type VariantDraft } from '@/components/purchases/VariantLine';
 // BULK METAL V1 — Bulk-Zeile: Gesamtgewicht + Gesamtkosten; Lot, Lot-Nummer und Wert rechnet das Haus.
 import { BulkPurchaseLineEditor, bulkDraftToInput, newBulkDraft, type BulkDraft } from '@/components/bulk/BulkPurchaseLineEditor';
 
@@ -77,7 +76,7 @@ interface DraftLine {
   partnerShares?: PartnerShareInput[];
   // PURCHASE ADD VARIANT — „Variant of existing": ein NEUER Artikel (mode 'new') als Variante eines bestehenden.
   // photo: 'auto' = Bild des Originals übernehmen, solange Karat & Color gleich ist; 'yes'/'no' = ausdrücklich gewählt.
-  variant?: { anchorId: string; modelKey: string | null; label: string; excludeIds: string[]; photo: 'auto' | 'yes' | 'no' };
+  variant?: VariantDraft;
 }
 
 /** v0.8.91 — eine Zahlungszeile der Maske (Betrag als Text, damit Tippen nicht springt). */
@@ -343,40 +342,24 @@ export function PurchaseCreate() {
     setNewItemModalIdx(idx);
   }
 
-  // PURCHASE ADD VARIANT — wählbar: Eigenware, die in ein Modell darf (keine Kommission, keine System-/erledigten Artikel).
-  const variantOptions = useMemo(() =>
-    products
-      .filter(p => String(p.sourceType || 'OWN').toUpperCase() === 'OWN' && !isSystemArticle(p.id, p.categoryId || '') && mayJoinModel(String(p.stockStatus)))
-      .map(p => ({ id: p.id, label: productDisplayName(p), subtitle: p.sku || undefined, searchText: productSearchText(p) })),
-  [products]);
-
+  // PURCHASE ADD VARIANT — Ausgangsartikel gewählt: Zeile wird eine Variante, dann die Maske „New Item" mit Vorbelegung.
   function pickVariantAnchor(idx: number, anchorId: string) {
     const t = products.find(p => p.id === anchorId);
     if (!t) return;
-    const key = productModels[t.id] ?? null;
-    const geschwister = key ? modelMembers(products, productModels, key).map(m => m.id) : [t.id];
     updateLine(idx, {
       mode: 'new', productId: undefined, newProduct: undefined, brand: t.brand || '', name: t.name || '', sku: '', categoryId: t.categoryId || '',
-      variant: { anchorId: t.id, modelKey: key, label: productDisplayName(t), excludeIds: [...new Set([t.id, ...geschwister])], photo: 'auto' },
+      variant: makeVariantDraft(t, products, productModels),
     });
     setVariantPickIdx(null);
     openNewItemModal(idx);
-  }
-
-  /** Wird das Bild des Originals übernommen? Von selbst nur bei gleichem Karat & Color, sonst nur ausdrücklich. */
-  function variantPhotoOn(l: DraftLine): boolean {
-    if (!l.variant || (l.newProduct?.images || []).length > 0) return false;
-    if (l.variant.photo !== 'auto') return l.variant.photo === 'yes';
-    return sameKarat(products.find(p => p.id === l.variant!.anchorId), l.newProduct ?? null);
   }
 
   function modalInitial(): Partial<Product> | undefined {
     if (newItemModalIdx == null) return undefined;
     const line = lines[newItemModalIdx];
     if (line?.variant && !line.newProduct) {
-      const t = products.find(p => p.id === line.variant!.anchorId);
-      const cat = categories.find(c => c.id === t?.categoryId);
-      if (t) return variantSeed(t, cat?.conditionOptions?.[0] || '');
+      const seed = variantInitial(line.variant, products, categories);
+      if (seed) return seed;
     }
     return line?.newProduct ?? {
       categoryId: line?.categoryId || categories[0]?.id || '',
@@ -458,15 +441,9 @@ export function PurchaseCreate() {
       const l = lines[i];
       if (!l.variant) continue;
       if (!l.newProduct) { setError(`Line ${i + 1}: define the variant first`); return; }
-      let pick: string | null = null;
-      if (variantPhotoOn(l)) {
-        const g = await loadVariantGallery(l.variant.anchorId);
-        if (!g) { setError('The photo of the original could not be read from the main computer. Nothing was saved — please try again.'); return; }
-        pick = g.mediaIds[0] ?? null;
-      }
-      variantIntents[i] = l.variant.modelKey
-        ? { modelKey: l.variant.modelKey, pickMediaId: pick }
-        : { anchorProductId: l.variant.anchorId, pickMediaId: pick };
+      const intent = await variantIntentFor(l.variant, l.newProduct, products);
+      if (typeof intent === 'string') { setError(intent); return; }
+      variantIntents[i] = intent;
     }
     let input: PurchaseCreateInput;
     try { input = formInput(variantIntents); } catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
@@ -672,8 +649,10 @@ export function PurchaseCreate() {
                           return p ? <ProductHoverCard product={p} categories={categories} /> : null;
                         }}
                       />
+                      <PurchaseLineDetail product={products.find(x => x.id === l.productId)} categories={categories} dataKey={idx} />
                     </div>
                   ) : (
+                    <div style={{ minWidth: 0 }}>
                     <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
                       {l.newProduct || l.brand || l.name ? (
                         <div className="flex items-center justify-between" style={{
@@ -703,6 +682,8 @@ export function PurchaseCreate() {
                           + Define new item…
                         </button>
                       )}
+                    </div>
+                    <PurchaseLineDetail product={l.newProduct} categories={categories} dataKey={idx} />
                     </div>
                   )}
 
@@ -743,28 +724,10 @@ export function PurchaseCreate() {
                     </button>
                   </div>
                 {/* PURCHASE ADD VARIANT — Herkunft der Variante, Modell und Bildübernahme (Warnung bei anderem Karat & Color). */}
-                {l.variant && (() => {
-                  const anchor = products.find(p => p.id === l.variant!.anchorId);
-                  const eigeneFotos = (l.newProduct?.images || []).length > 0;
-                  const anders = !!l.newProduct && !sameKarat(anchor, l.newProduct);
-                  const an = variantPhotoOn(l);
-                  return (
-                    <div data-line-variant={idx} style={{ padding: '6px 12px 10px 40px', fontSize: 12, color: '#4B5563', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <span>Variant of <b>{l.variant.label}</b>{l.variant.modelKey ? ' — joins its model.' : ' — not in a model yet: saving creates the model with both items.'}</span>
-                      <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                        <input type="checkbox" checked={an} disabled={eigeneFotos} data-line-variant-photo={idx}
-                          onChange={e => { const on = e.target.checked; updateLine(idx, { variant: { ...l.variant!, photo: on ? 'yes' : 'no' } }); }} />
-                        <span>Use the photo of the original (no upload, no new file — only a reference).{eigeneFotos ? ' Not used: this piece has its own photo.' : ''}</span>
-                      </label>
-                      {anders && !eigeneFotos && (
-                        <span data-line-variant-photo-warning={idx} style={{ color: '#B45309' }}>
-                          Karat &amp; Color differs from the original ({String(((anchor?.attributes ?? {}) as Record<string, unknown>).karat ?? '—')}).
-                          {an ? ' The photo may show a different gold colour — use it only if it really fits.' : ' Its photo is not taken over unless you tick the box.'}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })()}
+                {l.variant && (
+                  <VariantLineInfo draft={l.variant} newProduct={l.newProduct} products={products} dataKey={idx}
+                    onPhoto={(on) => updateLine(idx, { variant: { ...l.variant!, photo: on ? 'yes' : 'no' } })} />
+                )}
                 {/* Expanded Product-Detail-Panel — Specs-Grid + Image */}
                 {expanded && lineProduct && (
                   <div style={{
@@ -1036,23 +999,8 @@ export function PurchaseCreate() {
       />
 
       {/* PURCHASE ADD VARIANT — den Ausgangsartikel aus Collections wählen (nur Eigenware). */}
-      <Modal open={variantPickIdx != null} onClose={() => setVariantPickIdx(null)} title="Variant of existing item" width={520}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }} data-variant-picker>
-          <p style={{ fontSize: 13, color: '#4B5563' }}>
-            Choose the existing item. Its shared details are taken over; this piece gets its own SKU, size, weight, Karat &amp; Color and prices.
-            Own stock only — consignment pieces are added through the consignment intake.
-          </p>
-          <SearchSelect
-            placeholder="Search collection..."
-            options={variantOptions}
-            value=""
-            onChange={pid => { if (variantPickIdx != null && pid) pickVariantAnchor(variantPickIdx, pid); }}
-          />
-          <div className="flex justify-end">
-            <Button variant="ghost" onClick={() => setVariantPickIdx(null)}>Cancel</Button>
-          </div>
-        </div>
-      </Modal>
+      <VariantPickerModal open={variantPickIdx != null} products={products} onClose={() => setVariantPickIdx(null)}
+        onPick={(pid) => { if (variantPickIdx != null) pickVariantAnchor(variantPickIdx, pid); }} />
 
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}
       <Modal open={showNewSupplier} onClose={() => { setShowNewSupplier(false); setSupplierCreateMode('new'); }} title="New Supplier" width={500}>

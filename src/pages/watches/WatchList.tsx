@@ -39,7 +39,7 @@ import { useSharedWrites } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
-import { matchesDeep } from '@/core/utils/deep-search';
+import { matchesDeepAllWords } from '@/core/utils/deep-search';
 import { cardAttributeText } from '@/core/utils/product-format';
 import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
@@ -318,7 +318,8 @@ export function WatchList() {
     }
     if (searchQuery) {
       // PURCHASE ADD VARIANT — Karat & Color auch als Kurzform (18K WG, WG) suchbar, nur zur Laufzeit, nie gespeichert.
-      r = r.filter(p => matchesDeep(p, searchQuery, [categories.find(c => c.id === p.categoryId), ...karatSearchTerms(p)]));
+      // …und kombiniert: „Cartier Love WG" — jedes Wort für sich (matchesDeepAllWords).
+      r = r.filter(p => matchesDeepAllWords(p, searchQuery, [categories.find(c => c.id === p.categoryId), ...karatSearchTerms(p)]));
     }
     if (filterCategory) r = r.filter(p => p.categoryId === filterCategory);
     // Plan §Production-History (2026-05-18): Consumed-Items haben Sonderbehandlung.
@@ -411,6 +412,8 @@ export function WatchList() {
   const variantKaratDiffers = !!variantCtx && !sameKarat(variantTemplate, form as Product);
   function reuseVariantPhoto(): boolean {
     if (!variantCtx) return false;
+    // Foto im alten Format (products.images): kein Medium, auf das verwiesen werden kann.
+    if (Array.isArray(variantTemplate?.images) && variantTemplate!.images.length > 0) return false;
     return variantCtx.reusePhoto === 'yes' || (variantCtx.reusePhoto === 'auto' && !variantKaratDiffers);
   }
 
@@ -550,6 +553,11 @@ export function WatchList() {
         // Gewünscht, aber nicht lesbar (Primary nicht erreichbar): nichts anlegen statt still ohne Modellbild.
         if (reuse && !g) {
           setCreateWarning('The model photo could not be read from the main computer. Nothing was created — please try again.');
+          return;
+        }
+        // PURCHASE ADD VARIANT — gewünscht, aber kein Medium (altes Format oder kein Foto): nicht still ohne Bild anlegen.
+        if (reuse && g && !g.mediaIds[0]) {
+          setCreateWarning('The original has no photo that can be referenced (old format or none). Untick the model photo or add a photo. Nothing was created.');
           return;
         }
         const pick = g?.mediaIds[0] ?? null;

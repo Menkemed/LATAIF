@@ -33,7 +33,8 @@ import {
 } from '@/core/purchases/purchase-edit-house';
 import { costCorrectionBridge, costCorrectionRows } from '@/core/purchases/cost-correction-read';
 import { PURCHASE_LINE_OPS } from '@/core/purchases/purchase-lines';
-import { EMBEDDED_PRODUCT_FIELDS } from '@/core/products/embedded-product';
+import { PURCHASE_PRODUCT_FIELDS } from '@/core/products/embedded-product';
+import { parseVariantShape } from '@/core/products/product-models';
 import type { Product } from '@/core/models/types';
 import { CommercialPayloadError, mitFotos, parseSpec } from './commercial-commands';
 import { OP_PAGE_COST_CORRECTIONS_GET, OP_PURCHASE_EDIT_CHECK_GET } from './store-read-ops';
@@ -70,7 +71,8 @@ const FORBIDDEN = ['id', 'branchId', 'tenantId', 'userId', 'createdBy', 'actor',
 const A_FIELDS = ['purchaseId', 'expectedRevision', 'reason', 'notes', 'staffId', 'identityPhotoStagingId', 'alsoUpdatePerson'];
 const C_FIELDS = [...A_FIELDS, 'purchaseDate', 'supplierId', 'confirmPaymentsToNewSupplier', 'lines', 'correctionKind', 'addLines', 'removeLineIds'];
 /** Teil 2 — eine nachgetragene Position: genau die Eingaben der Maske; Summe, Vorsteuer, Los und SKU rechnet der Primary. */
-const ADD_LINE_FIELDS = ['mode', 'productId', 'newProduct', 'quantity', 'unitPrice'];
+// PURCHASE ADD VARIANT — `variant` additiv (ein PC2 bis v0.8.110 schickt es nie).
+const ADD_LINE_FIELDS = ['mode', 'productId', 'newProduct', 'quantity', 'unitPrice', 'variant'];
 
 function strict(raw: unknown, allowed: readonly string[], what = 'payload'): Record<string, unknown> {
   if (!isPlain(raw)) throw new PurchaseEditPayloadError(`${what} must be an object`);
@@ -128,7 +130,7 @@ function parseAddLines(v: unknown): { lines: PurchaseEditAddLine[]; specs: Array
     if (typeof raw.quantity !== 'number' || !Number.isFinite(raw.quantity)) throw new PurchaseEditPayloadError(`new line ${i + 1}: quantity must be a number`);
     if (typeof raw.unitPrice !== 'number' || !Number.isFinite(raw.unitPrice)) throw new PurchaseEditPayloadError(`new line ${i + 1}: unitPrice must be a number`);
     let spec: { spec: Partial<Product>; stagingIds?: string[] } | undefined;
-    try { spec = parseSpec(raw.newProduct, EMBEDDED_PRODUCT_FIELDS, `new line ${i + 1}: newProduct`); } catch (e) {
+    try { spec = parseSpec(raw.newProduct, PURCHASE_PRODUCT_FIELDS, `new line ${i + 1}: newProduct`); } catch (e) {
       if (e instanceof CommercialPayloadError) throw new PurchaseEditPayloadError(e.message);
       throw e;
     }
@@ -138,6 +140,8 @@ function parseAddLines(v: unknown): { lines: PurchaseEditAddLine[]; specs: Array
       ...(raw.productId !== undefined ? { productId: idOf(raw.productId, `new line ${i + 1}: productId`) } : {}),
       ...(spec ? { newProduct: spec.spec } : {}),
       quantity: raw.quantity, unitPrice: raw.unitPrice,
+      ...(raw.variant !== undefined && raw.variant !== null
+        ? { variant: parseVariantShape(raw.variant, (m) => new PurchaseEditPayloadError(`new line ${i + 1}: ${m}`)) } : {}),
     };
   });
   return { lines, specs };
@@ -275,7 +279,7 @@ export async function runPurchaseEdit(
   const outcome = await runRemoteCommand(deps, identity, async () => {
     if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
-    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
+    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now(), role: (identity as { role?: string }).role ?? null };
     const request: PurchaseEditRequest = { ...req.request };
     if (mediaId) request.identityPhoto = { mediaId, alsoUpdatePerson: req.alsoUpdatePerson === true };
     if (request.addLines && req.addSpecs) {
@@ -299,7 +303,7 @@ export function runPurchaseVoidPayment(deps: EngineDeps, identity: CommandIdenti
   const req = parsePurchaseVoidPayment(raw);
   return runRemoteCommand(deps, identity, () => {
     assertHouseBranch(identity);
-    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
+    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now(), role: (identity as { role?: string }).role ?? null };
     return { ...urteil(() => voidPurchasePaymentInHouse(req.purchaseId, req.paymentId, req.reason, ctx, req.expectedRevision)) };
   });
 }
@@ -308,7 +312,7 @@ export function runPurchasePaymentDate(deps: EngineDeps, identity: CommandIdenti
   const req = parsePurchasePaymentDate(raw);
   return runRemoteCommand(deps, identity, () => {
     assertHouseBranch(identity);
-    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
+    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now(), role: (identity as { role?: string }).role ?? null };
     return { ...urteil(() => correctPurchasePaymentDateInHouse(req.purchaseId, req.paymentId, req.paidDate, req.reason, ctx, req.expectedRevision)) };
   });
 }

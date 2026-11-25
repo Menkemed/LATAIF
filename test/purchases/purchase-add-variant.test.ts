@@ -309,8 +309,85 @@ const codeOf = async (p: Promise<unknown>): Promise<string> => { try { await p; 
   ok(/openVariant\(template, key \?\? null\)/.test(wl) && /anchorProductId: variantCtx\.templateId/.test(wl), 'F3 Collections: Add variant auch ohne Modell (Ausgangsartikel)');
   ok(/if \(variantIntent\) return createVariantOnPrimary\(plan\.data, variantIntent\);\n\s*return createProductWithMedia\(plan\.data, retryProductId \?\? undefined\);/.test(wl),
     'F4 New Stock (New Item ohne Variante) unverändert: createProductWithMedia');
-  ok(/data-merge-karat-warning/.test(src('src/components/products/models/MergePhotosModal.tsx')) && /data-line-variant-photo-warning/.test(src('src/pages/purchases/PurchaseCreate.tsx'))
+  ok(/data-merge-karat-warning/.test(src('src/components/products/models/MergePhotosModal.tsx')) && /data-line-variant-photo-warning/.test(src('src/components/purchases/VariantLine.tsx')) && /<VariantLineInfo /.test(src('src/pages/purchases/PurchaseCreate.tsx'))
     && /data-variant-photo-karat-warning/.test(wl), 'F5 Warnung bei anderem Karat & Color: Einkauf, Collections, Merge photos');
+}
+
+
+// ── 7 Edit Purchase: „Add variant of existing" — dieselbe Regel, VAT-/Bearbeitungssperren respektiert ──
+{
+  const LO = await import('../../src/core/purchases/purchase-lines.ts');
+  const PEC = await import('../../src/core/bridge/purchase-edit-commands.ts');
+  const { db, sup } = setup();
+  const anchor = await item('17', 71, { attributes: { item_type: 'Bracelet', size: '17', karat: '18K Yellow' } });
+  const pick = M.activeGallery(anchor, 'branch-main')[0];
+  const p = await PH.createPurchaseOnPrimary(kauf(sup, [line(VARIANT_SPEC('18K Yellow', '18'), 2700)], { taxScheme: 'VAT_10' }) as never);
+  const HCTX = { branchId: 'branch-main', userId: 'user-test', now: NOW, role: 'ADMIN' };
+  const files0 = files(db);
+  const edit = (req: Record<string, unknown>) => {
+    posting.beginLedgerTransaction();
+    try { const r = PE.editPurchaseInHouse(req as never, HCTX, undefined, LO.PURCHASE_LINE_OPS); posting.commitLedgerTransaction(); return { ok: true as const, r }; }
+    catch (e) { posting.rollbackLedgerTransaction(); return { ok: false as const, code: String((e as { code?: string }).code ?? e) }; }
+  };
+  const addVar = (karat: string, size: string, variant: Record<string, unknown>) => ({
+    purchaseId: p.id, reason: 'forgot a piece',
+    addLines: [{ mode: 'new', newProduct: VARIANT_SPEC(karat, size), quantity: 1, unitPrice: 2650, variant }],
+  });
+  const r1 = edit(addVar('18K Yellow', '16', { anchorProductId: anchor, pickMediaId: pick }));
+  const neu = lineProducts(db, p.id).filter((x) => x !== lineProducts(db, p.id)[0]);
+  ok(r1.ok && neu.length === 1 && !!modelOf(db, anchor) && modelOf(db, neu[0]) === modelOf(db, anchor)
+    && M.activeGallery(neu[0], 'branch-main').join() === pick && files(db) === files0,
+    `G1 Edit Purchase: nachgetragene Variante — Modell entsteht, Bildverweis ohne neue Datei (${r1.ok ? 'ok' : r1.code})`);
+  ok(rows(db, 'SELECT vat_rate, unit_price FROM purchase_lines WHERE purchase_id = ? AND product_id = ?', [p.id, neu[0]]).map((r) => S(r)).join() === S([10, 2650])
+    && n(db, 'SELECT COUNT(*) FROM stock_lots WHERE product_id = ?', [neu[0]]) === 1, 'G2 …mit der Vorsteuer des Einkaufs und eigenem Los (wie „Add new item")');
+  const vorher = tabellen(db);
+  const r2 = edit(addVar('18K White', '15', { anchorProductId: anchor, pickMediaId: 'media-fremd' }));
+  ok(!r2.ok && r2.code === 'MODEL_PHOTO_NOT_IN_MODEL' && tabellen(db) === vorher, `G3 Nein nach der Anlage: die ganze Bearbeitung zurück (${r2.ok ? '' : r2.code})`);
+  // VAT-Sperre: das Quartal des Einkaufs ist eingereicht → nachtragen gesperrt, nichts geändert
+  db.run('DELETE FROM product_models WHERE product_id NOT IN (?, ?)', [anchor, neu[0]]);
+  const q = Math.floor(new Date('2026-11-20').getMonth() / 3) + 1;
+  {
+    // alle Pflichtspalten der Tabelle füllen (wie der insert-Helfer der übrigen Gates)
+    const cols = db.exec('PRAGMA table_info(vat_filings)')[0].values.map((v) => ({ name: String(v[1]), type: String(v[2] ?? ''), notnull: Number(v[3]) === 1, dflt: v[4], pk: Number(v[5]) > 0 }));
+    const data: Record<string, unknown> = { id: 'vf-pav', branch_id: 'branch-main', year: 2026, quarter: q, filed_at: NOW, created_at: NOW };
+    for (const c of cols) if (c.notnull && c.dflt === null && !c.pk && data[c.name] === undefined) data[c.name] = /INT|REAL|NUM/i.test(c.type) ? 0 : (/json/i.test(c.name) ? '{}' : '');
+    const names = Object.keys(data).filter((k) => cols.some((c) => c.name === k));
+    db.run(`INSERT INTO vat_filings (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, names.map((k) => data[k]) as never);
+  }
+  const vorVat = tabellen(db);
+  const r4 = edit(addVar('18K White', '14', { anchorProductId: anchor }));
+  ok(!r4.ok && tabellen(db) === vorVat, `G4 eingereichtes VAT-Quartal: Nachtragen gesperrt, nichts geändert (${r4.ok ? 'DURCH' : r4.code})`);
+  db.run("DELETE FROM vat_filings WHERE id = 'vf-pav'");
+  // Fernrumpf: variant additiv und streng; Steuerart Pflicht
+  let bad = ''; try { PEC.parsePurchaseEdit({ purchaseId: p.id, expectedRevision: 1, reason: 'x', addLines: [{ mode: 'new', newProduct: VARIANT_SPEC('18K White', '13'), quantity: 1, unitPrice: 1, variant: { anchorProductId: anchor, x: 1 } }] }, true); } catch (e) { bad = String((e as { code?: string }).code ?? e); }
+  ok(bad !== '', `G5 Fernrumpf: unbekanntes Feld in variant abgewiesen (${bad})`);
+  const r5 = edit({ purchaseId: p.id, reason: 'x', addLines: [{ mode: 'new', newProduct: VARIANT_SPEC('18K White', '13', { taxScheme: undefined }), quantity: 1, unitPrice: 1, variant: { anchorProductId: anchor } }] });
+  ok(!r5.ok && r5.code === 'PURCHASE_VARIANT_TAX_SCHEME_REQUIRED', `G6 Edit: Steuerart Pflicht (${r5.ok ? '' : r5.code})`);
+}
+
+// ── 8 Kombinierte Suche und kompakte Detailzeile ──
+{
+  const DS = await import('../../src/core/utils/deep-search.ts');
+  const p = { id: 'k', brand: 'Cartier', name: 'Love Bracelet', sku: 'CAR-1', categoryId: 'cat-x', attributes: { item_type: 'Bracelet', karat: '18K White', size: '16', weight: 36.5 } } as never;
+  const cat = { id: 'cat-x', name: 'Branded', attributes: [
+    { key: 'item_type', label: 'Item Type', type: 'select', showInList: true }, { key: 'size', label: 'Size', type: 'text', showInList: true },
+    { key: 'karat', label: 'Karat & Color', type: 'select', showInList: true }, { key: 'weight', label: 'Weight', type: 'number', unit: 'g', showInList: true },
+  ] } as never;
+  const such = (q: string) => DS.matchesDeepAllWords(p, q, [cat, ...VS.karatSearchTerms(p)]);
+  ok(such('Cartier Love WG') && such('love 18K WG') && such('wg cartier') && !such('Cartier Love YG') && !such('Bulgari WG') && such('Love Bracelet'),
+    'H1 kombinierte Suche: „Cartier Love WG", „love 18K WG", Reihenfolge egal — falsche Farbe/Marke nicht');
+  const sel = src('src/components/ui/SearchSelect.tsx');
+  ok(/matchAllWords\?: boolean/.test(sel) && /words\.every\(\(w\) => h\.includes\(w\)\)/.test(sel) && /matchAllWords onChange/.test(src('src/components/purchases/VariantLine.tsx')),
+    'H2 Auswahl „Variant of existing": jedes Wort für sich (nur dort eingeschaltet; andere Auswahlen unverändert)');
+  const ft = src('src/components/purchases/PurchaseLineDetail.tsx');
+  ok(/cardAttributeText\(cat, attrs\)/.test(ft) && !/query\(|getDatabase|fetch|remoteRead/.test(ft), 'H3 Detailzeile: dieselbe Merkmalzeile wie die Collection-Karte, keine Abfrage');
+  ok(['src/pages/purchases/PurchaseCreate.tsx', 'src/pages/purchases/PurchaseEdit.tsx', 'src/pages/purchases/PurchaseDetail.tsx']
+    .every((f) => /<PurchaseLineDetail /.test(src(f))), 'H4 Detailzeile in New Purchase (New/Existing/Variant), Edit Purchase und Purchase Detail');
+  const vl = src('src/components/purchases/VariantLine.tsx');
+  ok(/if \(anchorHasOldFormatPhoto\(products\.find\(\(p\) => p\.id === draft\.anchorId\)\)\) return false;/.test(vl)
+    && /if \(!g\.mediaIds\[0\]\) return 'The original has no photo that can be referenced/.test(vl)
+    && /if \(reuse && g && !g\.mediaIds\[0\]\)/.test(src('src/pages/watches/WatchList.tsx')),
+    'H5 Foto im alten Format / kein Medium: keine stille Übernahme — Einkauf, Bearbeitung und Collections melden es');
 }
 
 console.log(`\npurchase-add-variant: ${PASS} passed, ${fails.length} failed`);

@@ -36,7 +36,7 @@ import {
   type PurchasePaymentVoided,
 } from './purchase-edit-house';
 import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput } from './purchase-create';
-import { EMBEDDED_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
+import { PURCHASE_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
 import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -438,7 +438,8 @@ export async function stagePurchaseEditAddLines(
   for (const l of lines) {
     const line: Record<string, unknown> = { mode: l.mode, quantity: l.quantity, unitPrice: l.unitPrice };
     if (l.productId) line.productId = l.productId;
-    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
+    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, PURCHASE_PRODUCT_FIELDS), stage);
+    if (l.variant) line.variant = { ...l.variant };
     out.push(line);
   }
   return out;
@@ -476,7 +477,10 @@ export async function editPurchaseOnPrimary(purchaseId: string, form: PurchaseEd
     ...(addLines ? { addLines } : {}),
     ...(form.removeLineIds && form.removeLineIds.length > 0 ? { removeLineIds: form.removeLineIds } : {}),
   };
-  return runOnPrimary(() => editPurchaseInHouse(req, localHouseCtx(), expectedRevision, PURCHASE_LINE_OPS), lebenszyklusLesen);
+  // PURCHASE ADD VARIANT — die Rolle für die Modellregel einer nachgetragenen Variante.
+  let editRole: string | null = null;
+  try { editRole = useAuthStore.getState().role() ?? null; } catch { editRole = null; }
+  return runOnPrimary(() => editPurchaseInHouse(req, { ...localHouseCtx(), role: editRole }, expectedRevision, PURCHASE_LINE_OPS), lebenszyklusLesen);
 }
 
 /** „Save" der Maske: EINE Buchung — am Primary die Hausfolge, auf PC2 der geprüfte Befehl (Foto vorher in die Ablage). */
