@@ -2,8 +2,8 @@
 import { SettleOrderGoldModal } from '@/components/gold/SettleOrderGoldModal';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Building2, Edit3, Link2, Save, Trash2, User } from 'lucide-react';
-import { LinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
+import { ArrowLeft, Building2, Edit3, Link2, Save, Trash2, Unlink, User } from 'lucide-react';
+import { LinkSupplierClientModal, UnlinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
 import type { Customer } from '@/core/models/types';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
@@ -186,6 +186,7 @@ export function SupplierDetail() {
     [possibleCustomer, suppliers],
   );
   const [linkModal, setLinkModal] = useState<{ suggested?: Customer } | null>(null);
+  const [unlinkOpen, setUnlinkOpen] = useState(false);
 
   // Der Saldo der Kundenrolle aus DERSELBEN Funktion wie die Kunden-Detailseite (`getCustomerStats`:
   // Total Receivable, offene Rechnungen) — keine eigene Summe, keine Verrechnung mit diesem Lieferanten.
@@ -501,6 +502,11 @@ export function SupplierDetail() {
                 </div>
               </div>
             </button>
+            <div className="flex justify-end" style={{ marginTop: 6 }}>
+              <Button variant="ghost" onClick={() => setUnlinkOpen(true)} data-supplier-unlink-client>
+                <Unlink size={14} /> Unlink client
+              </Button>
+            </div>
           </div>
         )}
         {!linkedCustomer && possibleCustomer && (
@@ -891,6 +897,15 @@ export function SupplierDetail() {
           suggested={linkModal.suggested}
           onClose={() => setLinkModal(null)}
           onLinked={() => { setLinkModal(null); setRefreshKey(k => k + 1); }}
+        />
+      )}
+      {unlinkOpen && linkedCustomer && (
+        <UnlinkSupplierClientModal
+          open
+          supplier={supplier}
+          customer={linkedCustomer}
+          onClose={() => setUnlinkOpen(false)}
+          onUnlinked={() => { setUnlinkOpen(false); setRefreshKey(k => k + 1); }}
         />
       )}
 

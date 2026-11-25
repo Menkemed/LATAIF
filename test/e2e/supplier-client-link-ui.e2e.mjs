@@ -14,6 +14,7 @@
 //   4  PC2, Kunde mit Lieferantenrolle: kein „Link Supplier"-Knopf. Kunde ohne Treffer: „Link Supplier" → Suche →
 //      ein schon verknüpfter Lieferant ist nicht wählbar.
 //   5  Nichts sonst geändert: Einkäufe, Hauptbuch, übrige Spalten der Lieferanten.
+//   6  Unlink (V3): bei aktiver Verrechnung abgelehnt (Meldung nennt die STL); sonst mit Pflichtgrund gelöst — Primary und PC2.
 //
 // PROZESS-ISOLATION: gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf gestartet hat oder was am
 // EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -179,6 +180,12 @@ function seed() {
     for (const [id, name, phone, linked] of LIEFERANTEN) {
       insert(db, 'suppliers', { id, branch_id, name, phone, linked_customer_id: linked, active: 1, notes: 'seed ' + id, created_at: now, updated_at: now });
     }
+    // 6 — eine AKTIVE Verrechnung zwischen K4 und einem Einkauf von S4 (nur die Zeile, die die Sperre liest).
+    insert(db, 'purchases', { id: 'sl-p4', branch_id, purchase_number: 'PUR-SL-4', supplier_id: 'sl-s4', status: 'PAID', total_amount: 10,
+      paid_amount: 0, remaining_amount: 0, purchase_date: '2026-11-20', created_at: now, updated_at: now });
+    insert(db, 'party_offsets', { id: 'sl-po', branch_id, offset_number: 'STL-2026-009999/1', settlement_number: 'STL-2026-009999', customer_id: 'sl-k4',
+      receivable_type: 'INVOICE', receivable_id: 'sl-inv', receivable_payment_id: 'sl-inv-pay', payable_type: 'PURCHASE', payable_id: 'sl-p4',
+      payable_payment_id: 'sl-p4-pay', amount: 10, offset_date: '2026-11-20', status: 'ACTIVE', created_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 const verknuepft = (sid) => dbQ(BIZ_DB, 'SELECT linked_customer_id AS l FROM suppliers WHERE id = ?', [sid])[0]?.l ?? null;
@@ -362,9 +369,63 @@ try {
     ok(S(LIEFERANTEN.map(([id]) => verknuepft(id))) === S(['sl-k1', 'sl-k2', 'sl-k3', 'sl-k4']), '5 Endstand der Verknüpfungen S1→K1, S2→K2, S3→K3, S4→K4');
     const ops = (await befehle(client)).map((x) => x.op);
     ok(ops.includes('suppliers.update'), `5 PC2 verknüpfte über den Primary (suppliers.update) (${[...new Set(ops)].filter((o) => /supplier/.test(o)).join(',')})`);
-    ok((await client.ev('return window.__dbHits.length;')) === 0, '5 PC2 greift auf keine lokale Datenbank zu');
+  }
+
+  // ── 6 Unlink (echte Maus/Tastatur): gesperrt bei aktiver Verrechnung, sonst gelöst — Primary und PC2 ──
+  const unlinkAudit = (sid) => dbQ(BIZ_DB, "SELECT old_value AS o, new_value AS n, changed_by AS u FROM audit_log WHERE entity_type = 'suppliers' AND entity_id = ? AND field_name = 'linked_customer_id' AND new_value LIKE '%reason%'", [sid]);
+  {
+    // 6a Primary, S4 ↔ K4 mit aktiver STL: abgelehnt, die Meldung nennt die Nummer, nichts geändert.
+    await gehFrisch(primary, '/suppliers/sl-s4');
+    const r = [(await warteBis(primary, q('[data-supplier-unlink-client]'), 30000)) ? await maus(primary, '[data-supplier-unlink-client]') : 'KEIN-KNOPF'];
+    r.push((await warteBis(primary, q('[data-unlink-reason]'), 10000)) ? 'OK' : 'KEIN-DIALOG');
+    r.push(await tippe(primary, '[data-unlink-reason]', 'wrong client'));
+    r.push(await maus(primary, '[data-unlink-save]'));
+    const gemeldet = await warteBis(primary, `/STL-2026-009999/.test(${q('[data-unlink-supplier-client]')}?.textContent || '')`, 15000);
+    ok(alleOk(r) === 'OK' && gemeldet && verknuepft('sl-s4') === 'sl-k4' && unlinkAudit('sl-s4').length === 0,
+      `6a PRIMARY Unlink bei aktiver Verrechnung abgelehnt, Meldung nennt STL-2026-009999, Verknüpfung bleibt (${alleOk(r)})`);
+    await clickText(primary, 'Cancel');
+  }
+  {
+    // 6b Primary, S1 ↔ K1 ohne Verrechnung: gelöst; danach wieder „Link to Client".
+    await gehFrisch(primary, '/suppliers/sl-s1');
+    const r = [(await warteBis(primary, q('[data-supplier-unlink-client]'), 30000)) ? await maus(primary, '[data-supplier-unlink-client]') : 'KEIN-KNOPF'];
+    r.push((await warteBis(primary, q('[data-unlink-reason]'), 10000)) ? 'OK' : 'KEIN-DIALOG');
+    r.push(await tippe(primary, '[data-unlink-reason]', 'linked by mistake'));
+    r.push(await maus(primary, '[data-unlink-save]'));
+    await spuelen(primary).catch(() => null);
+    const geloest = await warteAuf(() => verknuepft('sl-s1') === null);
+    const au = unlinkAudit('sl-s1');
+    ok(alleOk(r) === 'OK' && geloest, `6b PRIMARY echte Maus/Tastatur: Unlink mit Grund → Verknüpfung entfernt (${alleOk(r)}; ${verknuepft('sl-s1')})`);
+    ok(au.length === 1 && /sl-k1/.test(String(au[0].o)) && /linked by mistake/.test(String(au[0].n)), `6b Protokoll mit bisherigem Kunden und Grund (${S(au)})`);
+    ok(await warteBis(primary, q('[data-supplier-link-client]'), 15000) && !(await exists(primary, '[data-linked-client-card]')),
+      '6b PRIMARY danach wieder „Link to Client", keine Karte „Linked Client"');
+  }
+  {
+    // 6c PC2, Kunde K2 ↔ S2: ohne Grund kein Klick möglich; mit Grund gelöst über den Primary.
+    await gehFrisch(client, '/clients/sl-k2');
+    const r = [(await warteBis(client, q('[data-customer-unlink-supplier]'), 30000)) ? await maus(client, '[data-customer-unlink-supplier]') : 'KEIN-KNOPF'];
+    r.push((await warteBis(client, q('[data-unlink-reason]'), 10000)) ? 'OK' : 'KEIN-DIALOG');
+    const gesperrt = await client.ev(`return ${q('[data-unlink-save]')}?.disabled === true;`);
+    ok(gesperrt, '6c PC2 ohne Grund ist „Unlink" nicht klickbar');
+    r.push(await tippe(client, '[data-unlink-reason]', 'wrong person'));
+    r.push(await maus(client, '[data-unlink-save]'));
+    await spuelen(primary).catch(() => null);
+    const geloest = await warteAuf(() => verknuepft('sl-s2') === null);
+    const au = unlinkAudit('sl-s2');
+    ok(alleOk(r) === 'OK' && geloest && au.length === 1 && /wrong person/.test(String(au[0].n)),
+      `6c PC2 echte Maus/Tastatur: Unlink über den Primary, mit Protokoll (${alleOk(r)}; ${verknuepft('sl-s2')}; ${S(au)})`);
+    ok(await warteBis(client, q('[data-customer-link-supplier]'), 15000) && !(await exists(client, '[data-supplier-role-card]')),
+      '6c PC2 danach wieder „Link Supplier", keine Karte „Supplier Role"');
+  }
+  {
+    await spuelen(primary).catch(() => null);
+    ok(zaehle('ledger_entries') === vorher.ledger && zaehle('purchases') === vorher.purchases && zaehle('invoices') === vorher.invoices
+      && dbQ(BIZ_DB, "SELECT status FROM party_offsets WHERE id = 'sl-po'")[0]?.status === 'ACTIVE',
+      '6 Unlink änderte keine Buchung, keinen Einkauf, keine Rechnung; die aktive Verrechnung bleibt');
+    ok(S(LIEFERANTEN.map(([id]) => verknuepft(id))) === S([null, null, 'sl-k3', 'sl-k4']), '6 Endstand S1, S2 gelöst; S3→K3, S4→K4 bleiben');
+    ok((await client.ev('return window.__dbHits.length;')) === 0, '6 PC2 greift auf keine lokale Datenbank zu');
     const alerts = [...JSON.parse(await primary.ev('return JSON.stringify(window.__alerts);')), ...JSON.parse(await client.ev('return JSON.stringify(window.__alerts);'))];
-    ok(alerts.length === 0, `5 keine Fehlermeldung (${S(alerts)})`);
+    ok(alerts.length === 0, `6 keine Browser-Meldung (${S(alerts)})`);
   }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);

@@ -150,6 +150,8 @@ export interface SupplierUpdateRequest {
   expectedRevision?: number;
   /** CUSTOMER-SUPPLIER-ROLE-LINK V2 — diesen bestehenden Lieferanten ausdrücklich mit dem Kunden verknüpfen. */
   linkTo?: { customerId: string; seenCustomerUpdatedAt: string };
+  /** CUSTOMER-SUPPLIER-ROLE-LINK V3 — die Verknüpfung lösen, nur wenn sie noch auf diesen Kunden zeigt; Pflichtgrund. */
+  unlinkFrom?: { customerId: string; reason: string };
 }
 
 function stagingIdOf(raw: Record<string, unknown>): string | undefined {
@@ -208,8 +210,20 @@ function parseSupplierLink(raw: Record<string, unknown>): SupplierUpdateRequest 
   return { id, fields: {}, linkTo: { customerId, seenCustomerUpdatedAt: seen } };
 }
 
+/** V3 — „Unlink": nur Kennung, der Kunde, auf den die Verknüpfung JETZT zeigt, und der Grund. */
+function parseSupplierUnlink(raw: Record<string, unknown>): SupplierUpdateRequest {
+  const r = strict(raw, ['unlinkCustomerId', 'reason'], MASTERDATA_COMPUTED.supplier, ['id']);
+  const id = requiredId(r);
+  const customerId = r.unlinkCustomerId;
+  if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('unlinkCustomerId is the client the link points to now');
+  const reason = r.reason;
+  if (typeof reason !== 'string' || !reason.trim()) throw new MasterdataPayloadError('reason is required to unlink the supplier');
+  return { id, fields: {}, unlinkFrom: { customerId, reason: reason.trim() } };
+}
+
 export function parseSupplierUpdate(raw: unknown): SupplierUpdateRequest {
   if (isPlain(raw) && 'linkedCustomerId' in raw) return parseSupplierLink(raw);
+  if (isPlain(raw) && 'unlinkCustomerId' in raw) return parseSupplierUnlink(raw);
   if (isPlain(raw) && 'cprImage' in raw && raw.cprImage !== null) {
     throw new MasterdataPayloadError('an ID-card photo travels as staged bytes (cprImageStagingId), never inside the order');
   }
@@ -384,6 +398,15 @@ export async function runSupplierUpdate(deps: EngineDeps, identity: CommandIdent
       assertHouseBranch(identity);
       const r = urteil(() => useSupplierStore.getState().linkSupplierToCustomer(req.id, lt.customerId, lt.seenCustomerUpdatedAt));
       return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: lt.customerId, existing: r.existing };
+    });
+  }
+  if (req.unlinkFrom) {
+    const ul = req.unlinkFrom;
+    return runRemoteCommand(deps, identity, () => {
+      assertHouseBranch(identity);
+      const actor = { userId: identity.userId, branchId: identity.branchId };
+      const r = urteil(() => useSupplierStore.getState().unlinkSupplierFromCustomer(req.id, ul.customerId, ul.reason, actor));
+      return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: null, changed: r.changed };
     });
   }
   const staged = req.cprImageStagingId ? [req.cprImageStagingId] : [];

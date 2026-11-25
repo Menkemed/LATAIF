@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles,
-  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank, Link2,
+  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank, Link2, Unlink,
 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { useReturnToList } from '@/hooks/useListNav';
@@ -44,7 +44,7 @@ import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerUpdate } from '@/core/customers/customer-save';
 import { intentOf } from '@/core/identity/identity-save';
 import { productDisplayLines } from '@/core/products/display-name';
-import { LinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
+import { LinkSupplierClientModal, UnlinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
 
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
@@ -179,6 +179,7 @@ export function CustomerDetail() {
   const [balanceTick, setBalanceTick] = useState(0);
   // V3 — „Link Supplier": dieselbe Person nachträglich mit einem vorhandenen, unverknüpften Lieferanten verbinden.
   const [linkModal, setLinkModal] = useState<{ suggested?: Supplier } | null>(null);
+  const [unlinkOpen, setUnlinkOpen] = useState(false);
   const balances = usePartyBalances(
     { customerIds: id ? [id] : [], supplierIds: linkedSupplier ? [linkedSupplier.id] : [] },
     [invoices, debts, allGoldCredits], balanceTick,
@@ -489,6 +490,11 @@ export function CustomerDetail() {
                 </div>
               </div>
             </button>
+            <div className="flex justify-end" style={{ marginTop: 6 }}>
+              <Button variant="ghost" onClick={() => setUnlinkOpen(true)} data-customer-unlink-supplier>
+                <Unlink size={14} /> Unlink supplier
+              </Button>
+            </div>
           </div>
         )}
         {!editing && !linkedSupplier && possibleSupplier && (
@@ -1206,6 +1212,15 @@ export function CustomerDetail() {
           suggested={linkModal.suggested}
           onClose={() => setLinkModal(null)}
           onLinked={() => { setLinkModal(null); setBalanceTick((v) => v + 1); }}
+        />
+      )}
+      {unlinkOpen && linkedSupplier && (
+        <UnlinkSupplierClientModal
+          open
+          supplier={linkedSupplier}
+          customer={customer}
+          onClose={() => setUnlinkOpen(false)}
+          onUnlinked={() => { setUnlinkOpen(false); setBalanceTick((v) => v + 1); }}
         />
       )}
 

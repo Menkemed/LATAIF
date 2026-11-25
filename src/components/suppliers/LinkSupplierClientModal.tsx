@@ -15,7 +15,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
-import { saveSupplierLinkToCustomer } from '@/core/masterdata/masterdata-save';
+import { saveSupplierLinkToCustomer, saveSupplierUnlink } from '@/core/masterdata/masterdata-save';
 import type { Customer, Supplier } from '@/core/models/types';
 
 type Props =
@@ -145,6 +145,66 @@ export function LinkSupplierClientModal(props: Props) {
             </div>
           </>
         )}
+      </div>
+    </Modal>
+  );
+}
+
+// CUSTOMER-SUPPLIER-ROLE-LINK V3 — „Unlink": die Verknüpfung lösen, mit Pflichtgrund. Der Primary prüft in derselben
+// Transaktion, ob die Verknüpfung noch auf diesen Kunden zeigt und ob eine aktive Verrechnung (STL-…) zwischen beiden
+// besteht — dann bleibt alles, wie es ist, und die Meldung nennt die Nummer. Rechnungen, Einkäufe, Zahlungen und
+// Buchungen werden nie angefasst.
+export function UnlinkSupplierClientModal({ open, onClose, onUnlinked, supplier, customer }: {
+  open: boolean; onClose: () => void; onUnlinked: () => void;
+  supplier: { id: string; name: string };
+  customer: Customer;
+}) {
+  const { loadCustomers } = useCustomerStore();
+  const { loadSuppliers } = useSupplierStore();
+  const loesen = useSharedWrite<{ supplierId: string; changed: boolean }>('suppliers.update');
+  const [reason, setReason] = useState('');
+  const [fehler, setFehler] = useState('');
+
+  useEffect(() => { if (open) { setReason(''); setFehler(''); } }, [open]);
+
+  async function unlink() {
+    if (!reason.trim()) { setFehler('Please enter a reason.'); return; }
+    setFehler('');
+    const r = await saveSupplierUnlink(loesen, supplier.id, customer.id, reason);
+    loadCustomers(); loadSuppliers();
+    if (r.kind !== 'ok') { setFehler(`Could not unlink: ${fehlertext(r)}`); return; }
+    onUnlinked();
+  }
+
+  return (
+    <Modal open={open} onClose={() => { if (!loesen.busy) onClose(); }} title="Unlink Supplier" width={480}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }} data-unlink-supplier-client>
+        <WriteError text={fehler} />
+        <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: '10px 14px', fontSize: 13 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+            <span style={{ color: '#6B7280' }}>Client</span>
+            <span style={{ color: '#0F0F10' }}>{kundeName(customer)}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0' }}>
+            <span style={{ color: '#6B7280' }}>Supplier</span>
+            <span style={{ color: '#0F0F10' }}>{supplier.name}</span>
+          </div>
+          <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6 }}>
+            Only the link is removed. Invoices, purchases, payments and bookings stay exactly as they are; the two accounts
+            are shown separately again. Not possible while a settlement (STL-…) between them is active — reverse it first.
+          </p>
+        </div>
+        <div>
+          <span className="text-overline">REASON *</span>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} data-unlink-reason
+            placeholder="e.g. linked to the wrong client"
+            className="w-full outline-none"
+            style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10' }} />
+        </div>
+        <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+          <Button variant="ghost" onClick={onClose} disabled={loesen.busy}>Cancel</Button>
+          <Button variant="danger" onClick={() => void unlink()} disabled={loesen.busy || !reason.trim()} data-unlink-save>Unlink</Button>
+        </div>
       </div>
     </Modal>
   );
