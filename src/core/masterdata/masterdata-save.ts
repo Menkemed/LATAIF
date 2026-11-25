@@ -154,6 +154,30 @@ export async function saveSupplierLinkToCustomer(
   return r;
 }
 
+/**
+ * CUSTOMER-SUPPLIER-ROLE-LINK V3 — die Verknüpfung Lieferant ↔ Kunde lösen (Pflichtgrund). Am Primary in einer Klammer,
+ * am PC2 `suppliers.update` mit `unlinkCustomerId` + `reason`. Der Primary prüft: zeigt die Verknüpfung noch auf diesen
+ * Kunden, und besteht keine aktive Verrechnung zwischen beiden. Nur `linked_customer_id` wird geleert.
+ */
+export async function saveSupplierUnlink(
+  write: MasterdataWrite<{ supplierId: string; changed: boolean }>,
+  supplierId: string,
+  customerId: string,
+  reason: string,
+): Promise<WriteOutcome<{ supplierId: string; changed: boolean }>> {
+  const grund = reason.trim();
+  const r = await write.save({
+    local: () => runOnPrimary(() => {
+      const out = useSupplierStore.getState().unlinkSupplierFromCustomer(supplierId, customerId, grund);
+      return { supplierId, changed: out.changed };
+    }, suppliersHier),
+    remote: () => ({ id: supplierId, unlinkCustomerId: customerId, reason: grund }),
+    shape: (v) => ({ supplierId: String(v.supplierId ?? supplierId), changed: v.changed === true }),
+  });
+  if (r.kind === 'ok') await suppliersNeu();
+  return r;
+}
+
 /** Lieferant ändern: nur das Geänderte; ein neues Foto reist über die Ablage, ein entferntes als `null`. */
 export async function saveSupplierUpdate(
   write: MasterdataWrite<Saved>, base: Supplier, form: Partial<Supplier>,

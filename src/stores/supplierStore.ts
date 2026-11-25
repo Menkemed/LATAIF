@@ -9,6 +9,7 @@ import type { Supplier } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 // CENTRAL-UI-PARITY R6D — Guthaben einloesen, gewaehren und zurueckbuchen laufen durch DIE
 // Hausfolge, die auch der Fernbefehl ruft (Filiale aus dem Rahmen, strikt gebucht, feste Codes).
 // Die Store-Aktionen bleiben mit ihrer Signatur und klammern sich selbst atomar.
@@ -28,6 +29,31 @@ import {
   MasterdataInputError, CUSTOMER_CHANGED, CUSTOMER_BRANCH_MISMATCH, SUPPLIER_CANDIDATES_EXIST,
   supplierLinkCandidates,
 } from '@/core/masterdata/masterdata-rules';
+
+/** Wer die Verknüpfung WIRKLICH löst (am PC2 der geprüfte Absender, nicht die Sitzung des Primary). */
+export interface SupplierLinkActor { userId?: string; branchId?: string }
+
+export const SUPPLIER_LINK_CHANGED = 'SUPPLIER_LINK_CHANGED';
+export const SUPPLIER_LINK_HAS_ACTIVE_OFFSETS = 'SUPPLIER_LINK_HAS_ACTIVE_OFFSETS';
+export const SUPPLIER_UNLINK_REASON_REQUIRED = 'SUPPLIER_UNLINK_REASON_REQUIRED';
+
+/**
+ * CUSTOMER-SUPPLIER-ROLE-LINK V3 — aktive Verrechnungen zwischen diesem Kunden und Einkäufen dieses Lieferanten
+ * (`party_offsets`, payable_type 'PURCHASE', ACTIVE). Solange es sie gibt, bleibt die Verknüpfung (Owner 25.11.2026):
+ * die Verrechnung ist nur über ihre eigene Rücknahme aufzuheben, nie still über das Lösen der Rolle.
+ * Liefert die Nummern, unter denen der Benutzer sie findet (STL-… bzw. die Einzelnummer).
+ */
+export function activeSupplierOffsets(supplierId: string, customerId: string, branchId: string): string[] {
+  const rows = query(
+    `SELECT DISTINCT COALESCE(po.settlement_number, po.offset_number) AS nr
+       FROM party_offsets po JOIN purchases p ON p.id = po.payable_id
+      WHERE po.payable_type = 'PURCHASE' AND po.status = 'ACTIVE'
+        AND po.branch_id = ? AND po.customer_id = ? AND p.supplier_id = ?
+      ORDER BY nr`,
+    [branchId, customerId, supplierId],
+  );
+  return rows.map((r) => String(r.nr));
+}
 
 /** Die Kundenzeile, die eine Lieferanten-Rolle bestimmt — mit der Filialprüfung VOR jeder Anlage. */
 function customerForRole(customerId: string, branchId: string): Record<string, unknown> {
@@ -173,6 +199,9 @@ interface SupplierStore {
   /** CUSTOMER-SUPPLIER-ROLE-LINK V2 — einen BESTEHENDEN, unverknüpften Lieferanten ausdrücklich mit dem
    *  Kunden verknüpfen. Ändert nur `linked_customer_id`; Einkäufe, Verbindlichkeiten, Buchungen bleiben. */
   linkSupplierToCustomer: (supplierId: string, customerId: string, seenCustomerUpdatedAt?: string) => { supplier: Supplier; existing: boolean };
+  /** CUSTOMER-SUPPLIER-ROLE-LINK V3 — die Verknüpfung lösen (Pflichtgrund), nur wenn sie noch auf `expectedCustomerId`
+   *  zeigt und keine aktive Verrechnung zwischen beiden besteht. Ändert nur `linked_customer_id`. */
+  unlinkSupplierFromCustomer: (supplierId: string, expectedCustomerId: string, reason: string, actor?: SupplierLinkActor) => { supplier: Supplier; changed: boolean };
   updateSupplier: (id: string, data: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
   getLedger: (id: string) => { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number };
@@ -337,6 +366,42 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     trackUpdate('suppliers', supplierId, { linkedCustomerId: customerId });
     get().loadSuppliers();
     return { supplier: get().getSupplier(supplierId)!, existing: false };
+  },
+
+  unlinkSupplierFromCustomer: (supplierId, expectedCustomerId, reason, actor) => {
+    // Läuft IN der Klammer des Aufrufers (runOnPrimary bzw. runRemoteCommand): eine Transaktion, eine Schreibfolge.
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    if (actor?.branchId) branchId = actor.branchId;
+    const grund = typeof reason === 'string' ? reason.trim() : '';
+    if (!grund) throw new MasterdataInputError(SUPPLIER_UNLINK_REASON_REQUIRED, 'a reason is required to unlink the supplier from the client');
+    const s = query('SELECT id, branch_id, name, linked_customer_id FROM suppliers WHERE id = ?', [supplierId])[0];
+    if (!s || String(s.branch_id) !== branchId) throw new MasterdataInputError('SUPPLIER_NOT_FOUND', 'no such supplier in this branch');
+    // Schon gelöst (z. B. eine wiederholte Zustellung): nichts zu tun, kein zweiter Audit-Eintrag.
+    if (!s.linked_customer_id) { get().loadSuppliers(); return { supplier: get().getSupplier(supplierId)!, changed: false }; }
+    if (String(s.linked_customer_id) !== expectedCustomerId) {
+      throw new MasterdataInputError(SUPPLIER_LINK_CHANGED, 'this supplier is linked to a different client now — reload');
+    }
+    // Owner 25.11.2026 — eine aktive Verrechnung zwischen beiden sperrt das Lösen. Geprüft gegen den frischen Stand,
+    // in derselben Transaktion wie das Schreiben (eine gleichzeitige Settle Balance läuft davor oder danach, nie dazwischen).
+    const aktiv = activeSupplierOffsets(supplierId, expectedCustomerId, branchId);
+    if (aktiv.length) {
+      throw new MasterdataInputError(SUPPLIER_LINK_HAS_ACTIVE_OFFSETS,
+        `active settlement${aktiv.length === 1 ? '' : 's'} ${aktiv.join(', ')} between this client and supplier — reverse ${aktiv.length === 1 ? 'it' : 'them'} first. Nothing was changed.`);
+    }
+    const now = new Date().toISOString();
+    // NUR die Verknüpfung — und nur, wenn sie noch genau auf diesen Kunden zeigt.
+    getDatabase().run('UPDATE suppliers SET linked_customer_id = NULL, updated_at = ? WHERE id = ? AND linked_customer_id = ?', [now, supplierId, expectedCustomerId]);
+    if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new MasterdataInputError(SUPPLIER_LINK_CHANGED, 'the supplier changed meanwhile — reload');
+    trackUpdate('suppliers', supplierId, { linkedCustomerId: null });
+    logAuditOrThrow({
+      module: 'Supplier', entityType: 'suppliers', entityId: supplierId, action: 'UPDATE', field: 'linked_customer_id',
+      oldValue: expectedCustomerId, newValue: { customerId: null, supplierName: String(s.name ?? ''), reason: grund },
+      actor: actor ? { userId: actor.userId, branchId } : undefined,
+    });
+    saveDatabase();
+    get().loadSuppliers();
+    return { supplier: get().getSupplier(supplierId)!, changed: true };
   },
 
   updateSupplier: (id, data) => {

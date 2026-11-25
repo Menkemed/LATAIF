@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles,
-  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank,
+  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank, Link2, Unlink,
 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { useReturnToList } from '@/hooks/useListNav';
@@ -30,7 +30,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { Truck } from 'lucide-react';
-import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models/types';
+import type { Customer, VIPLevel, SalesStage, CustomerType, Supplier } from '@/core/models/types';
 import { isLoanGiven } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
@@ -44,6 +44,7 @@ import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerUpdate } from '@/core/customers/customer-save';
 import { intentOf } from '@/core/identity/identity-save';
 import { productDisplayLines } from '@/core/products/display-name';
+import { LinkSupplierClientModal, UnlinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
 
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
@@ -176,6 +177,9 @@ export function CustomerDetail() {
   // PARTY-BALANCES S0 — Kunden- und Rollensaldo aus EINER Auskunft (`parties.balances.get`): am Primary lokal,
   // am PC2 vom Primary. Ohne Antwort `null` → „n/a", nie 0,000.
   const [balanceTick, setBalanceTick] = useState(0);
+  // V3 — „Link Supplier": dieselbe Person nachträglich mit einem vorhandenen, unverknüpften Lieferanten verbinden.
+  const [linkModal, setLinkModal] = useState<{ suggested?: Supplier } | null>(null);
+  const [unlinkOpen, setUnlinkOpen] = useState(false);
   const balances = usePartyBalances(
     { customerIds: id ? [id] : [], supplierIds: linkedSupplier ? [linkedSupplier.id] : [] },
     [invoices, debts, allGoldCredits], balanceTick,
@@ -363,6 +367,7 @@ export function CustomerDetail() {
               <>
                 {/* CUSTOMER ACCOUNT A1 — das gemeinsame Kundenkonto (nur lesen). */}
                 <Button variant="secondary" onClick={() => navigate(`/clients/${id}/account`)} data-open-customer-account>Account</Button>
+                {!linkedSupplier && <Button variant="ghost" onClick={() => setLinkModal({})} data-customer-link-supplier><Link2 size={14} /> Link Supplier</Button>}
                 {perm.canEditCustomers && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit Client</Button>}
                 {(customer.whatsapp || customer.phone) && (
                   <Button variant="secondary" onClick={() => setShowMessage(true)}><Sparkles size={14} /> AI Message</Button>
@@ -485,6 +490,11 @@ export function CustomerDetail() {
                 </div>
               </div>
             </button>
+            <div className="flex justify-end" style={{ marginTop: 6 }}>
+              <Button variant="ghost" onClick={() => setUnlinkOpen(true)} data-customer-unlink-supplier>
+                <Unlink size={14} /> Unlink supplier
+              </Button>
+            </div>
           </div>
         )}
         {!editing && !linkedSupplier && possibleSupplier && (
@@ -503,6 +513,11 @@ export function CustomerDetail() {
               </div>
               <div style={{ fontSize: 11, color: '#9CA3AF' }}>View Supplier {'\u2197'}</div>
             </button>
+            <div className="flex justify-end" style={{ marginTop: 6 }}>
+              <Button variant="secondary" onClick={() => setLinkModal({ suggested: possibleSupplier })} data-supplier-possible-link>
+                <Link2 size={14} /> Link this supplier
+              </Button>
+            </div>
           </div>
         )}
 
@@ -1189,6 +1204,25 @@ export function CustomerDetail() {
         customerPhone={customer.phone}
         customerWhatsapp={customer.whatsapp}
       />
+
+      {linkModal && (
+        <LinkSupplierClientModal
+          open
+          customer={customer}
+          suggested={linkModal.suggested}
+          onClose={() => setLinkModal(null)}
+          onLinked={() => { setLinkModal(null); setBalanceTick((v) => v + 1); }}
+        />
+      )}
+      {unlinkOpen && linkedSupplier && (
+        <UnlinkSupplierClientModal
+          open
+          supplier={linkedSupplier}
+          customer={customer}
+          onClose={() => setUnlinkOpen(false)}
+          onUnlinked={() => { setUnlinkOpen(false); setBalanceTick((v) => v + 1); }}
+        />
+      )}
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Client" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
