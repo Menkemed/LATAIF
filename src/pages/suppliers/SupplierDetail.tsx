@@ -2,7 +2,9 @@
 import { SettleOrderGoldModal } from '@/components/gold/SettleOrderGoldModal';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Building2, Edit3, Save, Trash2, User } from 'lucide-react';
+import { ArrowLeft, Building2, Edit3, Link2, Save, Trash2, User } from 'lucide-react';
+import { LinkSupplierClientModal } from '@/components/suppliers/LinkSupplierClientModal';
+import type { Customer } from '@/core/models/types';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useGoBack } from '@/hooks/useGoBack';
@@ -178,6 +180,12 @@ export function SupplierDetail() {
     const fullName = (supplier.name || '').trim().toLowerCase();
     return fullName ? customers.find(c => `${c.firstName} ${c.lastName}`.trim().toLowerCase() === fullName) : undefined;
   }, [supplier, customers]);
+  // V3 — „Link to Client": eine Rolle je Kunde. Hat der mögliche Treffer schon einen Lieferanten, gibt es dort keinen Link-Knopf.
+  const possibleCustomerHasRole = useMemo(
+    () => !!possibleCustomer && suppliers.some(s => s.linkedCustomerId === possibleCustomer.id),
+    [possibleCustomer, suppliers],
+  );
+  const [linkModal, setLinkModal] = useState<{ suggested?: Customer } | null>(null);
 
   // Der Saldo der Kundenrolle aus DERSELBEN Funktion wie die Kunden-Detailseite (`getCustomerStats`:
   // Total Receivable, offene Rechnungen) — keine eigene Summe, keine Verrechnung mit diesem Lieferanten.
@@ -336,6 +344,9 @@ export function SupplierDetail() {
             ) : (
               <>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
+                {!linkedCustomer && (
+                  <Button variant="ghost" onClick={() => setLinkModal({})} data-supplier-link-client><Link2 size={14} /> Link to Client</Button>
+                )}
                 <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>
               </>
             )}
@@ -508,6 +519,13 @@ export function SupplierDetail() {
               </div>
               <div style={{ fontSize: 11, color: '#9CA3AF' }}>View Client {'↗'}</div>
             </button>
+            {!possibleCustomerHasRole && (
+              <div className="flex justify-end" style={{ marginTop: 6 }}>
+                <Button variant="secondary" onClick={() => setLinkModal({ suggested: possibleCustomer })} data-client-possible-link>
+                  <Link2 size={14} /> Link to this client
+                </Button>
+              </div>
+            )}
           </div>
         )}
 
@@ -865,6 +883,16 @@ export function SupplierDetail() {
           </div>
         )}
       </div>
+
+      {linkModal && (
+        <LinkSupplierClientModal
+          open
+          supplier={supplier}
+          suggested={linkModal.suggested}
+          onClose={() => setLinkModal(null)}
+          onLinked={() => { setLinkModal(null); setRefreshKey(k => k + 1); }}
+        />
+      )}
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Supplier" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>

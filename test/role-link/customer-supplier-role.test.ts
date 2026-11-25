@@ -358,7 +358,11 @@ const gegenparteien = (db: Db): string => all(db,
     // v0.8.101 S4/S5 (Owner E3) — Partnerguthaben gegen Rechnungen nur für den Partner, der AUSDRÜCKLICH mit dem Kunden
     // verknüpft ist (`partners.linked_customer_id`); die Partnerforderung gegen offene Einkäufe prüft wie
     // purchase-offsets.ts die ausdrückliche Lieferanten-Verknüpfung. Kein Abgleich über Name/Telefon.
-    'core/offsets/partner-offsets.ts', 'core/offsets/partner-receivable-offsets.ts'];
+    'core/offsets/partner-offsets.ts', 'core/offsets/partner-receivable-offsets.ts',
+    // V3 (Owner 25.11.2026) — „Link to Client" / „Link Supplier" auf den Detailseiten: zeigt, welche Rolle schon vergeben
+    // ist, und schreibt über denselben Weg wie „Use existing customer → Link this supplier" (`saveSupplierLinkToCustomer`).
+    // Kein Betrag, kein Saldo, keine Buchung.
+    'components/suppliers/LinkSupplierClientModal.tsx'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');
