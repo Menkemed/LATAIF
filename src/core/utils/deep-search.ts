@@ -48,6 +48,16 @@ function valueContains(value: unknown, q: string, category?: Category): boolean 
   return false;
 }
 
+/**
+ * PURCHASE ADD VARIANT — die kombinierte Suche der Collection („Cartier Love WG"): erst die ganze Eingabe wie bisher,
+ * sonst muss JEDES Wort für sich irgendwo im Artikel (oder in den Zusatzwerten) vorkommen. Nichts wird gespeichert.
+ */
+export function matchesDeepAllWords(obj: unknown, rawQuery: string, extras?: unknown[]): boolean {
+  if (matchesDeep(obj, rawQuery, extras)) return true;
+  const words = rawQuery.trim().split(/\s+/).filter(Boolean);
+  return words.length > 1 && words.every((w) => matchesDeep(obj, w, extras));
+}
+
 export function matchesDeep(obj: unknown, rawQuery: string, extras?: unknown[]): boolean {
   const q = rawQuery.trim().toLowerCase();
   if (!q) return true;

@@ -297,7 +297,8 @@ try {
     await gehFrisch(c, '/collection');
     await warteBis(c, q('[data-model-card]'), 15000);
     const karte = await c.ev(`const k=document.querySelector('[data-model-card]'); return k ? k.innerText : '';`);
-    ok(/16\s*×1/.test(karte) && /17\s*×2/.test(karte) && /3\s*available/.test(karte) && /Love Bracelet/.test(karte), `C1 eine Modellkarte: 16 ×1, 17 ×2, 3 available („${karte.replace(/\s+/g, ' ').slice(0, 140)}")`);
+    // PURCHASE ADD VARIANT — die Karte schlüsselt nach Größe UND Karat & Color auf („16 · 18K YG ×1").
+    ok(/16 · 18K YG\s*×1/.test(karte) && /17 · 18K YG\s*×2/.test(karte) && /3\s*available/.test(karte) && /Love Bracelet/.test(karte), `C1 eine Modellkarte: 16 ×1, 17 ×2, 3 available („${karte.replace(/\s+/g, ' ').slice(0, 140)}")`);
     ok(await c.ev(`return document.querySelectorAll('[data-model-card]').length;`) === 1, 'C2 genau eine Karte für das Modell');
     const r = await maus(c, '[data-collection-view="single"]');
     await sleep(800);
@@ -358,6 +359,8 @@ try {
     await maus(c, '[data-create-product]'); await sleep(900);
     ok(/Choose the tax scheme/.test(await pageText(c)) && produkte().length === 3, 'F2 keine automatische Steuerart: ohne Wahl wird nichts angelegt');
     await mausAuf(c, chipIn('#new-field-taxScheme', 'Margin'), 'Margin');
+    // PURCHASE ADD VARIANT — Karat & Color kommt als Vorschlag: ausdrücklich bestätigen (echte Maus).
+    await maus(c, '[data-variant-karat-confirm] input'); await sleep(200);
     const reuse = await c.ev(`return !!document.querySelector('[data-variant-reuse-photo] input')?.checked;`);
     await maus(c, '[data-create-product]');
     const zu = await warteBis(c, `!document.querySelector('#new-field-categoryId')`, 40000);

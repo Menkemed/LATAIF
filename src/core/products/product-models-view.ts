@@ -6,6 +6,7 @@
 import type { Product } from '@/core/models/types';
 import { productDisplayName } from './display-name';
 import { isAvailableVariant, modelDisplayName, type ModelCandidate } from './product-models';
+import { karatShort } from './karat-short';
 
 export type ModelMap = Readonly<Record<string, string>>;
 
@@ -20,6 +21,16 @@ export function sizeOf(p: Product): string {
   const a = (p.attributes ?? {}) as Record<string, unknown>;
   const v = a.size ?? (a.case_diameter_mm != null && a.case_diameter_mm !== '' ? `${a.case_diameter_mm} mm` : '');
   return String(v ?? '').trim();
+}
+
+/** Karat & Color eines Stücks in Kurzform („18K WG") — dieselbe Regel wie das Etikett; leer, wenn nicht gesetzt. */
+export function karatOf(p: Product): string {
+  return karatShort((p.attributes as Record<string, unknown> | undefined)?.karat);
+}
+
+/** PURCHASE ADD VARIANT — die Aufschlüsselung der Modellkarte: Größe und Karat & Color („17 · 18K WG"). */
+export function variantKeyOf(p: Product): string {
+  return [sizeOf(p) || '—', karatOf(p)].filter(Boolean).join(' · ');
 }
 
 export function weightOf(p: Product): number | null {
@@ -48,9 +59,9 @@ export interface ModelSummary {
   available: Product[];
   sold: number;
   other: number;
-  /** verfügbare Größen mit Stückzahl, aufsteigend */
+  /** verfügbare Größen (mit Karat & Color, z. B. „17 · 18K WG") mit Stückzahl, aufsteigend */
   sizes: Array<{ size: string; count: number }>;
-  /** Größen, die nur noch verkauft bzw. reserviert sind */
+  /** Größen (mit Karat & Color), die nur noch verkauft bzw. reserviert sind */
   soldSizes: string[];
   priceMin: number | null;
   priceMax: number | null;
@@ -72,10 +83,10 @@ export function summarizeModel(key: string, members: readonly Product[]): ModelS
   const available = members.filter((m) => isAvailableVariant(String(m.stockStatus)));
   const sold = members.filter((m) => String(m.stockStatus).toLowerCase() === 'sold').length;
   const counts = new Map<string, number>();
-  for (const m of available) { const s = sizeOf(m) || '—'; counts.set(s, (counts.get(s) ?? 0) + pieces(m)); }
+  for (const m of available) { const s = variantKeyOf(m); counts.set(s, (counts.get(s) ?? 0) + pieces(m)); }
   const sizes = [...counts.entries()].map(([size, count]) => ({ size, count }))
     .sort((a, b) => a.size.localeCompare(b.size, undefined, { numeric: true }));
-  const soldSizes = [...new Set(members.filter((m) => !isAvailableVariant(String(m.stockStatus))).map((m) => sizeOf(m) || '—'))]
+  const soldSizes = [...new Set(members.filter((m) => !isAvailableVariant(String(m.stockStatus))).map((m) => variantKeyOf(m)))]
     .filter((s) => !counts.has(s)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
   const prices = available.map((m) => Number(m.plannedSalePrice)).filter((x) => Number.isFinite(x) && x > 0);
   return {

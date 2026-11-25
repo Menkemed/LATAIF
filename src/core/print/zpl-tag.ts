@@ -8,6 +8,7 @@
 
 import type { Product, Category } from '@/core/models/types';
 import { attributesForDisplay } from '../products/stones.ts';
+import { karatShort } from '../products/karat-short.ts';
 
 // ── Gelockte Geometrie (NICHT ändern ohne erneuten physischen Test) ──
 const FONT = '^A0N,17,18';
@@ -83,15 +84,7 @@ function buildWatchFace(p: Product): TagFace {
 
 // ── Gold-Jewelry: Karat & Color kurz (18K Yellow → 18K YG, 18K Mix → 18K MIX, Silver → SILVER, Platinum → PLATINUM) ──
 function karatShortJewelry(karat: unknown): string {
-  const s = String(karat ?? '').trim();
-  if (!s) return '';
-  const m = s.match(/(\d+)\s*K\s+(\w+)/i);
-  if (m) {
-    const color = m[2].toLowerCase();
-    if (color === 'mix') return `${m[1]}K MIX`;
-    return `${m[1]}K ${color[0].toUpperCase()}G`; // Yellow→YG, Rose→RG, White→WG
-  }
-  return s.toUpperCase(); // Silver
+  return karatShort(karat); // PURCHASE ADD VARIANT — dieselbe Regel wie Modellkarte und Suche
 }
 
 // ── Gold-Diamond Jewellery (2026-06-04, abgenommen) — Scan-Tag mit Barcode ──

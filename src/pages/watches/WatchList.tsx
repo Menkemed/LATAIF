@@ -28,7 +28,8 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { ModelCard } from '@/components/products/models/ModelCard';
 import { GroupItemsModal } from '@/components/products/models/GroupItemsModal';
 import { modelMembers, summarizeModel } from '@/core/products/product-models-view';
-import { modelCompatibilityReason, modelDisplayName } from '@/core/products/product-models';
+import { modelCompatibilityReason, modelDisplayName, type VariantIntent } from '@/core/products/product-models';
+import { variantSeed, sameKarat, karatSearchTerms } from '@/core/products/variant-seed';
 import { candidateOfProduct } from '@/core/products/product-models-view';
 import { createVariantOnPrimary, loadVariantGallery } from '@/core/products/product-models-primary';
 import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
@@ -38,7 +39,7 @@ import { useSharedWrites } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
-import { matchesDeep } from '@/core/utils/deep-search';
+import { matchesDeepAllWords } from '@/core/utils/deep-search';
 import { cardAttributeText } from '@/core/utils/product-format';
 import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
@@ -197,7 +198,9 @@ export function WatchList() {
   const [collectionView, setCollectionView] = useListState<'grouped' | 'single'>('collectionView', 'grouped');
   const [groupItemsOpen, setGroupItemsOpen] = useState(false);
   // ARTIKELVARIANTEN — „Add variant": dieselbe New-Item-Maske, vorbefüllt aus dem Modell; danach Zuordnung (+ Modellbild).
-  const [variantCtx, setVariantCtx] = useState<null | { modelKey: string; modelName: string; templateId: string; reusePhoto: boolean }>(null);
+  // PURCHASE ADD VARIANT — modelKey fehlt, wenn der Ausgangsartikel noch zu keinem Modell gehört (beim Speichern entsteht es).
+  // reusePhoto: 'auto' = übernehmen, solange Karat & Color gleich bleiben; 'yes'/'no' = ausdrücklich gewählt.
+  const [variantCtx, setVariantCtx] = useState<null | { modelKey: string | null; modelName: string; templateId: string; reusePhoto: 'auto' | 'yes' | 'no'; karatConfirmed: boolean }>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
@@ -296,7 +299,7 @@ export function WatchList() {
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
       // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind beim „Add variant" erwartet ähnlich: keine Warnung (wie beim Speichern).
-      const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || productModels[m.product.id] !== variantCtx.modelKey);
+      const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey)));
       if (possible.length > 0) setDuplicateMatches(possible);
     }, 800);
     return () => clearTimeout(t);
@@ -314,7 +317,9 @@ export function WatchList() {
       r = r.filter(p => p.sourceType === 'CONSIGNMENT');
     }
     if (searchQuery) {
-      r = r.filter(p => matchesDeep(p, searchQuery, [categories.find(c => c.id === p.categoryId)]));
+      // PURCHASE ADD VARIANT — Karat & Color auch als Kurzform (18K WG, WG) suchbar, nur zur Laufzeit, nie gespeichert.
+      // …und kombiniert: „Cartier Love WG" — jedes Wort für sich (matchesDeepAllWords).
+      r = r.filter(p => matchesDeepAllWords(p, searchQuery, [categories.find(c => c.id === p.categoryId), ...karatSearchTerms(p)]));
     }
     if (filterCategory) r = r.filter(p => p.categoryId === filterCategory);
     // Plan §Production-History (2026-05-18): Consumed-Items haben Sonderbehandlung.
@@ -387,25 +392,29 @@ export function WatchList() {
   // Zustand, Lieferumfang, Warenart, Karat …). Individuell bleiben Größe, Gewicht, Seriennummer, Steine, Preise, SKU — und
   // die Steuerart wird NICHT vorbelegt (keine automatische Margin-Wahl): der Mensch wählt sie. Angelegt wird über DENSELBEN
   // Weg wie „New Item"; danach nur die Zuordnung zum Modell und auf Wunsch der Verweis auf das Modellbild.
-  function openVariant(template: Product, modelKey: string) {
+  function openVariant(template: Product, modelKey: string | null) {
     const cat = categories.find((c) => c.id === template.categoryId) || null;
-    const shared = { ...copiedAttributes(template) } as Record<string, unknown>;
-    for (const k of ['size', 'weight', 'serial_number', 'diamond_weight', 'stones']) delete shared[k];
     setSelectedCat(cat);
-    setForm({
-      categoryId: template.categoryId, brand: template.brand, name: template.name,
-      condition: template.condition || cat?.conditionOptions?.[0] || '', taxScheme: undefined,
-      scopeOfDelivery: [...(template.scopeOfDelivery || [])], purchaseCurrency: 'BHD',
-      attributes: shared as Product['attributes'],
-    });
+    // PURCHASE ADD VARIANT — EINE Vorbelegungsregel für Collections und Einkauf (variant-seed).
+    setForm(variantSeed(template, cat?.conditionOptions?.[0] || ''));
     setCreateWarning(null);
     setRetryProductId(null);
     setRetrySku('');
     setErrors({});
     w.clear();
-    const members = modelMembers(products, productModels, modelKey);
-    setVariantCtx({ modelKey, modelName: modelDisplayName(members.map((m) => m.name)), templateId: template.id, reusePhoto: true });
+    const members = modelKey ? modelMembers(products, productModels, modelKey) : [template];
+    setVariantCtx({ modelKey, modelName: modelDisplayName(members.map((m) => m.name)) || productDisplayName(template), templateId: template.id, reusePhoto: 'auto', karatConfirmed: false });
     setShowNew(true);
+  }
+
+  // PURCHASE ADD VARIANT — Bild übernehmen: von selbst nur bei gleichem Karat & Color; sonst nur ausdrücklich (mit Warnung).
+  const variantTemplate = variantCtx ? products.find((x) => x.id === variantCtx.templateId) : undefined;
+  const variantKaratDiffers = !!variantCtx && !sameKarat(variantTemplate, form as Product);
+  function reuseVariantPhoto(): boolean {
+    if (!variantCtx) return false;
+    // Foto im alten Format (products.images): kein Medium, auf das verwiesen werden kann.
+    if (Array.isArray(variantTemplate?.images) && variantTemplate!.images.length > 0) return false;
+    return variantCtx.reusePhoto === 'yes' || (variantCtx.reusePhoto === 'auto' && !variantKaratDiffers);
   }
 
   // Einstieg über die Artikelseite: /collection?variantOf=<Artikel des Modells>
@@ -415,7 +424,8 @@ export function WatchList() {
     const template = products.find((p) => p.id === id);
     const key = template ? productModels[template.id] : undefined;
     setSearchParams({}, { replace: true });
-    if (template && key) openVariant(template, key);
+    // PURCHASE ADD VARIANT — auch ohne Modell; nur Eigenware.
+    if (template && String(template.sourceType || 'OWN').toUpperCase() === 'OWN') openVariant(template, key ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, products, categories, productModels]);
 
@@ -450,6 +460,10 @@ export function WatchList() {
     }
     // ARTIKELVARIANTEN — keine automatische Steuerart: bei „Add variant" wählt der Mensch sie selbst.
     if (variantCtx && !form.taxScheme) errs.taxScheme = 'Choose the tax scheme for this item.';
+    // PURCHASE ADD VARIANT — Karat & Color kommt als Vorschlag vom Ausgangsartikel: der Mensch bestätigt es ausdrücklich.
+    if (variantCtx && selectedCat?.attributes.some((a) => a.key === 'karat') && !variantCtx.karatConfirmed) {
+      errs.attr_karat = 'Check Karat & Color for this piece and confirm it.';
+    }
     // ARTIKELVARIANTEN — dieselbe Regel wie am Primary, schon vor dem Speichern: passt das neue Stück in das Modell?
     if (variantCtx) {
       const tpl = products.find((x) => x.id === variantCtx.templateId);
@@ -478,7 +492,7 @@ export function WatchList() {
     // Score-basierte Duplicate Detection (nicht-blockierend): wenn ähnliche
     // Items im Bestand existieren, Modal zeigen — User kann trotzdem anlegen.
     // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind erwartet ähnlich (nur ein Hinweis, keine Warnung); eine doppelte SKU bleibt gesperrt.
-    const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || productModels[m.product.id] !== variantCtx.modelKey);
+    const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey)));
     if (possible.length > 0) {
       lastCheckedFp.current = fp;          // the live detector must not ask the same question again
       setDuplicateMatches(possible);
@@ -531,16 +545,23 @@ export function WatchList() {
       // den Bestand geprüft, sonst die Nummer HIER beansprucht — nie aus der Vorschau. Ein Retry
       // nutzt die schon beanspruchte weiter: eine Anlage verbraucht genau eine Nummer.
       // ARTIKELVARIANTEN — auf Wunsch das bestehende Modellbild (nur ohne eigenes Foto). Gelesen VOR dem Auftrag.
-      let variantIntent: { modelKey: string; pickMediaId: string | null } | null = null;
+      let variantIntent: VariantIntent | null = null;
       if (variantCtx) {
         const own = (form.images || []).length > 0;
-        const g = variantCtx.reusePhoto && !own ? await loadVariantGallery(variantCtx.templateId) : null;
+        const reuse = reuseVariantPhoto() && !own;
+        const g = reuse ? await loadVariantGallery(variantCtx.templateId) : null;
         // Gewünscht, aber nicht lesbar (Primary nicht erreichbar): nichts anlegen statt still ohne Modellbild.
-        if (variantCtx.reusePhoto && !own && !g) {
+        if (reuse && !g) {
           setCreateWarning('The model photo could not be read from the main computer. Nothing was created — please try again.');
           return;
         }
-        variantIntent = { modelKey: variantCtx.modelKey, pickMediaId: g?.mediaIds[0] ?? null };
+        // PURCHASE ADD VARIANT — gewünscht, aber kein Medium (altes Format oder kein Foto): nicht still ohne Bild anlegen.
+        if (reuse && g && !g.mediaIds[0]) {
+          setCreateWarning('The original has no photo that can be referenced (old format or none). Untick the model photo or add a photo. Nothing was created.');
+          return;
+        }
+        const pick = g?.mediaIds[0] ?? null;
+        variantIntent = variantCtx.modelKey ? { modelKey: variantCtx.modelKey, pickMediaId: pick } : { anchorProductId: variantCtx.templateId, pickMediaId: pick };
       }
       const r = await w.save('products.create', {
         local: async () => {
@@ -921,6 +942,14 @@ export function WatchList() {
             <div data-variant-hint style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(113,93,227,0.09)', border: '1px solid rgba(113,93,227,0.35)', color: '#0F0F10', fontSize: 12, lineHeight: 1.5 }}>
               New variant of <b>{variantCtx.modelName}</b>. Shared details are prefilled from the model — enter this piece’s own size, weight and prices,
               and choose the tax scheme. It is created exactly like “New Item” and then added to the model; no existing item is copied.
+              {!variantCtx.modelKey && <> The original is not part of a model yet — saving creates the model with both items.</>}
+              {selectedCat?.attributes.some((a) => a.key === 'karat') && (
+                <label data-variant-karat-confirm style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 8, color: errors.attr_karat ? '#DC2626' : '#0F0F10' }}>
+                  <input type="checkbox" checked={variantCtx.karatConfirmed}
+                    onChange={(e) => { const on = e.target.checked; setVariantCtx((v) => (v ? { ...v, karatConfirmed: on } : v)); }} />
+                  <span>Karat &amp; Color of this piece checked: <b>{String(((form.attributes ?? {}) as Record<string, unknown>).karat ?? '—')}</b> (prefilled from the original — change it below if this piece differs).</span>
+                </label>
+              )}
             </div>
           )}
           {/* Required-fields hint */}
@@ -1226,11 +1255,17 @@ export function WatchList() {
             </div>
             {variantCtx && (
               <label data-variant-reuse-photo style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 10, fontSize: 12, color: '#0F0F10' }}>
-                <input type="checkbox" checked={variantCtx.reusePhoto && (form.images || []).length === 0} disabled={(form.images || []).length > 0}
-                  onChange={() => setVariantCtx((v) => (v ? { ...v, reusePhoto: !v.reusePhoto } : v))} />
+                <input type="checkbox" checked={reuseVariantPhoto() && (form.images || []).length === 0} disabled={(form.images || []).length > 0}
+                  onChange={(e) => { const on = e.target.checked; setVariantCtx((v) => (v ? { ...v, reusePhoto: on ? 'yes' : 'no' } : v)); }} />
                 <span>Use the existing model photo (no upload, no new file — the new item only references it).
                   {(form.images || []).length > 0 ? ' Not used: this piece has its own photo.' : ''}</span>
               </label>
+            )}
+            {variantCtx && variantKaratDiffers && (form.images || []).length === 0 && (
+              <div data-variant-photo-karat-warning style={{ marginTop: 6, fontSize: 12, color: '#B45309' }}>
+                Karat &amp; Color differs from the original ({String(((variantTemplate?.attributes ?? {}) as Record<string, unknown>).karat ?? '—')}).
+                {reuseVariantPhoto() ? ' The photo may show a different gold colour — use it only if it really fits.' : ' Its photo is not taken over unless you tick the box.'}
+              </div>
             )}
           </div>
 

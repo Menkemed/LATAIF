@@ -742,7 +742,9 @@ const emitBruch = (name: string) => () => {
   ok(/runOnPrimary\(/.test(oh) && /runOnPrimary\(/.test(ph), 'DOMAIN am Primary in EINER Klammer');
   const oce = codeOf(src('src/core/orders/order-create.ts'));
   const pce = codeOf(src('src/core/purchases/purchase-create.ts'));
-  ok(/EMBEDDED_PRODUCT_FIELDS/.test(oce) && /EMBEDDED_PRODUCT_FIELDS/.test(pce) && /checkEmbeddedProduct\(/.test(oce) && /checkEmbeddedProduct\(/.test(pce),
+  // PURCHASE ADD VARIANT — der Einkauf nutzt dieselbe Liste plus den Verkaufspreis (PURCHASE_PRODUCT_FIELDS, aus ihr abgeleitet).
+  ok(/EMBEDDED_PRODUCT_FIELDS/.test(oce) && /PURCHASE_PRODUCT_FIELDS/.test(pce) && /checkEmbeddedProduct\(/.test(oce) && /checkEmbeddedProduct\(/.test(pce)
+    && /PURCHASE_PRODUCT_FIELDS = \[\.\.\.EMBEDDED_PRODUCT_FIELDS, 'plannedSalePrice'\]/.test(src('src/core/products/embedded-product.ts')),
     'DOMAIN neue Artikel in Auftrag und Einkauf: EINE Feldliste, EINE Pruefung');
   ok(/ORDER_CREATE_STATUSES/.test(oc), 'DOMAIN die Statusauswahl der Maske ist die Liste des Hauses');
 }

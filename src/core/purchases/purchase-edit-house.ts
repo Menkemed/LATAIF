@@ -44,6 +44,7 @@ import { isClientMode } from '@/core/bridge/client-mode';
 import { trackChange } from '@/core/sync/sync-service';
 import { PURCHASE_HAS_OFFSET, PURCHASE_OFFSET_METHOD, purchaseHasActiveOffsets, purchaseHasOffsetMessage } from './purchase-settled';
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import type { VariantIntent } from '@/core/products/product-models';
 import { purgeProductLeftovers, type LeftoverDb } from '@/core/products/product-leftovers';
 import { herkunftUnklar, statusOhneBestand } from './purchase-undo';
 import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
@@ -110,7 +111,7 @@ const dayOf = (iso: string): string => String(iso).slice(0, 10);
 const quarterLabel = (key: string): string => { const [y, q] = key.split('-'); return `${q}/${y}`; };
 const fmt = (n: number): string => R3(n).toFixed(3);
 
-export interface HouseCtx { branchId: string; userId: string; now: string }
+export interface HouseCtx { branchId: string; userId: string; now: string; /** PURCHASE ADD VARIANT — für die Modellregel (products.edit). */ role?: string | null }
 
 // ── Was die Maske meint ─────────────────────────────────────────────────────
 
@@ -148,13 +149,15 @@ export interface PurchaseEditAddLine {
   quantity: number;
   /** Brutto je Stück, wie beim Anlegen. */
   unitPrice: number;
+  /** PURCHASE ADD VARIANT — „Variant of existing": nur bei mode 'new'; Zuordnung in derselben Transaktion. */
+  variant?: VariantIntent;
 }
 
 /** So viele Positionen trägt eine Bearbeitung höchstens nach. */
 export const MAX_ADD_LINES = 50;
 
 /** Eine geplante Position: geprüft wie bei „Save Purchase", noch nichts geschrieben, noch keine SKU vergeben. */
-export interface PlannedAddLine { line: Record<string, unknown>; lineTotal: number }
+export interface PlannedAddLine { line: Record<string, unknown>; lineTotal: number; variant?: VariantIntent }
 
 /**
  * Teil 2 — was die Hausfolge von der Zeilenfolge des Einkaufs braucht (`purchase-lines.ts`): diese Datei importiert
@@ -163,7 +166,7 @@ export interface PlannedAddLine { line: Record<string, unknown>; lineTotal: numb
  */
 export interface PurchaseLineOps {
   /** Nur lesend: prüfen und planen. Ein Nein ist ein `PurchaseEditRejected`. */
-  planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT_10', branchId: string): PlannedAddLine[];
+  planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT_10', branchId: string, ctx?: HouseCtx): PlannedAddLine[];
   /** Schreibend, in der Klammer des Aufrufers: SKU vergeben, Artikel anlegen, Zeilen, Lose, Menge, Lagerstatus. */
   append(purchaseId: string, purchaseDate: string, planned: readonly PlannedAddLine[], ctx: HouseCtx): Array<{ id: string; productId: string; createdProduct: boolean }>;
 }
@@ -871,7 +874,7 @@ export function editPurchaseInHouse(
   if (adds.length > 0) {
     wirf(check.addLines);
     if (!ops) throw nein('PURCHASE_EDIT_ADD_UNAVAILABLE', 'adding lines needs the purchase line flow of the main computer');
-    planned = ops.planAdd(adds, check.addTaxScheme, ctx.branchId);
+    planned = ops.planAdd(adds, check.addTaxScheme, ctx.branchId, ctx);
     if (planned.length !== adds.length) throw nein('PURCHASE_EDIT_ADD_INVALID', 'a new line could not be planned');
   }
 

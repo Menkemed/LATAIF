@@ -22,6 +22,18 @@ interface SearchSelectProps {
   /** Optional: rendert ein Preview-Panel (z.B. ProductHoverCard) neben dem
    *  Dropdown wenn der User mit der Maus ueber eine Option faehrt. */
   renderPreview?: (id: string) => React.ReactNode;
+  /** PURCHASE ADD VARIANT — jedes Wort der Suche muss vorkommen, in beliebiger Reihenfolge („Cartier Love WG"). Ohne: wie bisher. */
+  matchAllWords?: boolean;
+}
+
+/** Ganze Eingabe als ein Stück (bisher) oder — mit `allWords` — jedes Wort für sich. */
+function textMatches(hay: string, query: string, allWords?: boolean): boolean {
+  const h = hay.toLowerCase();
+  const q = query.toLowerCase();
+  if (h.includes(q)) return true;
+  if (!allWords) return false;
+  const words = q.split(/\s+/).filter(Boolean);
+  return words.length > 1 && words.every((w) => h.includes(w));
 }
 
 // Dropdown-Position aus Trigger-Rect berechnen — nutzt position:fixed,
@@ -57,7 +69,7 @@ function useDropdownPosition(triggerRef: React.RefObject<HTMLDivElement | null>,
   return pos;
 }
 
-export function SearchSelect({ label, placeholder = 'Search...', options, value, onChange, disabled, renderPreview }: SearchSelectProps) {
+export function SearchSelect({ label, placeholder = 'Search...', options, value, onChange, disabled, renderPreview, matchAllWords }: SearchSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [hoveredId, setHoveredId] = useState<string | null>(null);
@@ -70,7 +82,7 @@ export function SearchSelect({ label, placeholder = 'Search...', options, value,
   const selected = options.find(o => o.id === value);
 
   const filtered = query
-    ? options.filter(o => `${o.label} ${o.subtitle || ''} ${o.meta || ''} ${o.searchText || ''}`.toLowerCase().includes(query.toLowerCase())).slice(0, 50)
+    ? options.filter(o => textMatches(`${o.label} ${o.subtitle || ''} ${o.meta || ''} ${o.searchText || ''}`, query, matchAllWords)).slice(0, 50)
     : options.slice(0, 50);
 
   useEffect(() => {

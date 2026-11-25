@@ -1,4 +1,5 @@
 // Plan §Purchases + §Purchase Returns — Detail page
+import { PurchaseLineDetail } from '@/components/purchases/PurchaseLineDetail';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowLeftRight, CreditCard, XCircle, RotateCcw, Printer, Edit3 } from 'lucide-react';
@@ -424,6 +425,8 @@ export function PurchaseDetail() {
                 <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 0.6fr 1fr 1fr', gap: 12, padding: '10px 0', borderBottom: '1px solid rgba(229,225,214,0.5)', alignItems: 'start' }}>
                   <div style={{ minWidth: 0 }}>
                     <span style={{ fontSize: 13, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
+                    {/* PURCHASE ADD VARIANT — die kompakte Merkmalzeile wie in New/Edit Purchase (Karat & Color, Größe, Gewicht …). */}
+                    <PurchaseLineDetail product={lineProduct} categories={categories} dataKey={l.id} />
                     {/* Specs-Grid (Brand/Model/SKU/Color/Karat/Size/...) — dass der User
                         sofort sieht WAS gekauft wurde, nicht nur den Namen. */}
                     {lineSpecs.length > 0 && (

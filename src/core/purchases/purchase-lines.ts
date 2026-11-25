@@ -12,7 +12,18 @@ import { appendPurchaseLinesInHouse, type PurchaseInputLine } from '@/stores/pur
 import { isBrandRequired } from '@/core/products/field-contract';
 import { EmbeddedProductRejected } from '@/core/products/embedded-product';
 import { PurchaseActionRejected, planPurchaseLines, type PurchaseCreatePort, type PurchaseDraftLine } from './purchase-create';
-import { PurchaseEditRejected, type PlannedAddLine, type PurchaseEditAddLine, type PurchaseLineOps } from './purchase-edit-house';
+import { PurchaseEditRejected, type HouseCtx, type PlannedAddLine, type PurchaseEditAddLine, type PurchaseLineOps } from './purchase-edit-house';
+import { attachNewVariantInHouse, checkVariantFits, ProductModelRejected, type ProductModelCtx } from '@/core/products/product-models';
+
+/** PURCHASE ADD VARIANT — die Modellregel spricht als Nein der Bearbeitung (eingefroren, mit IHREM Code). */
+function alsBearbeitungsNein<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof ProductModelRejected) throw new PurchaseEditRejected(e.code, e.message);
+    throw e;
+  }
+}
+const modelCtxOf = (ctx: HouseCtx | undefined, branchId: string): ProductModelCtx =>
+  ({ branchId, userId: ctx?.userId ?? '', role: ctx?.role ?? null, now: ctx?.now ?? new Date().toISOString() });
 
 /** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
 export function housePurchasePort(branchId: string): PurchaseCreatePort {
@@ -73,7 +84,7 @@ const text = (v: unknown): string => (typeof v === 'string' ? v : '');
  * Artikel-Spec mit freier SKU), dann dieselbe Planung (`planPurchaseLines`). Ohne Partner, Auftrag oder Edelmetall —
  * das gibt es nur beim Anlegen.
  */
-function planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT_10', branchId: string): PlannedAddLine[] {
+function planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT_10', branchId: string, ctx?: HouseCtx): PlannedAddLine[] {
   const drafts: PurchaseDraftLine[] = lines.map((l, i) => {
     const n = `New line ${i + 1}`;
     if (l.mode !== 'existing' && l.mode !== 'new') throw new PurchaseEditRejected('PURCHASE_EDIT_ADD_INVALID', `${n}: an existing or a new item`);
@@ -94,6 +105,15 @@ function planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT
         throw new PurchaseEditRejected('LINE_INVALID', `${n}: brand and model are required for this category`);
       }
     }
+    // PURCHASE ADD VARIANT — wie beim Anlegen: nur ein neuer Artikel, Steuerart gewählt, passt zum Modell — VOR jedem Schreiben.
+    if (l.variant) {
+      if (l.mode !== 'new' || !l.newProduct) throw new PurchaseEditRejected('PURCHASE_VARIANT_NEW_ITEM_ONLY', `${n}: a variant is always a new item`);
+      if (!l.newProduct.taxScheme) throw new PurchaseEditRejected('PURCHASE_VARIANT_TAX_SCHEME_REQUIRED', `${n}: choose the tax scheme for this variant`);
+      const np = l.newProduct;
+      alsBearbeitungsNein(() => checkVariantFits(l.variant!, {
+        categoryId: text(np.categoryId), brand: text(np.brand), attributes: (np.attributes ?? {}) as Record<string, unknown>,
+      }, modelCtxOf(ctx, branchId)));
+    }
     const np = l.newProduct ?? {};
     return {
       mode: l.mode, productId: l.productId, newProduct: l.mode === 'new' ? l.newProduct : undefined,
@@ -109,14 +129,25 @@ function planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT
     throw e;
   }
   // Die Zeilensumme wie beim Anlegen (Menge × Bruttostückpreis).
-  return planned.map((line) => ({ line, lineTotal: (Number(line.quantity) || 1) * (Number(line.unitPrice) || 0) }));
+  return planned.map((line, i) => ({
+    line, lineTotal: (Number(line.quantity) || 1) * (Number(line.unitPrice) || 0),
+    ...(lines[i]?.variant ? { variant: lines[i].variant } : {}),
+  }));
 }
 
 /** PURCHASE-EDIT Teil 2 — anhängen: SKU aus dem zentralen Zähler, dann die Zeilenfolge von „Save Purchase". */
-function append(purchaseId: string, purchaseDate: string, planned: readonly PlannedAddLine[], ctx: { branchId: string; userId: string; now: string }) {
+function append(purchaseId: string, purchaseDate: string, planned: readonly PlannedAddLine[], ctx: HouseCtx) {
   const { lines } = withAllocatedSkus({ lines: planned.map((p) => p.line) }) as { lines: PurchaseInputLine[] };
-  return appendPurchaseLinesInHouse(purchaseId, purchaseDate, lines, ctx)
+  const rows = appendPurchaseLinesInHouse(purchaseId, purchaseDate, lines, ctx)
     .map((r) => ({ id: r.id, productId: r.productId, createdProduct: r.createdProduct }));
+  // PURCHASE ADD VARIANT — die neuen Artikel der Varianten-Zeilen dem Modell zuordnen, in DERSELBEN Klammer der Bearbeitung.
+  planned.forEach((p, i) => {
+    if (!p.variant) return;
+    const productId = rows[i]?.productId;
+    if (!productId) throw new PurchaseEditRejected('PURCHASE_VARIANT_LINE_MISSING', 'the new item was not created — nothing was saved');
+    alsBearbeitungsNein(() => attachNewVariantInHouse(productId, p.variant!, modelCtxOf(ctx as HouseCtx, ctx.branchId)));
+  });
+  return rows;
 }
 
 /** Was `editPurchaseInHouse` für Teil 2 hereingereicht bekommt — am Primary und im Fernbefehl dieselbe Folge. */

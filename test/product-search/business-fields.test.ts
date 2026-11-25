@@ -397,7 +397,8 @@ const finds = (p: Any, q: string): boolean => matchesDeep(p, q, [category]);
     const src = readFileSync(new URL('../../' + file, import.meta.url), 'utf8');
     ok(/import \{[^}]*matchesDeep[^}]*\} from '@\/core\/utils\/deep-search'/.test(src),
       `WIRING ${name} imports the shared deep search`);
-    ok(/matchesDeep\(/.test(src), `WIRING ${name} filters through it`);
+    // PURCHASE ADD VARIANT — die Collection sucht kombiniert („Cartier Love WG") über matchesDeepAllWords, das matchesDeep je Wort ruft.
+    ok(/matchesDeep(AllWords)?\(/.test(src), `WIRING ${name} filters through it`);
     ok(!/imageDescription|imageEmbedding|imageHash|aiIdentifiedSnapshot/.test(src),
       `WIRING ${name} does not reach into product machine fields on its own`);
     ok(!/productBusinessSearchText|PRODUCT_SEARCH_FIELDS/.test(src),

@@ -9,9 +9,10 @@
 // Verbindlichkeit, Buchung bleiben dort. Der Anschluss ans Haus steht in `purchase-house`.
 // ════════════════════════════════════════════════════════════════════════════
 import type { Product } from '@/core/models/types';
+import type { VariantIntent } from '@/core/products/product-models';
 import { F, PartnerItemRejected, planLineParticipation, type PartnerShareInput } from '@/core/partners/item-participation';
 import {
-  EMBEDDED_PRODUCT_FIELDS, checkEmbeddedProduct, pickProductSpec, stageSpecImages, type EmbeddedProductPort,
+  PURCHASE_PRODUCT_FIELDS, checkEmbeddedProduct, pickProductSpec, stageSpecImages, type EmbeddedProductPort,
 } from '@/core/products/embedded-product';
 import { isBrandRequired } from '@/core/products/field-contract';
 import { businessDateIssue } from '@/core/utils/business-date';
@@ -48,6 +49,13 @@ export interface PurchaseDraftLine {
   sourceOrderLineId?: string;
   /** PARTNER-ITEMS — gemeinsam gekauft: Partner und Anteile; LATAIF hält den Rest. Leer = allein. */
   partnerShares?: PartnerShareInput[];
+  /**
+   * PURCHASE ADD VARIANT (Owner 25.11.2026) — „Variant of existing": nur an einer Zeile mit NEUEM Artikel. Der Artikel
+   * entsteht wie bei „New Item" (Los, Kosten, Vorsteuer, Verbindlichkeit, Buchung unverändert); danach tritt er in
+   * DERSELBEN Transaktion dem Modell des Ausgangsartikels bei (oder bildet mit ihm ein neues) und verweist auf Wunsch
+   * auf ein bestehendes Bild. Keine eigene Buchung.
+   */
+  variant?: VariantIntent;
 }
 
 /** MOBILE-PURCHASE — eine von mehreren Zahlungen, die zusammen mit dem Einkauf erfasst werden. */
@@ -125,6 +133,17 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
     } catch (e) {
       if (e instanceof BulkRejected) return { code: e.code, message: `Line ${i + 1}: ${e.message}` };
       throw e;
+    }
+  }
+  // PURCHASE ADD VARIANT — nur an einer Zeile mit neuem Artikel, und die Steuerart des Artikels wählt der Mensch selbst.
+  for (let i = 0; i < input.lines.length; i++) {
+    const l = input.lines[i];
+    if (!l.variant) continue;
+    if (l.mode !== 'new' || !l.newProduct || l.productId) {
+      return { code: 'PURCHASE_VARIANT_NEW_ITEM_ONLY', message: `Line ${i + 1}: a variant is always a new item` };
+    }
+    if (!l.newProduct.taxScheme) {
+      return { code: 'PURCHASE_VARIANT_TAX_SCHEME_REQUIRED', message: `Line ${i + 1}: choose the tax scheme for this variant` };
     }
   }
   // DISPLAY-NAME — Marke und Modell sind nur dort Pflicht, wo die Kategorie sie verlangt; bei
@@ -272,7 +291,7 @@ export function planPurchaseLines(
         taxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId, partnerShares,
       };
     }
-    const picked = pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS);
+    const picked = pickProductSpec(l.newProduct, PURCHASE_PRODUCT_FIELDS);
     const newProduct = picked ? checkEmbeddedProduct(picked, port) : undefined;
     if (!newProduct && l.categoryId && !port.categoryExists(l.categoryId)) {
       throw new PurchaseActionRejected('CATEGORY_NOT_FOUND', 'no such category');
@@ -305,8 +324,9 @@ export async function purchaseCreateBody(
     };
     if (l.productId) line.productId = l.productId;
     if (l.mode === 'bulk' && l.bulk) line.bulk = { ...l.bulk };
-    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
+    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, PURCHASE_PRODUCT_FIELDS), stage);
     if (l.sourceOrderLineId) line.sourceOrderLineId = l.sourceOrderLineId;
+    if (l.variant) line.variant = { ...l.variant };
     if (l.partnerShares && l.partnerShares.length > 0) {
       line.partnerShares = l.partnerShares.map((s) => ({ partnerId: s.partnerId, sharePct: s.sharePct }));
     }

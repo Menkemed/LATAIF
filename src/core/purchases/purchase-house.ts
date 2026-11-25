@@ -6,7 +6,7 @@
 // der Wareneingangs-Inbox als erledigt. Jetzt ist das EINE Folge — am Primary exklusiv in EINER
 // Transaktion, fern in der Transaktion des Auftrags.
 // ════════════════════════════════════════════════════════════════════════════
-import { query, currentBranchId } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { getDatabase } from '@/core/db/database';
 import { trackProductRow } from '@/core/lots/lot-queries';
 // PURCHASE-EDIT Teil 2 — der Port wohnt jetzt bei der Zeilenfolge (`purchase-lines.ts`); der Name bleibt hier erreichbar.
@@ -36,7 +36,7 @@ import {
   type PurchasePaymentVoided,
 } from './purchase-edit-house';
 import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput } from './purchase-create';
-import { EMBEDDED_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
+import { PURCHASE_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
 import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -45,6 +45,7 @@ import {
   type PurchaseReturnCancelRequest, type PurchaseReturnCancelled, type PurchaseReturnCancelKind,
 } from './purchase-lifecycle-house';
 import { localPermissionDenied } from '@/core/data/local-permission';
+import { attachNewVariantInHouse, checkVariantFits, ProductModelRejected, type ProductModelCtx } from '@/core/products/product-models';
 
 function frischLesen(): void {
   usePurchaseStore.getState().loadPurchases();
@@ -114,23 +115,52 @@ function skuForOrderStockArrivals(payload: Record<string, unknown>): void {
 }
 
 /** „Save Purchase": der Einkauf — und, wenn er aus einem Inbox-Foto kam, das Foto „erledigt". */
-export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string, userId = ''): Purchase {
-  return createPurchaseDetailedInHouse(input, branchId, userId).purchase;
+export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string, userId = '', role?: string | null): Purchase {
+  return createPurchaseDetailedInHouse(input, branchId, userId, role).purchase;
+}
+
+/** PURCHASE ADD VARIANT — ein Nein der Modellregel ist ein Nein des Einkaufs (eingefroren, mit SEINEM Code). */
+function alsEinkaufsModellNein<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof ProductModelRejected) throw new PurchaseActionRejected(e.code, e.message);
+    throw e;
+  }
 }
 
 /** Wie `createPurchaseInHouse`, dazu der aufgelöste Lieferant und ein neu angelegter Kunde. */
-export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branchId: string, userId = '')
+export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branchId: string, userId = '', role?: string | null)
   : { purchase: Purchase; supplierId: string; customerId?: string } {
   // Erst die Eingaben prüfen (mit einem Platzhalter-Lieferanten, falls er erst entsteht), dann den
   // Lieferanten auflösen — so legt eine ungültige Zeile keinen Kunden oder Lieferanten an.
   const issue = purchaseCreateIssue(input);
   if (issue) throw new PurchaseActionRejected(issue.code, issue.message);
+  // PURCHASE ADD VARIANT — VOR dem ersten Schreiben: passt jede Variante zu ihrem Ausgangsartikel bzw. Modell?
+  const modelCtx: ProductModelCtx = { branchId, userId, role: role ?? null, now: new Date().toISOString() };
+  for (const l of input.lines) {
+    if (!l.variant || !l.newProduct) continue;
+    alsEinkaufsModellNein(() => checkVariantFits(l.variant!, {
+      categoryId: String(l.newProduct!.categoryId ?? l.categoryId ?? ''), brand: l.newProduct!.brand ?? l.brand,
+      attributes: (l.newProduct!.attributes ?? {}) as Record<string, unknown>,
+    }, modelCtx));
+  }
   const supplier = resolveSupplier(input);
   const resolved: PurchaseCreateInput = { ...input, supplierId: supplier.supplierId, supplierFromCustomer: undefined, newSupplierPerson: undefined };
   const payload = withAllocatedSkus(planPurchaseCreate(resolved, housePurchasePort(branchId)));
   const store = usePurchaseStore.getState();
   const purchase0 = store.createPurchase(payload as never);
   skuForOrderStockArrivals(payload);
+  // PURCHASE ADD VARIANT — die neuen Artikel der Varianten-Zeilen dem Modell zuordnen (und auf Wunsch auf das bestehende
+  // Bild verweisen), in DIESER Transaktion. Reihenfolge der Zeilen: bildet die erste Zeile mit dem Ausgangsartikel ein
+  // neues Modell, treten weitere Varianten desselben Ausgangsartikels diesem bei. Ein Nein rollt den ganzen Einkauf zurück.
+  if (input.lines.some((l) => l.variant)) {
+    const zeilen = [...(purchase0.lines ?? [])].sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0));
+    input.lines.forEach((l, i) => {
+      if (!l.variant) return;
+      const productId = zeilen[i]?.productId;
+      if (!productId) throw new PurchaseActionRejected('PURCHASE_VARIANT_LINE_MISSING', `Line ${i + 1}: the new item was not created — nothing was saved`);
+      alsEinkaufsModellNein(() => attachNewVariantInHouse(productId, l.variant!, modelCtx));
+    });
+  }
   // MOBILE-PURCHASE — mehrere Zahlungen: jede über denselben Weg wie „Record Payment" (eigene Zeile,
   // eigene Buchung, Status neu gerechnet), mit dem Datum des Einkaufs. Keine Sammelbuchung.
   // v0.8.91 — der Desktop nennt je Zahlung einen eigenen Tag (geprüft in purchaseCreateIssue); ohne ihn wie bisher.
@@ -173,7 +203,12 @@ export async function createPurchaseOnPrimary(input: PurchaseCreateInput): Promi
   // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
   const lines: PurchaseCreateInput['lines'] = [];
   for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
-  return runOnPrimary(() => createPurchaseInHouse({ ...input, lines }, currentBranchId()), frischLesen);
+  // PURCHASE ADD VARIANT — die Modellregel fragt nach Benutzer und Rolle (Recht `products.edit`), wie beim Gruppieren.
+  let userId = '';
+  let role: string | null = null;
+  try { userId = currentUserId(); } catch { userId = ''; }
+  try { role = useAuthStore.getState().role() ?? null; } catch { role = null; }
+  return runOnPrimary(() => createPurchaseInHouse({ ...input, lines }, currentBranchId(), userId, role), frischLesen);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -403,7 +438,8 @@ export async function stagePurchaseEditAddLines(
   for (const l of lines) {
     const line: Record<string, unknown> = { mode: l.mode, quantity: l.quantity, unitPrice: l.unitPrice };
     if (l.productId) line.productId = l.productId;
-    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
+    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, PURCHASE_PRODUCT_FIELDS), stage);
+    if (l.variant) line.variant = { ...l.variant };
     out.push(line);
   }
   return out;
@@ -441,7 +477,10 @@ export async function editPurchaseOnPrimary(purchaseId: string, form: PurchaseEd
     ...(addLines ? { addLines } : {}),
     ...(form.removeLineIds && form.removeLineIds.length > 0 ? { removeLineIds: form.removeLineIds } : {}),
   };
-  return runOnPrimary(() => editPurchaseInHouse(req, localHouseCtx(), expectedRevision, PURCHASE_LINE_OPS), lebenszyklusLesen);
+  // PURCHASE ADD VARIANT — die Rolle für die Modellregel einer nachgetragenen Variante.
+  let editRole: string | null = null;
+  try { editRole = useAuthStore.getState().role() ?? null; } catch { editRole = null; }
+  return runOnPrimary(() => editPurchaseInHouse(req, { ...localHouseCtx(), role: editRole }, expectedRevision, PURCHASE_LINE_OPS), lebenszyklusLesen);
 }
 
 /** „Save" der Maske: EINE Buchung — am Primary die Hausfolge, auf PC2 der geprüfte Befehl (Foto vorher in die Ablage). */
