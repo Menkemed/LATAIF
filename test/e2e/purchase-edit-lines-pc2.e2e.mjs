@@ -494,7 +494,11 @@ try {
   const pN = zeile('products', String(neu?.product_id || ''));
   ok(/^[A-Z]{3}-[A-Z]{3}-\d{3,}$/.test(String(pN.sku || '')) && String(pN.sku) === vorschauSku,
     `C die SKU vergibt der Primary aus seinem Zähler — dieselbe, die die Maske am PC2 angekündigt hat (${pN.sku} / ${vorschauSku})`);
-  ok(/^\["data:image\/jpeg;base64,/.test(String(pN.images || '')) && pN.name === 'Gamma PEL' && pN.stock_status === 'in_stock' && Number(pN.quantity) === 2,
+  // v0.8.111 — PP-12: das Foto steht zuerst in products.images und zieht dann in den Bildspeicher (Spalte danach leer).
+  // Je nach Zeitpunkt ist es also in der Spalte ODER schon im Bildspeicher — beides ist „Foto vorhanden"; fehlen darf es nie.
+  const fotoDa = /^\["data:image\/jpeg;base64,/.test(String(pN.images || ''))
+    || (String(pN.images || '') === '[]' && zahl("SELECT COUNT(*) AS n FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [String(pN.id || '')]) >= 1);
+  ok(fotoDa && pN.name === 'Gamma PEL' && pN.stock_status === 'in_stock' && Number(pN.quantity) === 2,
     `C der neue Artikel in Collections: Name, Foto aus der Ablage, im Lager, 2 Stück (${String(pN.images || '').slice(0, 40)})`);
   ok(ablage() === 0 && ablageVor >= 0, `C die Ablage des Primary ist nach dem Erfolg geräumt (${ablageVor} → ${ablage()})`);
   ok(Number(zeile('purchases', P).total_amount) === 1000 && r3(-saldo('ACCOUNTS_PAYABLE', 'AND counterparty_id = ?', ['pe-sup-a'])) === 1000,

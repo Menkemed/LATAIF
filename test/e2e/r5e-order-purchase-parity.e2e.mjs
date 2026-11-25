@@ -465,8 +465,16 @@ const goldVon = (oid) => {
 const buchungVonZahlung = (oid) => S(dbQ(BIZ_DB, `SELECT account, direction, ROUND(SUM(amount), 3) AS s FROM ledger_entries
   WHERE source_id IN (SELECT id FROM order_payments WHERE order_id = ?) GROUP BY account, direction ORDER BY account, direction`, [oid]));
 const gebuehrVon = (oid) => S(dbQ(BIZ_DB, 'SELECT category, status, ROUND(amount, 3) AS a FROM expenses WHERE related_entity_id = ?', [oid]));
+// v0.8.111 — PP-12: das Foto eines neuen Artikels zieht nach dem Speichern aus products.images in den Bildspeicher. Verglichen
+// wird daher die ANZAHL der Fotos (Spalte oder Bildspeicher), nicht der Ort zum zufälligen Zeitpunkt der Prüfung.
+const fotoAnzahl = (row) => {
+  let spalte = 0; try { spalte = JSON.parse(String(row?.images || '[]')).length; } catch { spalte = -1; }
+  const links = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [row?.id])[0]?.n ?? 0);
+  return spalte > 0 ? spalte : links;
+};
 const neueArtikelVon = (ids) => ids.filter((x) => x && !SEED_PRODUCTS.includes(x))
-  .map((x) => norm(dbQ(BIZ_DB, 'SELECT * FROM products WHERE id = ?', [x])[0], /^(id|name|created_by|image_description|image_embedding|version|sync_status)$|_at$/));
+  .map((x) => { const row = dbQ(BIZ_DB, 'SELECT * FROM products WHERE id = ?', [x])[0];
+    return norm(row ? { ...row, images: `fotos:${fotoAnzahl(row)}` } : row, /^(id|name|created_by|image_description|image_embedding|version|sync_status|thumbnail_media_id|image_media_id)$|_at$/); });
 /** Nur die Namen abweichender Spalten (bei Bildern samt Länge/Anzahl) — für die Meldung. */
 const spaltenDiff = (a, b) => { try { const x = JSON.parse(a || '{}'), y = JSON.parse(b || '{}'); return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((k) => S(x[k]) !== S(y[k])).map((k) => { const v = (z) => { const s = typeof z === 'string' ? z : S(z); return /data:image/.test(s) ? (() => { try { const arr = JSON.parse(s); return 'bilder ' + arr.length + ' / ' + arr.map((q) => String(q).length).join(','); } catch { return 'len ' + s.length; } })() : s.slice(0, 80); }; return k + ': ' + v(x[k]) + ' | ' + v(y[k]); }).join('; '); } catch { return 'nicht lesbar'; } };
 /** Welche Spalten zweier normalisierter Artikel abweichen — nur für die Meldung. */
@@ -587,7 +595,7 @@ try {
       `ORDER Summe 150 + 500 und sichtbare Steuer 10 % auf die VAT-Zeile vom Haus (${S([pc2Normal.agreed_price, pc2Normal.tax_amount])})`);
     const zeilen = dbQ(BIZ_DB, 'SELECT product_id FROM order_lines WHERE order_id = ?', [pc2Normal.id]);
     const neu = neueArtikelVon(zeilen.map((z) => z.product_id));
-    ok(zeilen.length === 2 && neu.length === 1 && /data:image\/jpeg;base64,/.test(neu[0]), 'ORDER der neue Artikel steht, mit Foto');
+    ok(zeilen.length === 2 && neu.length === 1 && /"images":"fotos:[1-9]/.test(neu[0]), 'ORDER der neue Artikel steht, mit Foto');
     ok(zahlungVon(pc2Normal.id).includes('"card_brand":"amex"') && /card/i.test(gebuehrVon(pc2Normal.id)),
       `ORDER Anzahlung mit Kartenart, Kartengebuehr gebucht (${gebuehrVon(pc2Normal.id)})`);
     ok(await warteBis(client, `document.body.innerText.includes(${S(pc2Normal.order_number)})`, 30000), 'ORDER der zweite Rechner zeigt den Auftrag — gelesen vom Primary');
@@ -728,7 +736,7 @@ try {
       `PURCHASE Summe 2×110 + 3×90, Mitarbeiter und Status vom Haus (${S([e.total_amount, e.staff_id, e.status])})`);
     ok(zahl("SELECT quantity AS n FROM products WHERE id = 'r5e-p3'") === p3Vor + 3, 'PURCHASE der Bestand steigt genau einmal');
     const neu = neueArtikelVon(dbQ(BIZ_DB, 'SELECT product_id FROM purchase_lines WHERE purchase_id = ?', [e.id]).map((z) => z.product_id));
-    ok(neu.length === 1 && /data:image\/jpeg;base64,/.test(neu[0]) && neu[0].includes('"quantity":2'), 'PURCHASE der neue Artikel mit Foto und Menge');
+    ok(neu.length === 1 && /"images":"fotos:[1-9]/.test(neu[0]) && neu[0].includes('"quantity":2'), 'PURCHASE der neue Artikel mit Foto und Menge');
     ok(JSON.parse(loseVon(e.id)).length === 2, 'PURCHASE ein Los je Zeile');
 
     await geh(primary, '/purchases/new');

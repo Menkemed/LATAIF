@@ -489,6 +489,14 @@ try {
     ok(alleOk(r) === 'OK' && !!einkaufsArtikel && dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM purchase_lines WHERE purchase_id = ? AND product_id = 'pv-c'", [pid])[0]?.n === 1,
       `6b PRIMARY New Item mit Foto + Existing-Zeile wie bisher gespeichert (${alleOk(r)})`);
     ok(/Bracelet · 14 · 18K Rose/.test(detail) && /Bracelet · 19 · 18K Rose/.test(detail), `6b Detailzeile unter dem Artikelnamen: New Item und Existing (${detail})`);
+    // v0.8.111 — PP-12: das Einkaufsfoto zieht nach dem Speichern in den Bildspeicher um; die Spalte wird ERST danach geleert.
+    await spuelen(primary).catch(() => null);
+    const umgezogen = await warteAuf(() => {
+      const row = dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [einkaufsArtikel?.id])[0];
+      const links = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [einkaufsArtikel?.id])[0]?.n;
+      return row && row.images === '[]' && links >= 1;
+    }, 30000);
+    ok(umgezogen, '6b Einkaufsfoto in den Bildspeicher umgezogen (media_links vorhanden, products.images danach leer) — kein Bild fehlt');
 
     // 6c PC2: Edit Purchase → Add variant of existing
     await spuelen(primary).catch(() => null);
