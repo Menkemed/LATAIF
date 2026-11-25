@@ -43,6 +43,10 @@ import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSe
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
+import { variantSeed, sameKarat } from '@/core/products/variant-seed';
+import { isSystemArticle, mayJoinModel, type VariantIntent } from '@/core/products/product-models';
+import { loadVariantGallery } from '@/core/products/product-models-primary';
+import { modelMembers } from '@/core/products/product-models-view';
 // BULK METAL V1 — Bulk-Zeile: Gesamtgewicht + Gesamtkosten; Lot, Lot-Nummer und Wert rechnet das Haus.
 import { BulkPurchaseLineEditor, bulkDraftToInput, newBulkDraft, type BulkDraft } from '@/components/bulk/BulkPurchaseLineEditor';
 
@@ -71,6 +75,9 @@ interface DraftLine {
   sourceOrderLineId?: string;
   // PARTNER-ITEMS — gemeinsam gekauft: Partner und Anteile (LATAIF haelt den Rest). Leer = allein.
   partnerShares?: PartnerShareInput[];
+  // PURCHASE ADD VARIANT — „Variant of existing": ein NEUER Artikel (mode 'new') als Variante eines bestehenden.
+  // photo: 'auto' = Bild des Originals übernehmen, solange Karat & Color gleich ist; 'yes'/'no' = ausdrücklich gewählt.
+  variant?: { anchorId: string; modelKey: string | null; label: string; excludeIds: string[]; photo: 'auto' | 'yes' | 'no' };
 }
 
 /** v0.8.91 — eine Zahlungszeile der Maske (Betrag als Text, damit Tippen nicht springt). */
@@ -103,7 +110,7 @@ export function PurchaseCreate() {
   // Klammer, auf dem zweiten Rechner `purchases.create` mit genau den Eingaben dieser Maske.
   const w = useSharedWrites();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { products, loadProducts, categories, loadCategories } = useProductStore();
+  const { products, loadProducts, categories, loadCategories, productModels } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
 
   const { partners, loadPartners } = usePartnerStore();
@@ -210,6 +217,8 @@ export function PurchaseCreate() {
 
   // Plan §Purchase §New-Item: Modal für volle Item-Erfassung (shared NewProductModal)
   const [newItemModalIdx, setNewItemModalIdx] = useState<number | null>(null);
+  // PURCHASE ADD VARIANT — die Zeile, für die gerade der Ausgangsartikel gesucht wird.
+  const [variantPickIdx, setVariantPickIdx] = useState<number | null>(null);
   const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
 
   // Quick-Create Supplier inline (spart Navigation zu /suppliers + zurueck).
@@ -334,9 +343,41 @@ export function PurchaseCreate() {
     setNewItemModalIdx(idx);
   }
 
+  // PURCHASE ADD VARIANT — wählbar: Eigenware, die in ein Modell darf (keine Kommission, keine System-/erledigten Artikel).
+  const variantOptions = useMemo(() =>
+    products
+      .filter(p => String(p.sourceType || 'OWN').toUpperCase() === 'OWN' && !isSystemArticle(p.id, p.categoryId || '') && mayJoinModel(String(p.stockStatus)))
+      .map(p => ({ id: p.id, label: productDisplayName(p), subtitle: p.sku || undefined, searchText: productSearchText(p) })),
+  [products]);
+
+  function pickVariantAnchor(idx: number, anchorId: string) {
+    const t = products.find(p => p.id === anchorId);
+    if (!t) return;
+    const key = productModels[t.id] ?? null;
+    const geschwister = key ? modelMembers(products, productModels, key).map(m => m.id) : [t.id];
+    updateLine(idx, {
+      mode: 'new', productId: undefined, newProduct: undefined, brand: t.brand || '', name: t.name || '', sku: '', categoryId: t.categoryId || '',
+      variant: { anchorId: t.id, modelKey: key, label: productDisplayName(t), excludeIds: [...new Set([t.id, ...geschwister])], photo: 'auto' },
+    });
+    setVariantPickIdx(null);
+    openNewItemModal(idx);
+  }
+
+  /** Wird das Bild des Originals übernommen? Von selbst nur bei gleichem Karat & Color, sonst nur ausdrücklich. */
+  function variantPhotoOn(l: DraftLine): boolean {
+    if (!l.variant || (l.newProduct?.images || []).length > 0) return false;
+    if (l.variant.photo !== 'auto') return l.variant.photo === 'yes';
+    return sameKarat(products.find(p => p.id === l.variant!.anchorId), l.newProduct ?? null);
+  }
+
   function modalInitial(): Partial<Product> | undefined {
     if (newItemModalIdx == null) return undefined;
     const line = lines[newItemModalIdx];
+    if (line?.variant && !line.newProduct) {
+      const t = products.find(p => p.id === line.variant!.anchorId);
+      const cat = categories.find(c => c.id === t?.categoryId);
+      if (t) return variantSeed(t, cat?.conditionOptions?.[0] || '');
+    }
     return line?.newProduct ?? {
       categoryId: line?.categoryId || categories[0]?.id || '',
       brand: line?.brand || '',
@@ -376,7 +417,7 @@ export function PurchaseCreate() {
   // CENTRAL-UI-PARITY R5E — die Eingaben der Maske; den Einkauf (neue Artikel, Lose, Vorsteuer,
   // Auftragsverknüpfung, Inbox „erledigt") baut EINE Vorbereitung (core/purchases/purchase-create),
   // am Primary wie fern, in EINER Klammer.
-  function formInput(): PurchaseCreateInput {
+  function formInput(variantIntents: Record<number, VariantIntent> = {}): PurchaseCreateInput {
     // v0.8.91 — die Zahlungen als Liste (jede mit ihrem Tag); leere Zeilen zählen nicht.
     const zahlungen = payRows.filter(r => zahlBetrag(r) > 0).map(r => ({
       amount: Math.round(zahlBetrag(r) * 1000) / 1000, method: r.method, paidDate: r.date,
@@ -385,7 +426,7 @@ export function PurchaseCreate() {
     return {
       ...(zahlungen.length > 0 ? { payments: zahlungen } : {}),
       supplierId, purchaseDate, taxScheme: purchaseTaxScheme,
-      lines: lines.map(l => l.mode === 'bulk' && l.bulk ? (() => {
+      lines: lines.map((l, idx) => l.mode === 'bulk' && l.bulk ? (() => {
         const b = bulkDraftToInput(l.bulk);
         return { mode: 'bulk' as const, bulk: b, brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: b.lineTotalFils / 1000 };
       })() : ({
@@ -393,6 +434,7 @@ export function PurchaseCreate() {
         sku: l.sku, categoryId: l.categoryId, quantity: l.quantity, unitPrice: l.unitPrice,
         sourceOrderLineId: l.sourceOrderLineId,
         partnerShares: l.partnerShares && l.partnerShares.length > 0 ? l.partnerShares : undefined,
+        ...(variantIntents[idx] ? { variant: variantIntents[idx] } : {}),
       })),
       paymentAmount: 0, paymentMethod: 'bank', notes, staffId,
       sourceOrderId: sourceOrderId || undefined,
@@ -409,8 +451,25 @@ export function PurchaseCreate() {
       if (!Number.isFinite(v) || v < 0) { setError(`Payment ${i + 1}: the amount must be a number of 0 or more`); return; }
       if (v > 0 && !payRows[i].date) { setError(`Payment ${i + 1}: please choose the payment date`); return; }
     }
+    // PURCHASE ADD VARIANT — je Varianten-Zeile die Absicht: Modell bzw. Ausgangsartikel, und auf Wunsch das Bild des
+    // Originals (gelesen VOR dem Auftrag; nicht lesbar → nichts speichern statt still ohne Bild).
+    const variantIntents: Record<number, VariantIntent> = {};
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.variant) continue;
+      if (!l.newProduct) { setError(`Line ${i + 1}: define the variant first`); return; }
+      let pick: string | null = null;
+      if (variantPhotoOn(l)) {
+        const g = await loadVariantGallery(l.variant.anchorId);
+        if (!g) { setError('The photo of the original could not be read from the main computer. Nothing was saved — please try again.'); return; }
+        pick = g.mediaIds[0] ?? null;
+      }
+      variantIntents[i] = l.variant.modelKey
+        ? { modelKey: l.variant.modelKey, pickMediaId: pick }
+        : { anchorProductId: l.variant.anchorId, pickMediaId: pick };
+    }
     let input: PurchaseCreateInput;
-    try { input = formInput(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
+    try { input = formInput(variantIntents); } catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     const v = validatePurchaseCreate(input);
     if (v) { setError(v); return; }
     // Auf dem zweiten Rechner reisen die Fotos der neuen Artikel vorab in die Zwischenablage; der
@@ -584,15 +643,18 @@ export function PurchaseCreate() {
                     </button>
                   ) : <span />}
                   {/* Source toggle — bei „New Item" öffnet sich automatisch das Modal */}
-                  <select value={l.mode}
+                  <select value={l.variant ? 'variant' : l.mode} data-line-source={idx}
                     onChange={e => {
-                      const newMode = e.target.value as 'existing' | 'new' | 'bulk';
-                      if (newMode === 'bulk') { updateLine(idx, { mode: 'bulk', productId: undefined, quantity: 1, unitPrice: 0, bulk: newBulkDraft(purchaseTaxScheme) }); return; }
-                      updateLine(idx, { mode: newMode, productId: undefined });
+                      const newMode = e.target.value as 'existing' | 'new' | 'bulk' | 'variant';
+                      // PURCHASE ADD VARIANT — erst den Ausgangsartikel wählen, dann die Maske „New Item" mit Vorbelegung.
+                      if (newMode === 'variant') { updateLine(idx, { mode: 'new', productId: undefined, newProduct: undefined, variant: undefined }); setVariantPickIdx(idx); return; }
+                      if (newMode === 'bulk') { updateLine(idx, { mode: 'bulk', productId: undefined, quantity: 1, unitPrice: 0, bulk: newBulkDraft(purchaseTaxScheme), variant: undefined }); return; }
+                      updateLine(idx, { mode: newMode, productId: undefined, variant: undefined, ...(newMode === 'new' ? { newProduct: undefined } : {}) });
                       if (newMode === 'new') openNewItemModal(idx);
                     }}
                     style={{ padding: '7px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', minWidth: 0, width: '100%' }}>
                     <option value="new">New Item</option>
+                    <option value="variant">Variant of existing</option>
                     <option value="existing">Existing</option>
                     <option value="bulk">Bulk metal</option>
                   </select>
@@ -680,6 +742,29 @@ export function PurchaseCreate() {
                       <Trash2 size={16} strokeWidth={2} />
                     </button>
                   </div>
+                {/* PURCHASE ADD VARIANT — Herkunft der Variante, Modell und Bildübernahme (Warnung bei anderem Karat & Color). */}
+                {l.variant && (() => {
+                  const anchor = products.find(p => p.id === l.variant!.anchorId);
+                  const eigeneFotos = (l.newProduct?.images || []).length > 0;
+                  const anders = !!l.newProduct && !sameKarat(anchor, l.newProduct);
+                  const an = variantPhotoOn(l);
+                  return (
+                    <div data-line-variant={idx} style={{ padding: '6px 12px 10px 40px', fontSize: 12, color: '#4B5563', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <span>Variant of <b>{l.variant.label}</b>{l.variant.modelKey ? ' — joins its model.' : ' — not in a model yet: saving creates the model with both items.'}</span>
+                      <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <input type="checkbox" checked={an} disabled={eigeneFotos} data-line-variant-photo={idx}
+                          onChange={e => { const on = e.target.checked; updateLine(idx, { variant: { ...l.variant!, photo: on ? 'yes' : 'no' } }); }} />
+                        <span>Use the photo of the original (no upload, no new file — only a reference).{eigeneFotos ? ' Not used: this piece has its own photo.' : ''}</span>
+                      </label>
+                      {anders && !eigeneFotos && (
+                        <span data-line-variant-photo-warning={idx} style={{ color: '#B45309' }}>
+                          Karat &amp; Color differs from the original ({String(((anchor?.attributes ?? {}) as Record<string, unknown>).karat ?? '—')}).
+                          {an ? ' The photo may show a different gold colour — use it only if it really fits.' : ' Its photo is not taken over unless you tick the box.'}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })()}
                 {/* Expanded Product-Detail-Panel — Specs-Grid + Image */}
                 {expanded && lineProduct && (
                   <div style={{
@@ -940,12 +1025,34 @@ export function PurchaseCreate() {
         onClose={() => setNewItemModalIdx(null)}
         onSubmit={handleModalSave}
         initial={modalInitial()}
-        title="New Item — Define Product"
+        title={newItemModalIdx != null && lines[newItemModalIdx]?.variant ? `Variant of ${lines[newItemModalIdx].variant!.label}` : 'New Item — Define Product'}
         submitLabel="Use this Item"
         hint={<><strong style={{ color: '#0F0F10' }}>Wird ins Lager aufgenommen.</strong> Einkaufspreis kommt aus der Purchase-Line — nicht doppelt eingeben.</>}
-        hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
+        // PURCHASE ADD VARIANT — bei einer Variante wird der Verkaufspreis mit erfasst (reines Artikelfeld, keine Buchung).
+        hideFields={{ purchasePrice: true, salePrice: !(newItemModalIdx != null && lines[newItemModalIdx]?.variant), paidFrom: true, supplier: true, quantity: true }}
+        variant={newItemModalIdx != null && lines[newItemModalIdx]?.variant
+          ? { label: lines[newItemModalIdx].variant!.label, excludeIds: lines[newItemModalIdx].variant!.excludeIds } : undefined}
         skuAutoAssign
       />
+
+      {/* PURCHASE ADD VARIANT — den Ausgangsartikel aus Collections wählen (nur Eigenware). */}
+      <Modal open={variantPickIdx != null} onClose={() => setVariantPickIdx(null)} title="Variant of existing item" width={520}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }} data-variant-picker>
+          <p style={{ fontSize: 13, color: '#4B5563' }}>
+            Choose the existing item. Its shared details are taken over; this piece gets its own SKU, size, weight, Karat &amp; Color and prices.
+            Own stock only — consignment pieces are added through the consignment intake.
+          </p>
+          <SearchSelect
+            placeholder="Search collection..."
+            options={variantOptions}
+            value=""
+            onChange={pid => { if (variantPickIdx != null && pid) pickVariantAnchor(variantPickIdx, pid); }}
+          />
+          <div className="flex justify-end">
+            <Button variant="ghost" onClick={() => setVariantPickIdx(null)}>Cancel</Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}
       <Modal open={showNewSupplier} onClose={() => { setShowNewSupplier(false); setSupplierCreateMode('new'); }} title="New Supplier" width={500}>

@@ -51,11 +51,19 @@ export interface NewProductModalProps {
     quantity?: boolean;
     storageLocation?: boolean;
   };
+  /**
+   * PURCHASE ADD VARIANT — die Maske legt eine Variante eines bestehenden Artikels an: Steuerart Pflicht (nie vom Original),
+   * Karat & Color ausdrücklich bestätigen, und Ausgangsartikel/Geschwister sind keine Duplikat-Warnung.
+   */
+  variant?: { label: string; excludeIds: readonly string[] };
 }
 
 export function NewProductModal({
-  open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields, skuAutoAssign,
+  open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields, skuAutoAssign, variant,
 }: NewProductModalProps) {
+  const [karatOk, setKaratOk] = useState(false);
+  const ohneGeschwister = <T extends { product: { id: string } }>(list: T[]): T[] =>
+    (variant ? list.filter((m) => !variant.excludeIds.includes(m.product.id)) : list);
   const { products, categories, loadCategories, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const [form, setForm] = useState<Partial<Product>>({});
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
@@ -85,7 +93,7 @@ export function NewProductModal({
     if (fp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
-      const possible = findPossibleDuplicates(form);
+      const possible = ohneGeschwister(findPossibleDuplicates(form));
       if (possible.length > 0) setDuplicateMatches(possible);
     }, 800);
     return () => clearTimeout(t);
@@ -99,6 +107,7 @@ export function NewProductModal({
       purchaseCurrency: 'BHD', attributes: {}, images: [],
     };
     setForm(init);
+    setKaratOk(false);
     const cat = categories.find(c => c.id === init.categoryId) || null;
     setSelectedCat(cat);
   }, [open, initial, categories]);
@@ -133,10 +142,12 @@ export function NewProductModal({
       alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
       return;
     }
+    if (variant && !form.taxScheme) { alert('Please choose the tax scheme for this variant.'); return; }
+    if (variant && hasKarat && !karatOk) { alert('Please check Karat & Color for this piece and confirm it.'); return; }
     if (form.sku && isSkuTaken(form.sku)) { setSkuError(true); return; }
     setSkuError(false);
     // Score-basierte Duplicate Detection (nicht-blockierend).
-    const possible = findPossibleDuplicates(form);
+    const possible = ohneGeschwister(findPossibleDuplicates(form));
     if (possible.length > 0) {
       setDuplicateMatches(possible);
       return;
@@ -155,9 +166,23 @@ export function NewProductModal({
     onSubmit(submitPayload());
   }
 
+  const hasKarat = !!selectedCat?.attributes.some((a) => a.key === 'karat');
+
   return (
     <Modal open={open} onClose={onClose} title={title || 'New Item'} width={680}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 18, maxHeight: '70vh', overflowY: 'auto', paddingRight: 4 }}>
+        {variant && (
+          <div data-variant-hint style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(113,93,227,0.09)', border: '1px solid rgba(113,93,227,0.35)', color: '#0F0F10', fontSize: 12, lineHeight: 1.5 }}>
+            New variant of <b>{variant.label}</b>. Shared details are prefilled — enter this piece’s own size, weight and sale price, and choose the
+            tax scheme. The purchase price comes from the purchase line. Saved with the purchase and added to the model.
+            {hasKarat && (
+              <label data-variant-karat-confirm style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 8 }}>
+                <input type="checkbox" checked={karatOk} onChange={(e) => setKaratOk(e.target.checked)} />
+                <span>Karat &amp; Color of this piece checked: <b>{String(((form.attributes ?? {}) as Record<string, unknown>).karat ?? '—')}</b> (prefilled from the original — change it below if this piece differs).</span>
+              </label>
+            )}
+          </div>
+        )}
         {hint && (
           <div style={{
             padding: '8px 12px', borderRadius: 8, background: '#F2F7FA',
@@ -466,6 +491,26 @@ export function NewProductModal({
             onChange={imgs => setForm(p => ({ ...p, images: imgs }))}
             maxImages={6} />
         </div>
+
+        {/* PURCHASE ADD VARIANT — bei einer Variante wählt der Mensch die Steuerart ausdrücklich (nie vom Original,
+            keine stille Margin-Vorgabe) — dieselben drei Knöpfe wie Collections → Add variant. */}
+        {variant && (
+          <div data-variant-tax-scheme>
+            <span className="text-overline" style={{ marginBottom: 8 }}>TAX SCHEME *</span>
+            <div className="flex gap-2" style={{ marginTop: 8 }}>
+              {(['MARGIN', 'VAT_10', 'ZERO'] as const).map(scheme => (
+                <button key={scheme} type="button" onClick={() => setForm(p => ({ ...p, taxScheme: scheme }))} data-variant-tax={scheme}
+                  className="cursor-pointer rounded transition-all duration-200"
+                  style={{
+                    padding: '7px 14px', fontSize: 12,
+                    border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
+                    color: form.taxScheme === scheme ? '#0F0F10' : '#6B7280',
+                    background: form.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
+                  }}>{scheme === 'MARGIN' ? 'Margin' : scheme === 'VAT_10' ? 'VAT 10%' : 'Zero'}</button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* v0.6.8 — TAX SCHEME entfernt: VAT wird beim Verkauf (Invoice/Convert)
             gewaehlt, nicht beim Produkt-Anlegen. taxScheme bleibt im DB-Modell

@@ -66,7 +66,7 @@ import {
 } from '@/core/purchases/purchase-create';
 import { createPurchaseDetailedInHouse } from '@/core/purchases/purchase-house';
 import { parseCustomerCreate, ingestStagedIdentity } from './customer-commands';
-import { EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
+import { EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, PURCHASE_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
 import { payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
 import { CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
@@ -86,6 +86,7 @@ import { CONSIGNMENT_PRODUCT_FIELDS } from '@/core/data/write-payloads';
 // Die Schemata des Hauses — nicht die engere Einkaufsliste weiter unten (Einkauf kennt kein MARGIN).
 import { TAX_SCHEMES as HOUSE_TAX_SCHEMES } from '@/core/models/types';
 import { productDisplayName } from '../products/display-name.ts';
+import { parseVariantShape } from '@/core/products/product-models';
 
 export const OP_PURCHASES_CREATE = 'purchases.create';
 export const OP_CONSIGNMENTS_CREATE = 'consignments.create';
@@ -238,6 +239,10 @@ export function parseSpec(raw: unknown, fields: readonly string[], what: string)
     && (!Array.isArray(raw.scopeOfDelivery) || raw.scopeOfDelivery.some((x) => typeof x !== 'string'))) {
     throw new CommercialPayloadError(`${what}.scopeOfDelivery must be a list of words`);
   }
+  if (raw.plannedSalePrice !== undefined && raw.plannedSalePrice !== null
+    && (typeof raw.plannedSalePrice !== 'number' || !Number.isFinite(raw.plannedSalePrice) || raw.plannedSalePrice < 0)) {
+    throw new CommercialPayloadError(`${what}.plannedSalePrice must be a number of 0 or more`);
+  }
   if (typeof raw.taxScheme === 'string' && !(HOUSE_TAX_SCHEMES as readonly string[]).includes(raw.taxScheme)) {
     throw new CommercialPayloadError(`unknown tax scheme: ${raw.taxScheme}`);
   }
@@ -323,7 +328,10 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
   const specs: PurchaseCreateRequest['specs'] = [];
   const lines = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new CommercialPayloadError(`line ${i + 1} must be an object`);
-    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId', 'partnerShares', 'bulk']);
+    // PURCHASE ADD VARIANT — `variant` additiv; ein PC2 bis v0.8.110 schickt das Feld nie.
+    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId', 'partnerShares', 'bulk', 'variant']);
+    const variant = l.variant !== undefined && l.variant !== null
+      ? parseVariantShape(l.variant, (m) => new CommercialPayloadError(`line ${i + 1}: ${m}`)) : undefined;
     const productId = optString(l.productId, `line ${i + 1}: productId`);
     // BULK METAL V1 — eine Bulk-Zeile: nur die Absicht (Metall, Feinheit, mg, Fils, Steuerart, Composition);
     // Lot-Wert, Lot-Nummer und Vorsteuer rechnet das Haus. Die fachliche Prüfung macht purchaseCreateIssue.
@@ -333,7 +341,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
       onlyKnownFields(l.bulk, ['metal', 'fineness', 'weightMg', 'lineTotalFils', 'saleTaxScheme', 'composition']);
       bulk = { ...l.bulk };
     }
-    const spec = parseSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
+    const spec = parseSpec(l.newProduct, PURCHASE_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
     specs.push(spec);
     return {
       mode: oneOf(l.mode, ['existing', 'new', 'bulk'] as const, bulk ? 'bulk' : productId ? 'existing' : 'new', `line ${i + 1} mode`),
@@ -349,6 +357,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
       unitPrice: money(l.unitPrice, `line ${i + 1}: unitPrice`),
       sourceOrderLineId: optString(l.sourceOrderLineId, `line ${i + 1}: sourceOrderLineId`),
       partnerShares: parsePartnerShares(l.partnerShares, i),
+      ...(variant ? { variant } : {}),
     };
   });
   // Die Anzahlung: der Rumpf der Maske (`paymentAmount`/`paymentMethod`) oder der alte (`initialPayment`).
@@ -469,7 +478,8 @@ export async function runPurchaseCreate(
     // durablen Zähler, ein Los je Zeile mit dem TATSÄCHLICHEN Einstand, neue Artikel, Menge,
     // Statusregel, Vorsteuer, Verbindlichkeit, Buchung, Auftragspositionen auf „Arrived".
     const person = req.newSupplierPerson && ausweis.mediaId ? { ...req.newSupplierPerson, idMediaId: ausweis.mediaId } : req.newSupplierPerson;
-    const done = urteil(() => createPurchaseDetailedInHouse({ ...req, lines, newSupplierPerson: person }, identity.branchId, identity.userId));
+    const done = urteil(() => createPurchaseDetailedInHouse({ ...req, lines, newSupplierPerson: person }, identity.branchId, identity.userId,
+      (identity as CommandIdentity & { role?: string }).role ?? null));
     const purchase = done.purchase;
     const value: CommercialResult = {
       purchaseId: purchase.id,

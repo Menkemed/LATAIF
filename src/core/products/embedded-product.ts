@@ -15,6 +15,11 @@ export const EMBEDDED_PRODUCT_FIELDS = [
   'categoryId', 'brand', 'name', 'sku', 'condition', 'attributes', 'scopeOfDelivery',
   'taxScheme', 'purchaseCurrency', 'storageLocation', 'notes', 'images',
 ] as const;
+/**
+ * PURCHASE ADD VARIANT (Owner 25.11.2026) — der neue Artikel einer Einkaufszeile darf zusätzlich den Verkaufspreis
+ * tragen (reines Artikelfeld, keine Buchung). Der Einkaufspreis kommt weiter NUR aus der Zeile.
+ */
+export const PURCHASE_PRODUCT_FIELDS = [...EMBEDDED_PRODUCT_FIELDS, 'plannedSalePrice'] as const;
 /** „Final Product" eines Sonderauftrags — dieselbe Maske, ohne Lagerort. */
 export const FINAL_PRODUCT_FIELDS = EMBEDDED_PRODUCT_FIELDS.filter((f) => f !== 'storageLocation');
 
