@@ -7,6 +7,7 @@
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import type { Category, Product } from '@/core/models/types';
 import { productDisplayName } from '@/core/products/display-name';
 import { isSystemArticle, mayJoinModel, type VariantIntent } from '@/core/products/product-models';
@@ -96,8 +97,8 @@ export function VariantLineInfo({ draft, newProduct, products, dataKey, onPhoto 
 }
 
 /** Den Ausgangsartikel aus Collections wählen (nur Eigenware). */
-export function VariantPickerModal({ open, products, onPick, onClose }: {
-  open: boolean; products: readonly Product[]; onPick: (productId: string) => void; onClose: () => void;
+export function VariantPickerModal({ open, products, categories, onPick, onClose }: {
+  open: boolean; products: readonly Product[]; categories?: readonly Category[]; onPick: (productId: string) => void; onClose: () => void;
 }) {
   return (
     <Modal open={open} onClose={onClose} title="Variant of existing item" width={520}>
@@ -106,7 +107,12 @@ export function VariantPickerModal({ open, products, onPick, onClose }: {
           Choose the existing item. Its shared details are taken over; this piece gets its own SKU, size, weight, Karat &amp; Color and prices.
           Own stock only — consignment pieces are added through the consignment intake.
         </p>
-        <SearchSelect placeholder="Search collection..." options={variantAnchorOptions(products)} value="" matchAllWords onChange={(pid) => { if (pid) onPick(pid); }} />
+        <SearchSelect placeholder="Search collection..." options={variantAnchorOptions(products)} value="" matchAllWords onChange={(pid) => { if (pid) onPick(pid); }}
+          renderPreview={(id) => {
+            // Dieselbe Hover-Karte wie beim Picker „Existing“: Foto, Preise, Attribute — vor dem Wählen sehen, was man nimmt.
+            const p = products.find((x) => x.id === id);
+            return p ? <ProductHoverCard product={p} categories={(categories ?? []) as Category[]} /> : null;
+          }} />
         <div className="flex justify-end">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
         </div>

@@ -999,7 +999,7 @@ export function PurchaseCreate() {
       />
 
       {/* PURCHASE ADD VARIANT — den Ausgangsartikel aus Collections wählen (nur Eigenware). */}
-      <VariantPickerModal open={variantPickIdx != null} products={products} onClose={() => setVariantPickIdx(null)}
+      <VariantPickerModal open={variantPickIdx != null} products={products} categories={categories} onClose={() => setVariantPickIdx(null)}
         onPick={(pid) => { if (variantPickIdx != null) pickVariantAnchor(variantPickIdx, pid); }} />
 
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}

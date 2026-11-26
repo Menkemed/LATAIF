@@ -614,7 +614,7 @@ export function PurchaseEdit() {
         variant={modalRow?.variant ? { label: modalRow.variant.label, excludeIds: modalRow.variant.excludeIds } : undefined}
         skuAutoAssign
       />
-      <VariantPickerModal open={variantPickKey != null} products={products}
+      <VariantPickerModal open={variantPickKey != null} products={products} categories={categories}
         onClose={() => { if (variantPickKey != null) setAddRows((rs) => rs.filter((x) => x.key !== variantPickKey || !!x.variant)); setVariantPickKey(null); }}
         onPick={(pid) => { if (variantPickKey != null) pickVariantAnchor(variantPickKey, pid); }} />
     </div>
