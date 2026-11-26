@@ -822,6 +822,46 @@ try {
     ok(waisen === 0 && doppelt === 0, `BILDSPEICHER keine verwaiste Verknüpfung (${waisen}), keine doppelte Datei (${doppelt})`);
   }
 
+  // ── v0.8.111 MEDIA STORAGE: der PC2 ZEIGT die direkt gespeicherten Bilder an und BEARBEITET sie ──
+  {
+    const pidPc2 = (dbQ(BIZ_DB, "SELECT id FROM products WHERE name = 'Neu R5E PC2 Einkauf'")[0] || {}).id;
+    const pidPri = (dbQ(BIZ_DB, "SELECT id FROM products WHERE name = 'Neu R5E Primary Einkauf'")[0] || {}).id;
+    const gal = (pid) => dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order", [pid]).map((r) => r.m);
+    const bildGeladen = "[...document.querySelectorAll('img')].some((i) => i.complete && i.naturalWidth >= 100 && i.naturalHeight >= 50)";
+    const groesstes = "const i = [...document.querySelectorAll('img')].filter((x) => x.complete && x.naturalWidth >= 100).sort((a, b) => b.naturalWidth - a.naturalWidth)[0]; return i ? i.naturalWidth + 'x' + i.naturalHeight + (i.src.startsWith('data:') ? ' data' : ' ' + i.src.split(':')[0]) : 'keins';";
+    for (const [name, pid] of [['vom PC2 gekauft', pidPc2], ['am Primary gekauft', pidPri]]) {
+      client = await lade(client, '/collection/' + pid);
+      const da = !!pid && gal(pid).length === 1 && await warteBis(client, bildGeladen, 30000);
+      ok(da, `PC2-ANZEIGE Artikel ${name}: das Bild aus dem Bildspeicher wird am PC2 wirklich geladen und angezeigt (${await client.ev(groesstes)})`);
+    }
+    // Bearbeiten am PC2: Maske öffnen (das bestehende Bild ist geladen), ein zweites Foto dazu, speichern.
+    const vorher = gal(pidPc2);
+    client = await lade(client, '/collection/' + pidPc2);
+    const r = [];
+    r.push((await warteBis(client, "[...document.querySelectorAll('button')].some((b) => b.textContent.trim() === 'Edit')", 30000)) ? 'OK' : 'KEIN-EDIT');
+    r.push(await clickText(client, 'Edit'));
+    r.push((await warteBis(client, "document.querySelector('[data-product-images=\"ready\"]') && [...document.querySelectorAll('[data-product-images] img')].some((i) => i.complete && i.naturalWidth > 0)", 30000)) ? 'OK' : 'GALERIE-NICHT-BEREIT');
+    const FOTO2 = join(RUN, 'r5e-photo-2.png');
+    writePhoto(FOTO2, 30);
+    const feld = await client.send('Runtime.evaluate', { expression: "document.querySelector('[data-product-images] input[type=file][accept=\"image/*\"]')", returnByValue: false });
+    if (feld.result?.objectId) {
+      await client.send('DOM.setFileInputFiles', { objectId: feld.result.objectId, files: [FOTO2] });
+      r.push((await warteBis(client, "document.querySelectorAll('[data-product-images] img').length >= 2", 20000)) ? 'OK' : 'FOTO-NICHT-UEBERNOMMEN');
+    } else r.push('KEIN-DATEIFELD');
+    await sleep(400);
+    r.push(await client.ev("const b = document.querySelector('[data-save-product]'); if (!b) return 'KEIN-SAVE'; if (b.disabled) return 'SAVE-DISABLED'; b.click(); return 'OK';"));
+    const gespeichert = await warteAuf(() => gal(pidPc2).length === 2);
+    const nachher = gal(pidPc2);
+    const spalte = (dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [pidPc2])[0] || {}).images;
+    const neuB = nachher[1] ? (dbQ(BIZ_DB, `SELECT gm.byte_size AS b FROM media_objects o JOIN media_blobs bm ON bm.tenant_id = o.tenant_id AND bm.blob_id = o.master_blob_id
+        JOIN media_blob_generations gm ON gm.tenant_id = bm.tenant_id AND gm.blob_id = bm.blob_id AND gm.generation_no = bm.current_generation_no WHERE o.media_id = ?`, [nachher[1]])[0] || {}).b : -1;
+    ok(r.every((x) => x === 'OK') && gespeichert && nachher[0] === vorher[0] && spalte === '[]' && neuB > 0 && neuB <= 60000,
+      `PC2-BEARBEITEN zweites Foto am PC2 hinzugefügt und gespeichert: altes Bild bleibt vorn, neues im Bildspeicher (${neuB} B ≤ 60000), Spalte leer (${r.join('|')})`);
+    client = await lade(client, '/collection/' + pidPc2);
+    const zwei = await warteBis(client, "[...document.querySelectorAll('img')].filter((i) => i.complete && i.naturalWidth > 0).length >= 2", 30000);
+    ok(zwei, 'PC2-ANZEIGE nach dem Speichern zeigt der PC2 beide Bilder');
+  }
+
   // ── Der Client besitzt weiterhin nichts ────────────────────────────────
   {
     ok((await treffer(client)).length === 0, 'LOKAL kein Griff zur lokalen Datenbank');

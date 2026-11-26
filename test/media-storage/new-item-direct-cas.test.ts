@@ -373,6 +373,74 @@ setNewItemPhotoTestHook({ enabled: true });
   setNewItemPhotoTestHook({ enabled: true });
 }
 
+// ── H Einschleusen: ein PC2-Rumpf darf die internen Medienfelder NICHT tragen (alle vier Aufträge) ──
+{
+  const db = freshDb();
+  const { parseOrderLineEdit } = await import('../../src/core/bridge/order-lifecycle-commands.ts');
+  const { parsePurchaseEdit } = await import('../../src/core/bridge/purchase-edit-commands.ts');
+  const nein = (fn: () => unknown): string => { try { fn(); return 'ANGENOMMEN'; } catch (e) { return String((e as Error).message ?? e); } };
+  const fremd = { photoMediaIds: ['m-fremd-1'] };
+  const roh = (extra: Record<string, unknown>) => ({ ...NEU('Fremd'), ...extra });
+  const faelle: Array<[string, () => unknown]> = [
+    ['purchases.create', () => cmd.parsePurchaseCreate({ supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE('Fremd', 1, 100, { newProduct: roh(fremd) })] })],
+    ['purchases.create (photoEmbedFrom)', () => cmd.parsePurchaseCreate({ supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE('Fremd', 1, 100, { newProduct: roh({ photoEmbedFrom: 'data:image/jpeg;base64,AAAA' }) })] })],
+    ['orders.create', () => cmd.parseOrderCreate({ customerId: 'cust-1', lines: [{ mode: 'new', quantity: 1, unitPrice: 100, newProduct: roh(fremd) }] })],
+    ['orders.update_line', () => parseOrderLineEdit({ orderId: 'o1', lineId: 'l1', expectedRevision: 1, newProduct: roh(fremd) })],
+    ['purchases.correct', () => parsePurchaseEdit({ purchaseId: 'p1', reason: 'x', expectedRevision: 1, addLines: [{ mode: 'new', quantity: 1, unitPrice: 100, newProduct: roh(fremd) }] }, true)],
+  ];
+  for (const [op, fn] of faelle) {
+    const m = nein(fn);
+    ok(m !== 'ANGENOMMEN' && /photoMediaIds|photoEmbedFrom|unknown field/i.test(m), `H ${op}: interne Medienfelder im Rumpf abgewiesen („${m.slice(0, 70)}")`);
+  }
+  // …und auch der ganze Auftrag schreibt dann nichts und verknüpft kein fremdes Medium.
+  const vorher = counts(db);
+  const r = await run(db, 8, { supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE('Fremd', 1, 100, { newProduct: roh(fremd) })] });
+  ok(!r.ok && counts(db) === vorher, `H der Auftrag mit eingeschleuster Medienkennung bucht nichts (${r.code})`);
+}
+
+// ── I Medienausfall am Primary: kein Rückfall auf den Base64-Weg ──
+{
+  const db = freshDb();
+  const { useAuthStore } = await import('../../src/stores/authStore.ts');
+  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
+  tauriState.prepareShouldThrow = true;
+  const vorher = counts(db);
+  const desk = await primary(() => purchaseHouse.createPurchaseOnPrimary({
+    supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', notes: '', staffId: '', paymentAmount: 0, paymentMethod: 'cash',
+    lines: [ZEILE('Ausfall', 1, 100, { newProduct: NEU('Ausfall', { images: [foto(71)] }) })],
+  } as never));
+  tauriState.prepareShouldThrow = false;
+  ok(!desk.ok && counts(db) === vorher && zahl(db, "SELECT COUNT(*) FROM products WHERE images LIKE '%data:%'") === 0,
+    `I Medienausfall am Primary: „Save Purchase" scheitert sichtbar (${desk.code.slice(0, 40)}) — kein Einkauf, und KEIN Rückfall in products.images`);
+  ok(base64Kopien(db) === 0, 'I …und keine Base64-Kopie in einem Changelog');
+}
+
+// ── J Rollback, dann derselbe Einkauf richtig: das liegengebliebene Objekt wird wiederverwendet, keine zweite Datei ──
+{
+  const db = freshDb();
+  const [f1] = await stage([foto(81)]);
+  const schlecht = await run(db, 91, { supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE('Retry', 1, 100, { newProduct: { ...NEU('Retry'), taxScheme: 'ZERO', stagingIds: [f1] }, variant: { anchorProductId: 'gibt-es-nicht' } })] });
+  const nachNein = [objekte(db), ohneLink(db), zahl(db, 'SELECT COUNT(*) FROM media_blob_generations')];
+  const gut = await run(db, 92, { supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE('Retry', 1, 100, { newProduct: { ...NEU('Retry'), stagingIds: [f1] } })] });
+  const pid = s(db, "SELECT id FROM products WHERE name = 'Retry'");
+  ok(!schlecht.ok && nachNein[0] === 1 && nachNein[1] === 1, `J nach dem Nein: 1 unverknüpftes Objekt liegt (nicht gelöscht) (${S(nachNein)})`);
+  ok(gut.ok && objekte(db) === 1 && ohneLink(db) === 0 && links(db, pid).length === 1 && zahl(db, 'SELECT COUNT(*) FROM media_blob_generations') === nachNein[2],
+    `J der neue Versuch nimmt DASSELBE Objekt (Inhaltskennung): keine zweite Datei, danach verknüpft (${objekte(db)}/${ohneLink(db)})`);
+}
+
+// ── K parallele Vorgänge: zwei PC2-Einkäufe mit demselben Foto gleichzeitig ──
+{
+  const db = freshDb();
+  const [f1] = await stage([foto(101)]);
+  const body = (name: string) => ({ supplierId: 'sup-1', purchaseDate: '2026-11-26', taxScheme: 'ZERO', lines: [ZEILE(name, 1, 100, { newProduct: { ...NEU(name), stagingIds: [f1] } })] });
+  const [a, b] = await Promise.all([run(db, 111, body('Par A')), run(db, 112, body('Par B'))]);
+  const pa = s(db, "SELECT id FROM products WHERE name = 'Par A'");
+  const pb = s(db, "SELECT id FROM products WHERE name = 'Par B'");
+  ok(a.ok && b.ok && objekte(db) === 1 && links(db, pa).length === 1 && links(db, pb).length === 1 && links(db, pa)[0] === links(db, pb)[0] && ohneLink(db) === 0,
+    `K beide gebucht, EIN Medienobjekt, je eine Verknüpfung, nichts unverknüpft (${a.code || 'ok'}/${b.code || 'ok'}, ${objekte(db)})`);
+  ok(unbalanced(db) === 0 && ap(db) === 200, `K beide Verbindlichkeiten richtig (${ap(db)})`);
+}
+
 // ── G Verdrahtung: VOR der Klammer, überall derselbe Baustein ──
 {
   const code = (x: string): string => x.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
