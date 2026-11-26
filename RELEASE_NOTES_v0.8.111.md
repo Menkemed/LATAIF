@@ -53,7 +53,7 @@ This version links supplier and client records more easily, and lets you buy a n
   - "Variant of existing" in purchases and Edit Purchase;
   - the new Karat & Color display, the combined search and the purchase detail line.
   Use these on the main computer, or update the second computer as well.
-- **Photos sent from a v0.8.101 second computer** (purchase, Edit Purchase, order) are stored on the main computer the new way, with the new sizes. The second computer itself still shows the old form.
+- **Photos sent from a v0.8.101 second computer** (purchase, Edit Purchase, order) are stored on the main computer the new way, with the new sizes. Checked: a v0.8.101 second computer shows these photos and can edit the item and add photos as before.
 - **Older items whose photo is still in the old format** (stored inside the database) cannot pass their photo to a variant; the form says so. "Merge photos" moves them first.
 - **Unchanged from v0.8.110:** all known limits listed there still apply.
 
