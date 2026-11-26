@@ -364,6 +364,11 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     getDatabase().run('UPDATE suppliers SET linked_customer_id = ?, updated_at = ? WHERE id = ?', [customerId, now, supplierId]);
     saveDatabase();
     trackUpdate('suppliers', supplierId, { linkedCustomerId: customerId });
+    // B2 — das Verknüpfen ist (wie das Lösen) ein Pflicht-Audit-Eintrag: scheitert er, gibt es auch die Verknüpfung nicht.
+    logAuditOrThrow({
+      module: 'Supplier', entityType: 'suppliers', entityId: supplierId, action: 'UPDATE', field: 'linked_customer_id',
+      oldValue: null, newValue: { customerId, supplierName: String(query('SELECT name FROM suppliers WHERE id = ?', [supplierId])[0]?.name ?? '') },
+    });
     get().loadSuppliers();
     return { supplier: get().getSupplier(supplierId)!, existing: false };
   },

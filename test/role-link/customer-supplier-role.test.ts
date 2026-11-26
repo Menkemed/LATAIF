@@ -458,8 +458,13 @@ const gegenparteien = (db: Db): string => all(db,
     'V2 die Forderung an den Kunden steht getrennt daneben');
   ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE (counterparty_type = 'CUSTOMER' AND counterparty_id = 'sL') OR (counterparty_type = 'SUPPLIER' AND counterparty_id = 'cL')") === 0,
     'V2 keine Buchung vertauscht Rolle und Kennung');
+  // B2 (v0.8.111) — das Verknüpfen hat seinen eigenen Pflicht-Audit-Eintrag (wie das Lösen).
+  const linkAudit = (): number => n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'suppliers' AND entity_id = 'sL' AND field_name = 'linked_customer_id' AND action_type = 'UPDATE'");
+  ok(linkAudit() === 1 && /"customerId":"cL"/.test(String(one(db, "SELECT new_value FROM audit_log WHERE entity_type = 'suppliers' AND entity_id = 'sL' AND field_name = 'linked_customer_id'"))),
+    `B2 Verknüpfen schreibt GENAU einen Audit-Eintrag linked_customer_id → cL (${linkAudit()})`);
   const again = await fern(() => md.runSupplierUpdate(deps(db), identity('74', 'suppliers.update'), { id: 'sL', linkedCustomerId: 'cL', linkedCustomerUpdatedAt: NOW }));
   ok(again.kind === 'ok' && again.value?.existing === true, 'V2 erneutes Verknüpfen ist ein No-op');
+  ok(linkAudit() === 1, 'B2 …und das No-op schreibt keinen zweiten Audit-Eintrag');
   raw('sQ', 'Quelle', null);
   ok(wirft(() => imHaus(() => useSupplierStore.getState().linkSupplierToCustomer('sQ', 'cL', NOW))) === 'CUSTOMER_ALREADY_SUPPLIER', 'V2 ein Kunde bekommt keine zweite Rolle per Verknüpfung');
   ok(wirft(() => imHaus(() => useSupplierStore.getState().linkSupplierToCustomer('sL', 'cM', NOW))) === 'SUPPLIER_ALREADY_LINKED', 'V2 eine fremd verknüpfte Rolle wird nicht umgehängt');

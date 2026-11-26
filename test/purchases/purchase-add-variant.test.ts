@@ -219,6 +219,14 @@ const codeOf = async (p: Promise<unknown>): Promise<string> => { try { await p; 
   const vorher = tabellen(db);
   const c1 = await codeOf(PH.createPurchaseOnPrimary(kauf(sup, [line(VARIANT_SPEC('18K White', '16'), 2600, { anchorProductId: anchor, pickMediaId: 'media-fremd' })]) as never));
   ok(c1 === 'MODEL_PHOTO_NOT_IN_MODEL' && tabellen(db) === vorher, `C1 Nein NACH der Anlage (fremdes Bild): kein Einkauf, kein Artikel, kein Los, keine Buchung, kein Modell (${c1})`);
+  // B5 (v0.8.111) — eigenes Foto UND das Bild des Originals: klar benannt, nicht als „Altformat"; nichts geschrieben.
+  const { setNewItemPhotoTestHook } = await import('../../src/core/media/new-item-photos.ts');
+  setNewItemPhotoTestHook({ enabled: true });
+  const pickB5 = M.activeGallery(anchor, 'branch-main')[0];
+  const eigenesFoto = `data:image/jpeg;base64,${Buffer.from(Uint8Array.from({ length: 40 }, (_, i) => (i * 13 + 7) & 0xff)).toString('base64')}`;
+  const cB5 = await codeOf(PH.createPurchaseOnPrimary(kauf(sup, [line(VARIANT_SPEC('18K White', '16', { images: [eigenesFoto] }), 2600, { anchorProductId: anchor, pickMediaId: pickB5 })]) as never));
+  setNewItemPhotoTestHook(null);
+  ok(cB5 === 'PRODUCT_MODEL_VARIANT_OWN_PHOTOS' && tabellen(db) === vorher, `B5 eigenes Foto + Bild des Originals: klare Absage, nichts geschrieben (${cB5})`);
   const c2 = await codeOf(PH.createPurchaseOnPrimary(kauf(sup, [line(VARIANT_SPEC('18K White', '16', { brand: 'Bulgari' }), 2600, { anchorProductId: anchor })]) as never));
   ok(c2 === 'PRODUCT_MODEL_INCOMPATIBLE' && tabellen(db) === vorher, `C2 passt nicht (andere Marke): nichts geschrieben (${c2})`);
   const c3 = await codeOf(PH.createPurchaseOnPrimary(kauf(sup, [line(VARIANT_SPEC('18K White', '16', { taxScheme: undefined }), 2600, { anchorProductId: anchor })]) as never));

@@ -331,6 +331,11 @@ export function attachNewVariantInHouse(productId: string, intent: VariantIntent
     : groupProductsInHouse({ productIds: [String(intent.anchorProductId), productId] }, ctx);
   let photoLinked = false;
   if (intent.pickMediaId) {
+    // B5 — eigene Fotos UND das Bild des Originals: das ist kein Altformat-Fall, sondern ein Widerspruch. Klar ablehnen
+    // (die Maske lässt es nicht zu; nur ein fremder Rumpf kann es schicken) — der Vorgang geht ganz zurück.
+    const eigene = query(`SELECT 1 FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND media_role = 'stock_image' AND deleted_at IS NULL LIMIT 1`, [productId]).length > 0
+      || legacyImages(query('SELECT images FROM products WHERE id = ?', [productId])[0]?.images) > 0;
+    if (eigene) nein('PRODUCT_MODEL_VARIANT_OWN_PHOTOS', 'This piece has its own photos — the photo of the original cannot be used as well. Keep one of them. Nothing was saved.');
     const updatedAt = String(query('SELECT updated_at FROM products WHERE id = ?', [productId])[0]?.updated_at ?? '');
     mergeModelPhotosInHouse({
       modelKey: g.modelKey, pickMediaId: intent.pickMediaId, detachOld: false,
