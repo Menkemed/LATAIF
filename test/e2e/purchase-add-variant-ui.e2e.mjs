@@ -43,6 +43,8 @@ const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
 const SERVER_DB = join(APP_DATA_DIR, 'lataif_sync_server.db');
 /** v0.8.111 MEDIA STORAGE — gemessene Bildgrößen je Fall (am Ende ausgegeben). */
 const MESSWERTE = [];
+/** v0.8.112 — je Varianten-Picker: erschien die Hover-Karte? */
+const HOVER = [];
 const SEED = join(process.cwd(), 'src-tauri', 'target', 'debug', 'examples', 'e2e_scope_seed.exe');
 const CLIENT_HOME = join(RUN, 'client-home');
 const CLIENT_APPDATA = join(CLIENT_HOME, 'Roaming');
@@ -268,7 +270,16 @@ async function varianteImEinkauf(c, idx, anchorId, { karat, size, weight, sale, 
   const r = [];
   r.push(await waehle(c, `[data-line-source="${idx}"]`, 'variant'));
   r.push((await warteBis(c, q('[data-variant-picker]'), 10000)) ? 'OK' : 'KEIN-PICKER');
-  r.push(await ssPick(c, 'Search collection...', anchorId));
+  // v0.8.112 — Hover-Karte: Liste öffnen, mit der echten Maus über den Eintrag fahren, die Karte (Foto/Preise/Attribute) erscheint.
+  r.push(await c.ev(`const l=[...document.querySelectorAll('[data-ss-trigger="Search collection..."]')]; const e=l[l.length-1]; if(!e) return 'KEIN-AUSLOESER'; e.click(); return 'OK';`));
+  r.push((await warteBis(c, `document.querySelector('[data-ss-option=${S(anchorId)}]')`, 10000)) ? 'OK' : 'KEIN-EINTRAG');
+  const punkt = await c.ev(`const e=document.querySelector('[data-ss-option=${S(anchorId)}]'); e.scrollIntoView({block:'nearest'}); const b=e.getBoundingClientRect(); return {x:b.x+b.width/2,y:b.y+b.height/2};`);
+  await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: punkt.x, y: punkt.y });
+  const karte = await warteBis(c, q('[data-hover-cost]'), 8000);
+  HOVER.push(karte);
+  r.push(karte ? 'OK' : 'KEINE-HOVER-KARTE');
+  r.push(await maus(c, `[data-ss-option=${S(anchorId)}]`));
+  await sleep(300);
   r.push((await warteBis(c, q('[data-variant-hint]'), 10000)) ? 'OK' : 'KEINE-MASKE');
   const vorbelegt = await c.ev(`return JSON.stringify({ brand: [...document.querySelectorAll('label')].find(l=>l.textContent.trim().startsWith('BRAND'))?.parentElement.querySelector('input')?.value,
     karat: (document.querySelector('[data-variant-karat-confirm] b')?.textContent || ''), tax: [...document.querySelectorAll('[data-variant-tax]')].some(b=>getComputedStyle(b).color==='rgb(15, 15, 16)') });`);
@@ -589,6 +600,7 @@ try {
   aufraeumen();
   await waitTestImageGone('lataif.exe').catch(() => null); await waitTestImageGone('lataif-e2e-client.exe').catch(() => null);
   try { rmSync(RUN, { recursive: true, force: true }); } catch { /* bleibt */ }
+  ok(HOVER.length >= 1 && HOVER.every(Boolean), `HOVER Varianten-Picker zeigt beim Überfahren die Artikelkarte (${HOVER.length}× geprüft)`);
   console.log(`\nPURCHASE-ADD-VARIANT UI: ${PASS} passed, ${FAIL} failed`);
   console.log('MESSWERTE ' + JSON.stringify(MESSWERTE));
   if (FAIL > 0) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
