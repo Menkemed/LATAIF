@@ -30,6 +30,21 @@ This version links supplier and client records more easily, and lets you buy a n
 - **Purchase lines** show a small detail line under the item name, for example "Bracelet · 16 · 18K White · 36.50 g" (watches: reference, size, material and year where available). It appears in New Purchase, Edit Purchase and Purchase Detail.
 - "New Item", "Existing" and Collections → "New Item" work as before.
 
+## Photo storage
+
+- **Photos of a new item in a purchase, in Edit Purchase and in an order** (new order item) now go straight into the photo storage, like photos in Collections, consignment, repairs and the phone.
+  - They get the same sizes as everywhere else: watches 60 KB, jewellery and accessories 30 KB, unknown category 60 KB; preview 10 KB. ID photos keep 100 KB / 20 KB.
+  - The photo is no longer stored inside the database, and no copy of it goes into the sync history of either computer. This keeps both databases from growing with every purchase photo.
+  - The item, its photos and the booking are still saved in one step. If the purchase is refused or fails, no item and no photo link is created.
+  - **A variant can take over the photo of an item you just bought**, right away.
+- Editing an older item whose photos are still in the old format, and the storage maintenance, now also use these sizes (before: 100 KB / 20 KB).
+- **Existing photos are not changed.** Pictures saved before this version keep their current size; nothing is converted, moved or deleted automatically.
+
+## Smaller corrections
+
+- Linking a supplier to a client now writes its own entry in the audit log, like unlinking already did.
+- A variant with its own photo that also asks for the photo of the original gets a clear message ("This piece has its own photos…") instead of a misleading "old format" message. Nothing is saved.
+
 **Database:** no change. No new table or column; Karat & Color uses the existing field.
 
 **Known limits:**
@@ -38,7 +53,8 @@ This version links supplier and client records more easily, and lets you buy a n
   - "Variant of existing" in purchases and Edit Purchase;
   - the new Karat & Color display, the combined search and the purchase detail line.
   Use these on the main computer, or update the second computer as well.
-- **Photos of a new purchase item** are first saved in the old format and moved to the photo storage right after saving (as before). Until then, a variant of that item cannot take over its photo; the form says so.
+- **Photos sent from a v0.8.101 second computer** (purchase, Edit Purchase, order) are stored on the main computer the new way, with the new sizes. The second computer itself still shows the old form.
+- **Older items whose photo is still in the old format** (stored inside the database) cannot pass their photo to a variant; the form says so. "Merge photos" moves them first.
 - **Unchanged from v0.8.110:** all known limits listed there still apply.
 
 **Before you update:**

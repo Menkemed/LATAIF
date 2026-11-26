@@ -36,7 +36,7 @@ import { PURCHASE_LINE_OPS } from '@/core/purchases/purchase-lines';
 import { PURCHASE_PRODUCT_FIELDS } from '@/core/products/embedded-product';
 import { parseVariantShape } from '@/core/products/product-models';
 import type { Product } from '@/core/models/types';
-import { CommercialPayloadError, mitFotos, parseSpec } from './commercial-commands';
+import { CommercialPayloadError, entwurfMitFotos, mitFotosVorab, parseSpec } from './commercial-commands';
 import { OP_PAGE_COST_CORRECTIONS_GET, OP_PURCHASE_EDIT_CHECK_GET } from './store-read-ops';
 
 export const OP_PURCHASES_UPDATE = PURCHASE_EDIT_OP.UPDATE;
@@ -276,6 +276,9 @@ export async function runPurchaseEdit(
       mediaId = img ? await ingestIdentityPhoto(img, owner.ownerType, { ownerId: owner.ownerId }) : null;
     } catch (e) { fotoFehler = e; }
   }
+  // v0.8.111 MEDIA STORAGE — die Fotos neuer Artikel VOR der Klammer in den Medienspeicher (ohne ihn wie bisher in der Klammer gelesen).
+  const vorab = req.request.addLines && req.addSpecs
+    ? await mitFotosVorab(req.addSpecs, stagingOwnerOf(identity), read, identity.branchId) : null;
   const outcome = await runRemoteCommand(deps, identity, async () => {
     if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
@@ -287,7 +290,7 @@ export async function runPurchaseEdit(
       const lines: PurchaseEditAddLine[] = [];
       for (let i = 0; i < request.addLines.length; i++) {
         const spec = req.addSpecs[i];
-        lines.push(spec ? { ...request.addLines[i], newProduct: await mitFotos(spec, owner, read) } : request.addLines[i]);
+        lines.push(spec ? { ...request.addLines[i], newProduct: await entwurfMitFotos(vorab, i, spec, owner, read) } : request.addLines[i]);
       }
       request.addLines = lines;
     }

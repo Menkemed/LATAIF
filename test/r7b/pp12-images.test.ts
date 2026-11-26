@@ -146,15 +146,16 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     && !/local: async \(\) => \{/.test(ms), 'PRIMARY Ausweisfoto anlegen/ändern — vor der Klammer');
   ok(/await ingestIdentityPhoto\(intent\.dataUrl/.test(is),
     'PRIMARY …und zwar über den Medienkern, nicht über einen zweiten Rechenweg');
-  ok(/normalizeSpecImages\(l\.newProduct\)[\s\S]*return runOnPrimary\(\(\) => createPurchaseInHouse\(/.test(code(src('src/core/purchases/purchase-house.ts'))), 'PRIMARY Einkauf „New Item"');
+  // v0.8.111 MEDIA STORAGE — statt des Spalten-Normalisierers der direkte Medienweg (prepareNewItemSpec), weiter VOR der Klammer.
+  ok(/prepareNewItemSpec\(l\.newProduct, fotoFiliale\)[\s\S]*return runOnPrimary\(\(\) => createPurchaseInHouse\(/.test(code(src('src/core/purchases/purchase-house.ts'))), 'PRIMARY Einkauf „New Item"');
   const oh = code(src('src/core/orders/order-house.ts'));
   // MEDIA-ORDER — der Entwurf des Sonderstücks geht in den Medienkern (aufnehmen VOR der Klammer,
   // verknüpfen INNERHALB); die Fotos NEUER ARTIKEL einer Auftragszeile gehen weiter ihren Weg.
-  ok(/normalizeSpecImages\(l\.newProduct\)/.test(oh)
+  ok(/prepareNewItemSpec\(l\.newProduct, fotoFiliale\)/.test(oh)
     // BILDSPEICHER (v0.8.104) — mit der Kategorie des Sonderstücks (Größenklasse); weiterhin VOR der Klammer.
     && /const \{ spec: customProductSpec, urls \} = ohneVorlagenbilder\(input\.customProductSpec\);\s*const referenceMediaIds = await ingestOrderPhotos\(urls, undefined, undefined, customProductSpec\?\.categoryId\);\s*return runOnPrimary\(/.test(oh),
   'PRIMARY Auftrag: neuer Artikel und Sonderstück-Entwurf');
-  ok(/const ready = req\.newProduct \? \{ \.\.\.req, newProduct: await normalizeSpecImages\(req\.newProduct\) \} : req;\s*return runOnPrimary\(\(\) => updateOrderLineInHouse\(ready, branchId\)/.test(code(src('src/core/orders/order-lifecycle-house.ts'))),
+  ok(/const ready = req\.newProduct \? \{ \.\.\.req, newProduct: await prepareNewItemSpec\(req\.newProduct, branchId\) \} : req;\s*return runOnPrimary\(\(\) => updateOrderLineInHouse\(ready, branchId\)/.test(code(src('src/core/orders/order-lifecycle-house.ts'))),
     'PRIMARY Positionsdialog: neuer Artikel');
 
   // PC2: der aufnehmende Rechner rechnet vor dem Ablegen (derselbe Normalisierer, dieselbe Anwendung).

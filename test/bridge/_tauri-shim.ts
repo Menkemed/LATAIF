@@ -50,6 +50,8 @@ export const tauriState = {
   /** Wenn gesetzt, scheitert das Lesen aus der Ablage. */
   readShouldThrow: false,
   calls: [] as string[],
+  /** v0.8.111 MEDIA STORAGE — die Größenklasse jeder Aufnahme (`media_prepare_stock_image`), in Aufrufreihenfolge. */
+  prepareProfiles: [] as Array<string | null>,
   reset(): void {
     this.staged.clear();
     this.discarded = [];
@@ -57,6 +59,7 @@ export const tauriState = {
     this.prepareShouldThrow = false;
     this.readShouldThrow = false;
     this.calls = [];
+    this.prepareProfiles = [];
   },
 };
 
@@ -146,6 +149,7 @@ export async function invoke<T = unknown>(
     }
     case 'media_prepare_stock_image': {
       if (tauriState.prepareShouldThrow) throw new Error('MEDIA_PREPARE_FAILED');
+      tauriState.prepareProfiles.push(a.sizeProfile == null ? null : String(a.sizeProfile));
       const bytes = Uint8Array.from(a.imageBytes as number[]);
       const scope = String(a.tenantScope);
       reqBytes.set(`${scope}::${String(a.ingestRequestId)}`, bytes);

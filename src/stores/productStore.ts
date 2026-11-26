@@ -11,6 +11,7 @@ import { assertNotBulkCategory, assertNotBulkSystemProduct, isBulkMetalProduct }
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
 import { scheduleNewItemMediaCutover } from '@/core/media/new-item-media';
+import { linkNewItemPhotos, type NewItemSpec } from '@/core/media/new-item-photos';
 import { nextSkuFrom, skuIsEmpty } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
@@ -970,6 +971,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
        (() => { try { return currentUserId(); } catch { return null; } })()]
     );
 
+    // v0.8.111 MEDIA STORAGE — schon aufgenommene Fotos (Einkauf, Edit Purchase, Auftrag): in DIESER Transaktion
+    // verknüpfen, `images` bleibt '[]'. Scheitert die Verknüpfung, gibt es auch den Artikel nicht.
+    const photoMediaIds = (data as NewItemSpec).photoMediaIds ?? [];
+    if (photoMediaIds.length > 0) {
+      try { linkNewItemPhotos(id, branchId, photoMediaIds); } catch (e) { db.run('DELETE FROM products WHERE id = ?', [id]); throw e; }
+    }
+
     saveDatabase();
     trackInsert('products', id, { brand: product.brand, name: product.name, categoryId: product.categoryId, purchasePrice: product.purchasePrice });
     eventBus.emit('product.created', 'product', id, { brand: product.brand, name: product.name });
@@ -977,6 +985,20 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // 2026-05-18: pHash entfernt — nur noch AI-Embedding wird async im Hintergrund
     // berechnet (2-5s, ~$0.001/Item). Ohne API-Key wird nichts mehr berechnet;
     // Duplicate-Detection greift dann nur auf SKU/Serial/Brand+Reference zurueck.
+    const embedFrom = (data as NewItemSpec).photoEmbedFrom;
+    if (photoMediaIds.length > 0 && embedFrom && isAiConfigured()) {
+      // Das Embedding wie bisher aus dem ersten Foto — die Vorlage reist nur flüchtig mit, gespeichert wird sie nie.
+      computeImageEmbedding(embedFrom)
+        .then(({ description, embedding }) => {
+          try {
+            getDatabase().run('UPDATE products SET image_description = ?, image_embedding = ? WHERE id = ?', [description, JSON.stringify(embedding), id]);
+            saveDatabase();
+            trackUpdate('products', id, { imageDescription: description, imageEmbedding: embedding });
+            get().loadProducts();
+          } catch (err) { console.warn('[productStore] embedding persist failed:', err); }
+        })
+        .catch(err => { console.warn('[productStore] embedding compute failed:', err); });
+    }
     if (product.images.length > 0) {
       // POST-PARITY R7B PP-12 — der „New Item"-Artikel (Einkauf, Auftrag) zieht mit seinen Fotos in den
       // Medienspeicher um, wie jeder andere Artikel: als NÄCHSTER Auftrag der Schreibreihenfolge, also

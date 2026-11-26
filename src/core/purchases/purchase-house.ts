@@ -25,7 +25,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useAuthStore } from '@/stores/authStore';
 import { paymentOpForPayload, requiredPermissionLabel, roleMayRunOp } from '@/core/bridge/command-permissions';
 import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
-import { normalizeSpecImages } from '@/core/media/record-image';
+import { prepareNewItemSpec } from '@/core/media/new-item-photos';
 import { adoptInboxPhotosToProduct } from './inbox-media';
 import { housePurchasePort, withAllocatedSkus, PURCHASE_LINE_OPS } from './purchase-lines';
 import { applyIdentityDocument, identitySourceOf, IdentityMediaError } from '@/core/identity/identity-media';
@@ -199,10 +199,11 @@ export async function createPurchaseOnPrimary(input: PurchaseCreateInput): Promi
       throw new PayablesRejected('PERMISSION_DENIED', `this account may not record a payment with purchases.create — it needs ${requiredPermissionLabel(zahlOp)} (save it without a payment)`);
     }
   }
-  // POST-PARITY R7B PP-12 — die Fotos eines neuen Artikels durch den EINEN Normalisierer, wie fern —
-  // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
+  // v0.8.111 MEDIA STORAGE — die Fotos eines neuen Artikels VOR der Klammer direkt in den Medienspeicher (Größenklasse
+  // aus size-profile.ts, EINE Normalisierung); verknüpft werden sie in der Klammer. Ohne Medienspeicher wie bisher.
   const lines: PurchaseCreateInput['lines'] = [];
-  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+  const fotoFiliale = currentBranchId();
+  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await prepareNewItemSpec(l.newProduct, fotoFiliale) } : l);
   // PURCHASE ADD VARIANT — die Modellregel fragt nach Benutzer und Rolle (Recht `products.edit`), wie beim Gruppieren.
   let userId = '';
   let role: string | null = null;
@@ -464,11 +465,12 @@ export async function editPurchaseOnPrimary(purchaseId: string, form: PurchaseEd
       identityPhoto = { mediaId: prepared.mediaId, alsoUpdatePerson: form.identityPhoto.alsoUpdatePerson === true };
     }
   }
-  // Teil 2 — die Fotos eines neuen Artikels durch DENSELBEN Normalisierer wie beim Anlegen, vor der Klammer.
+  // Teil 2 — v0.8.111 MEDIA STORAGE: die Fotos eines neuen Artikels wie beim Anlegen VOR der Klammer in den Medienspeicher.
   let addLines: PurchaseEditAddLine[] | undefined;
   if (form.addLines && form.addLines.length > 0) {
     addLines = [];
-    for (const l of form.addLines) addLines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+    const fotoFiliale = currentBranchId();
+    for (const l of form.addLines) addLines.push(l.newProduct ? { ...l, newProduct: await prepareNewItemSpec(l.newProduct, fotoFiliale) } : l);
   }
   const req: PurchaseEditRequest = {
     purchaseId, reason: form.reason, notes: form.notes, staffId: form.staffId, purchaseDate: form.purchaseDate,

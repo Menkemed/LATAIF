@@ -27,7 +27,7 @@ import { BusinessError, registerCommand, type CommandActor } from './command-reg
 import {
   assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, stagingOwnerOf,
 } from './remote-create-support';
-import { CommercialPayloadError, mitFotos, parseSpec, type StagingExtras } from './commercial-commands';
+import { CommercialPayloadError, entwurfMitFotos, mitFotosVorab, parseSpec, type StagingExtras } from './commercial-commands';
 import { EMBEDDED_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
 import type { Product } from '@/core/models/types';
 import { OrderActionRejected } from '@/core/orders/order-create';
@@ -288,11 +288,12 @@ export async function runOrderLineEdit(
   // POST-PARITY R7B PP-12 — die Fotos des Entwurfs landen in `products.images`: so gelesen, wie sie gespeichert werden.
   const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = req.newProduct?.stagingIds ?? [];
+  // v0.8.111 MEDIA STORAGE — die Fotos VOR der Klammer in den Medienspeicher (ohne ihn liest der Auftrag sie wie bisher selbst).
+  const vorab = req.newProduct ? await mitFotosVorab([req.newProduct], owner, read, identity.branchId) : null;
   const outcome = await runRemoteCommand(deps, identity, async () => {
     // Ein neuer Artikel entsteht in den Büchern dieses Rechners.
     assertHouseBranch(identity);
-    // Die Fotos des Entwurfs werden INNERHALB des Auftrags gelesen (eine Wiederholung liest sie nie wieder).
-    const newProduct = await mitFotos(req.newProduct, owner, read);
+    const newProduct = await entwurfMitFotos(vorab, 0, req.newProduct, owner, read);
     const r = urteil(() => updateOrderLineInHouse({ ...req, newProduct }, identity.branchId));
     return {
       orderId: r.orderId, lineId: r.lineId, productId: r.productId, createdProductId: r.createdProductId ?? null,

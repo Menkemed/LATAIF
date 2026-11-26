@@ -53,6 +53,7 @@ import {
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useProductStore } from '@/stores/productStore';
 import type { OrderStatus, Product } from '@/core/models/types';
+import { ingestNewItemPhotos, newItemPhotosDirect } from '@/core/media/new-item-photos';
 import {
   GOLD_KARATS, ORDER_CREATE_STATUSES, ORDER_LINE_SCHEMES, ORDER_MATERIAL_KINDS, ORDER_PAYMENT_METHODS,
   ORDER_QUOTE_SCHEMES, ORDER_TYPES, OrderActionRejected, assertOrderCreateValues, type OrderCreateInput,
@@ -267,6 +268,34 @@ export async function mitFotos(
   return { ...p.spec, images };
 }
 
+/**
+ * v0.8.111 MEDIA STORAGE — die Fotos der Entwürfe VOR der Klammer lesen und direkt in den Medienspeicher aufnehmen
+ * (`ingestNewItemPhotos`: Größenklasse aus size-profile.ts, eine Normalisierung, Kennung aus den Bytes). Der Handler
+ * läuft in der offenen Transaktion, der Ingest hat eigene durable Haltepunkte — er gehört davor. Ein Nein wird
+ * mitgenommen und IN der Klammer geworfen, damit eine Wiederholung die eingefrorene Antwort bekommt.
+ * `null` = kein Medienspeicher in diesem Fenster: dann liest der Auftrag die Fotos wie bisher selbst.
+ */
+export async function mitFotosVorab(
+  specs: ReadonlyArray<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>, owner: StagingOwner, read: StagedMediaReader, branchId: string,
+): Promise<{ specs: Array<Partial<Product> | undefined>; fehler?: undefined } | { fehler: unknown } | null> {
+  if (!newItemPhotosDirect()) return null;
+  try {
+    const out: Array<Partial<Product> | undefined> = [];
+    for (const p of specs) out.push(await ingestNewItemPhotos(await mitFotos(p, owner, read), branchId));
+    return { specs: out };
+  } catch (e) { return { fehler: e }; }
+}
+
+/** In der Klammer: der vorab aufgenommene Entwurf — oder wie bisher selbst gelesen. */
+export async function entwurfMitFotos(
+  vorab: Awaited<ReturnType<typeof mitFotosVorab>>, i: number,
+  p: { spec: Partial<Product>; stagingIds?: string[] } | undefined, owner: StagingOwner, read: StagedMediaReader,
+): Promise<Partial<Product> | undefined> {
+  if (vorab && 'fehler' in vorab && vorab.fehler !== undefined) throw vorab.fehler;
+  if (vorab && 'specs' in vorab) return vorab.specs[i];
+  return mitFotos(p, owner, read);
+}
+
 function num0(v: unknown, name: string): number {
   if (v === undefined || v === null) return 0;
   return money(v, name);
@@ -465,13 +494,15 @@ export async function runPurchaseCreate(
     ? await ingestStagedIdentity({ stagingId: idStaging, remove: false }, identity, { readStaged: read })
     : { mediaId: null, error: null };
   if (idStaging) staged.push(idStaging);
+  // v0.8.111 MEDIA STORAGE — die Artikelfotos VOR der Klammer in den Medienspeicher (eine abgewiesene Eingabe nimmt keines auf).
+  const vorab = purchaseCreateIssue(req) ? null : await mitFotosVorab(req.specs, owner, read, identity.branchId);
   const outcome = await runRemoteCommand(deps, identity, async () => {
     if (ausweis.error) throw ausweis.error;
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.
     assertHouseBranch(identity);
     const lines: Array<(typeof req.lines)[number]> = [];
     for (let i = 0; i < req.lines.length; i++) {
-      lines.push({ ...req.lines[i], newProduct: await mitFotos(req.specs[i], owner, read) });
+      lines.push({ ...req.lines[i], newProduct: await entwurfMitFotos(vorab, i, req.specs[i], owner, read) });
     }
     // Dieselbe Folge wie „Save Purchase" am Primary (`createPurchaseOnPrimary`): Lieferant, Artikel,
     // Entwürfe, Mitarbeiter, Auftrag und Inbox geprüft — dann die Hausfunktion: Belegnummer aus dem
@@ -984,13 +1015,15 @@ export async function runOrderCreate(
       referenceMediaIds = await ingestOrderPhotos(urls, undefined, undefined, req.finalSpec.spec?.categoryId);
     } catch (e) { fotoFehler = e; }
   }
+  // v0.8.111 MEDIA STORAGE — die Fotos neuer Artikel ebenfalls VOR der Klammer in den Medienspeicher.
+  const vorab = await mitFotosVorab(req.specs, owner, read, identity.branchId);
   const outcome = await runRemoteCommand(deps, identity, async () => {
     if (fotoFehler) throw fotoFehler;
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.
     assertHouseBranch(identity);
     const lines: Array<(typeof req.lines)[number]> = [];
     for (let i = 0; i < req.lines.length; i++) {
-      lines.push({ ...req.lines[i], newProduct: await mitFotos(req.specs[i], owner, read) });
+      lines.push({ ...req.lines[i], newProduct: await entwurfMitFotos(vorab, i, req.specs[i], owner, read) });
     }
     // Das Schema reist ohne Bilder — die hängen als Verknüpfungen am Auftrag, nicht in seiner Zeile.
     const input: OrderCreateInput = {

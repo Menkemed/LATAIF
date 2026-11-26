@@ -21,8 +21,8 @@ import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
 import { maus, mausText, waehle, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -41,6 +41,8 @@ const REAL_APPDATA = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roami
 const APP_DATA_DIR = join(REAL_APPDATA, IDENT);
 const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
 const SERVER_DB = join(APP_DATA_DIR, 'lataif_sync_server.db');
+/** v0.8.111 MEDIA STORAGE — gemessene Bildgrößen je Fall (am Ende ausgegeben). */
+const MESSWERTE = [];
 const SEED = join(process.cwd(), 'src-tauri', 'target', 'debug', 'examples', 'e2e_scope_seed.exe');
 const CLIENT_HOME = join(RUN, 'client-home');
 const CLIENT_APPDATA = join(CLIENT_HOME, 'Roaming');
@@ -188,14 +190,17 @@ async function ssPick(c, placeholder, optionId) {
   return r;
 }
 // Echtes Foto (übernommen aus r5e-order-purchase-parity): ein kleines PNG, über das Dateifeld gewählt.
-function writePhoto(file, farbe) {
-  const w = 96, h = 64;
+// v0.8.111 MEDIA STORAGE — mit `gross` ein großes, verrauschtes Foto (1600×1200, wie eine Kamera), damit die Größenklasse wirklich greifen muss.
+function writePhoto(file, farbe, gross = false) {
+  const w = gross ? 1600 : 96, h = gross ? 1200 : 64;
+  let seed = 12345; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed & 0xff; };
   const raw = Buffer.alloc((w * 3 + 1) * h);
   for (let y = 0; y < h; y++) {
     raw[y * (w * 3 + 1)] = 0;
     for (let x = 0; x < w; x++) {
       const o = y * (w * 3 + 1) + 1 + x * 3;
-      raw[o] = (x * 5) & 0xff; raw[o + 1] = (y * 7) & 0xff; raw[o + 2] = farbe;
+      if (gross) { raw[o] = ((x >> 2) + rnd()) & 0xff; raw[o + 1] = ((y >> 2) + rnd()) & 0xff; raw[o + 2] = (farbe + rnd()) & 0xff; }
+      else { raw[o] = (x * 5) & 0xff; raw[o + 1] = (y * 7) & 0xff; raw[o + 2] = farbe; }
     }
   }
   const crcTable = Array.from({ length: 256 }, (_, n) => {
@@ -229,6 +234,7 @@ async function fotoWaehlen(c, file) {
 }
 
 const PHOTO = join(RUN, 'pv-photo.png');
+const PHOTO_GROSS = join(RUN, 'pv-photo-gross.png');
 const JPEGS = "[...document.querySelectorAll('img')].filter(i=>/^data:image\\/jpeg/.test(i.src)).length";
 const c2price = (c) => c.ev(`const l=[...document.querySelectorAll('[data-purchase-edit-add-price]')]; const e=l[l.length-1]; if(!e) return 'KEIN-PREISFELD'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'2500'); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
 // Collections-Maske (übernommen aus article-variants-ui): Element per JS finden, mit der echten Maus/Tastatur bedienen.
@@ -471,7 +477,8 @@ try {
     r.push(await mausText(primary, '18K Rose'));
     r.push(await setByLabelPrefix(primary, 'SIZE', '14'));
     const vor = await primary.ev(`return ${JPEGS};`);
-    r.push(await fotoWaehlen(primary, PHOTO));
+    writePhoto(PHOTO_GROSS, 90, true);
+    r.push(await fotoWaehlen(primary, PHOTO_GROSS));
     r.push((await warteBis(primary, `${JPEGS} > ${vor}`, 15000)) ? 'OK' : 'KEIN-VORSCHAUBILD');
     await sleep(300);
     r.push(await mausText(primary, 'Use this Item'));
@@ -489,14 +496,29 @@ try {
     ok(alleOk(r) === 'OK' && !!einkaufsArtikel && dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM purchase_lines WHERE purchase_id = ? AND product_id = 'pv-c'", [pid])[0]?.n === 1,
       `6b PRIMARY New Item mit Foto + Existing-Zeile wie bisher gespeichert (${alleOk(r)})`);
     ok(/Bracelet · 14 · 18K Rose/.test(detail) && /Bracelet · 19 · 18K Rose/.test(detail), `6b Detailzeile unter dem Artikelnamen: New Item und Existing (${detail})`);
-    // v0.8.111 — PP-12: das Einkaufsfoto zieht nach dem Speichern in den Bildspeicher um; die Spalte wird ERST danach geleert.
+    // v0.8.111 MEDIA STORAGE — das Einkaufsfoto liegt SOFORT im Bildspeicher (kein Nachlauf): Spalte leer, Verknüpfung da.
     await spuelen(primary).catch(() => null);
-    const umgezogen = await warteAuf(() => {
-      const row = dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [einkaufsArtikel?.id])[0];
-      const links = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [einkaufsArtikel?.id])[0]?.n;
-      return row && row.images === '[]' && links >= 1;
-    }, 30000);
-    ok(umgezogen, '6b Einkaufsfoto in den Bildspeicher umgezogen (media_links vorhanden, products.images danach leer) — kein Bild fehlt');
+    const sofort = dbQ(BIZ_DB, "SELECT p.images AS images, p.category_id AS cat, (SELECT COUNT(*) FROM media_links l WHERE l.entity_type = 'product' AND l.entity_id = p.id AND l.deleted_at IS NULL) AS links FROM products p WHERE p.id = ?", [einkaufsArtikel?.id])[0];
+    ok(!!sofort && sofort.images === '[]' && sofort.links === 1 && einkaufsArtikel?.images === '[]',
+      `6b Einkaufsfoto direkt im Bildspeicher: Spalte schon beim Speichern leer, 1 Verknüpfung (${JSON.stringify(sofort)})`);
+    // Tatsächliche Dateigrößen (Hauptbild + Vorschau) gegen size-profile.ts — und die Dateien auf der Platte.
+    const MAIN30 = new Set(['cat-gold-jewelry', 'cat-branded-gold-jewelry', 'cat-original-gold-jewelry', 'cat-accessory']);
+    const grenze = MAIN30.has(String(sofort?.cat)) ? 30000 : 60000;
+    const gr = dbQ(BIZ_DB, `SELECT gm.byte_size AS main_b, gm.storage_key AS main_k, gt.byte_size AS thumb_b, gt.storage_key AS thumb_k
+        FROM media_links l JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+        JOIN media_blobs bm ON bm.tenant_id = o.tenant_id AND bm.blob_id = o.master_blob_id
+        JOIN media_blob_generations gm ON gm.tenant_id = bm.tenant_id AND gm.blob_id = bm.blob_id AND gm.generation_no = bm.current_generation_no
+        JOIN media_variants v ON v.tenant_id = o.tenant_id AND v.media_id = o.media_id AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+        JOIN media_blobs bt ON bt.tenant_id = v.tenant_id AND bt.blob_id = v.blob_id
+        JOIN media_blob_generations gt ON gt.tenant_id = bt.tenant_id AND gt.blob_id = bt.blob_id AND gt.generation_no = bt.current_generation_no
+       WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL`, [einkaufsArtikel?.id])[0];
+    const platte = (k) => { try { return statSync(join(dirname(BIZ_DB), 'media', ...String(k).split('/'))).size; } catch { return -1; } };
+    MESSWERTE.push({ fall: '6b Primary-Einkauf', kategorie: sofort?.cat, grenze, haupt: gr?.main_b, vorschau: gr?.thumb_b, hauptDatei: platte(gr?.main_k), vorschauDatei: platte(gr?.thumb_k), foto: statSync(PHOTO_GROSS).size });
+    ok(!!gr && gr.main_b <= grenze && gr.thumb_b <= 10000 && platte(gr.main_k) === gr.main_b && platte(gr.thumb_k) === gr.thumb_b,
+      `6b Größenklasse eingehalten: Hauptbild ${gr?.main_b} B ≤ ${grenze}, Vorschau ${gr?.thumb_b} B ≤ 10000, Dateien auf der Platte gleich groß (${platte(gr?.main_k)}/${platte(gr?.thumb_k)})`);
+    const b64 = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM sync_changelog WHERE data LIKE '%data:image%'")[0]?.n;
+    const b64srv = dbQ(SERVER_DB, "SELECT COUNT(*) AS n FROM sync_changelog WHERE data LIKE '%data:image%'")[0]?.n;
+    ok(b64 === 0 && b64srv === 0, `6b keine Base64-Kopie im lokalen (${b64}) und im Server-Changelog (${b64srv})`);
 
     // 6c PC2: Edit Purchase → Add variant of existing
     await spuelen(primary).catch(() => null);
@@ -504,7 +526,8 @@ try {
     await warteBis(client, q('[data-purchase-edit-add-variant]'), 45000);
     const e = [await maus(client, '[data-purchase-edit-add-variant]')];
     e.push((await warteBis(client, q('[data-variant-picker]'), 10000)) ? 'OK' : 'KEIN-PICKER');
-    e.push(await ssPick(client, 'Search collection...', fotoArtikel));
+    // v0.8.111 MEDIA STORAGE — Original ist der GERADE GEKAUFTE Artikel (6b): sein Foto ist sofort übernehmbar, ohne Nachlauf.
+    e.push(await ssPick(client, 'Search collection...', einkaufsArtikel?.id));
     e.push((await warteBis(client, q('[data-variant-hint]'), 10000)) ? 'OK' : 'KEINE-MASKE');
     e.push(await setByLabelPrefix(client, 'SIZE', '20'));
     e.push(await setByLabelPrefix(client, 'SALE PRICE', '3100'));
@@ -523,13 +546,14 @@ try {
     if (!gespeichert) console.log('      Edit: ' + await client.ev("return (document.body.innerText.match(/could not[^\\n]*|New line[^\\n]*|locked[^\\n]*|Only the owner[^\\n]*|Nothing was[^\\n]*/i)||[''])[0];"));
     const neu = dbQ(BIZ_DB, "SELECT id FROM products WHERE json_extract(attributes, '$.size') = '20'")[0]?.id;
     const neuMedium = neu ? dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order LIMIT 1", [neu])[0]?.m : null;
-    ok(alleOk(e) === 'OK' && gespeichert && !!neu && !!modelOf(neu) && modelOf(neu) === modelOf(fotoArtikel)
+    ok(alleOk(e) === 'OK' && gespeichert && !!neu && !!modelOf(neu) && modelOf(neu) === modelOf(einkaufsArtikel?.id)
       && dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM purchase_lines WHERE purchase_id = ? AND product_id = ?', [pid, neu])[0]?.n === 1,
-      `6c PC2 Edit Purchase → „Add variant of existing": Zeile DIESES Einkaufs, Modell mit dem Foto-Original (${alleOk(e)})`);
+      `6c PC2 Edit Purchase → „Add variant of existing": Zeile DIESES Einkaufs, Modell mit dem gerade gekauften Original (${alleOk(e)})`);
     // Keine neue Datei FÜR DIE VARIANTE: alle ihre Bildverweise zeigen auf Medien, die es vor der Bearbeitung schon gab.
-    const eigene = neu ? dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links l JOIN media_objects o ON o.media_id = l.media_id WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL AND l.media_id != ?", [neu, medium])[0]?.n : -1;
-    ok(!!neuMedium && neuMedium === medium && eigene === 0,
-      `6c echtes Foto übernommen: dasselbe Medium wie das Original (${neuMedium === medium}), kein eigenes neues Medium (${eigene})`);
+    const eigene = neu ? dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links l JOIN media_objects o ON o.media_id = l.media_id WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL AND l.media_id != ?", [neu, dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order LIMIT 1", [einkaufsArtikel?.id])[0]?.m])[0]?.n : -1;
+    const kaufMedium = dbQ(BIZ_DB, "SELECT media_id AS m FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order LIMIT 1", [einkaufsArtikel?.id])[0]?.m;
+    ok(!!neuMedium && neuMedium === kaufMedium && eigene === 0,
+      `6c SOFORT nach dem Einkauf: das Einkaufsfoto als Bild der Variante übernommen — dasselbe Medium (${neuMedium === kaufMedium}), kein eigenes neues Medium (${eigene})`);
   }
 
   // ── 7 Kombinierte Suche „Cartier Love WG" und Detailzeile in Purchase Detail ──
@@ -566,5 +590,6 @@ try {
   await waitTestImageGone('lataif.exe').catch(() => null); await waitTestImageGone('lataif-e2e-client.exe').catch(() => null);
   try { rmSync(RUN, { recursive: true, force: true }); } catch { /* bleibt */ }
   console.log(`\nPURCHASE-ADD-VARIANT UI: ${PASS} passed, ${FAIL} failed`);
+  console.log('MESSWERTE ' + JSON.stringify(MESSWERTE));
   if (FAIL > 0) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 }

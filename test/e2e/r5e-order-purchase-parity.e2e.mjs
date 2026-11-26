@@ -18,7 +18,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killTestImage, tasklistTestImage, testProcesses, closeTestWindow } from './_e2e-process.mjs';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -213,14 +213,17 @@ function insert(db, tabelle, werte) {
     .run(...nutzbar.map((k) => daten[k]));
 }
 
-function writePhoto(file, farbe) {
-  const w = 96, h = 64;
+// v0.8.111 MEDIA STORAGE — ein großes, verrauschtes Foto (1600×1200 wie eine Kamera): die Größenklasse muss wirklich greifen.
+function writePhoto(file, farbe, gross = true) {
+  const w = gross ? 1600 : 96, h = gross ? 1200 : 64;
+  let seed = 777; const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed & 0xff; };
   const raw = Buffer.alloc((w * 3 + 1) * h);
   for (let y = 0; y < h; y++) {
     raw[y * (w * 3 + 1)] = 0;
     for (let x = 0; x < w; x++) {
       const o = y * (w * 3 + 1) + 1 + x * 3;
-      raw[o] = (x * 5) & 0xff; raw[o + 1] = (y * 7) & 0xff; raw[o + 2] = farbe;
+      if (gross) { raw[o] = ((x >> 2) + rnd()) & 0xff; raw[o + 1] = ((y >> 2) + rnd()) & 0xff; raw[o + 2] = (farbe + rnd()) & 0xff; }
+      else { raw[o] = (x * 5) & 0xff; raw[o + 1] = (y * 7) & 0xff; raw[o + 2] = farbe; }
     }
   }
   const crcTable = Array.from({ length: 256 }, (_, n) => {
@@ -791,6 +794,32 @@ try {
     ok(await warteAuf(() => (dbQ(BIZ_DB, 'SELECT status FROM order_lines WHERE id = ?', [lid])[0] || {}).status === 'ARRIVED'), 'B2B die Position ist angekommen');
     ok(zahl('SELECT COUNT(*) AS n FROM purchase_lines WHERE source_order_line_id = ?', [lid]) === 1
       && zahl('SELECT COUNT(*) AS n FROM purchases WHERE source_order_id = ?', [pc2Normal.id]) === 1, 'B2B Einkauf und Position sind verknuepft');
+  }
+
+  // ── v0.8.111 MEDIA STORAGE: tatsächliche Bildgrößen, keine Base64-Kopien, keine Waisen ──
+  {
+    const MAIN30 = new Set(['cat-gold-jewelry', 'cat-branded-gold-jewelry', 'cat-original-gold-jewelry', 'cat-accessory']);
+    const bilder = dbQ(BIZ_DB, `SELECT p.name AS name, p.category_id AS cat, gm.byte_size AS main_b, gm.storage_key AS main_k, gt.byte_size AS thumb_b, gt.storage_key AS thumb_k
+        FROM media_links l JOIN products p ON p.id = l.entity_id
+        JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+        JOIN media_blobs bm ON bm.tenant_id = o.tenant_id AND bm.blob_id = o.master_blob_id
+        JOIN media_blob_generations gm ON gm.tenant_id = bm.tenant_id AND gm.blob_id = bm.blob_id AND gm.generation_no = bm.current_generation_no
+        JOIN media_variants v ON v.tenant_id = o.tenant_id AND v.media_id = o.media_id AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+        JOIN media_blobs bt ON bt.tenant_id = v.tenant_id AND bt.blob_id = v.blob_id
+        JOIN media_blob_generations gt ON gt.tenant_id = bt.tenant_id AND gt.blob_id = bt.blob_id AND gt.generation_no = bt.current_generation_no
+       WHERE l.entity_type = 'product' AND l.media_role = 'stock_image' AND l.deleted_at IS NULL`);
+    const platte = (k) => { try { return statSync(join(APP_DATA_DIR, 'media', ...String(k).split('/'))).size; } catch { return -1; } };
+    const zuGross = bilder.filter((b) => b.main_b > (MAIN30.has(String(b.cat)) ? 30000 : 60000) || b.thumb_b > 10000 || platte(b.main_k) !== b.main_b || platte(b.thumb_k) !== b.thumb_b);
+    console.log('MESSWERTE ' + S({ foto: statSync(PHOTO).size, bilder: bilder.map((b) => ({ name: b.name, cat: b.cat, haupt: b.main_b, vorschau: b.thumb_b })) }));
+    ok(bilder.length >= 3 && zuGross.length === 0,
+      `BILDSPEICHER ${bilder.length} Artikelbilder (Primary + PC2, Auftrag + Einkauf) in der Größenklasse, Dateien auf der Platte gleich groß (${S(zuGross)})`);
+    const b64 = zahl("SELECT COUNT(*) AS n FROM sync_changelog WHERE data LIKE '%data:image%'");
+    const b64srv = (dbQ(SERVER_DB, "SELECT COUNT(*) AS n FROM sync_changelog WHERE data LIKE '%data:image%'")[0] || {}).n;
+    const spalte = zahl("SELECT COUNT(*) AS n FROM products WHERE images LIKE '%data:%'");
+    ok(b64 === 0 && b64srv === 0 && spalte === 0, `BILDSPEICHER keine Base64-Kopie: Changelog Primary ${b64}, Server ${b64srv}, products.images ${spalte}`);
+    const waisen = zahl("SELECT COUNT(*) AS n FROM media_links l WHERE l.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM media_objects o WHERE o.tenant_id = l.tenant_id AND o.media_id = l.media_id)");
+    const doppelt = zahl("SELECT COUNT(*) AS n FROM (SELECT stored_blob_hash FROM media_blob_generations WHERE gen_status = 'available' GROUP BY tenant_id, stored_blob_hash HAVING COUNT(*) > 1)");
+    ok(waisen === 0 && doppelt === 0, `BILDSPEICHER keine verwaiste Verknüpfung (${waisen}), keine doppelte Datei (${doppelt})`);
   }
 
   // ── Der Client besitzt weiterhin nichts ────────────────────────────────

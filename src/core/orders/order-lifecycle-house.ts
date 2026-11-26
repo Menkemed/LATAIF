@@ -39,7 +39,7 @@ import type { Product } from '@/core/models/types';
 import {
   EMBEDDED_PRODUCT_FIELDS, EmbeddedProductRejected, checkEmbeddedProduct, pickProductSpec, stageSpecImages,
 } from '@/core/products/embedded-product';
-import { normalizeSpecImages } from '@/core/media/record-image';
+import { prepareNewItemSpec } from '@/core/media/new-item-photos';
 import { OrderActionRejected } from './order-create';
 import { assertOrderCostsBooked, cancelWouldStockPiece } from './order-cost-booking';
 import { planOrderEdit } from './order-edit';
@@ -553,8 +553,7 @@ export async function markOrderLineOrderedOnPrimary(req: OrderLineOrderedRequest
 
 export async function updateOrderLineOnPrimary(req: OrderLineEditRequest): Promise<OrderLineEditResult> {
   const branchId = primaryBranch('editing an order line');
-  // POST-PARITY R7B PP-12 — die Fotos eines neuen Artikels durch den EINEN Normalisierer, wie fern —
-  // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
-  const ready = req.newProduct ? { ...req, newProduct: await normalizeSpecImages(req.newProduct) } : req;
+  // v0.8.111 MEDIA STORAGE — die Fotos eines neuen Artikels VOR der Klammer direkt in den Medienspeicher.
+  const ready = req.newProduct ? { ...req, newProduct: await prepareNewItemSpec(req.newProduct, branchId) } : req;
   return runOnPrimary(() => updateOrderLineInHouse(ready, branchId), frischLesen);
 }

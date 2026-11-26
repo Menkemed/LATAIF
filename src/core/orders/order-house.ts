@@ -18,7 +18,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import type { Order, Product } from '@/core/models/types';
-import { normalizeSpecImages } from '@/core/media/record-image';
+import { prepareNewItemSpec } from '@/core/media/new-item-photos';
 import { OrderActionRejected, planOrderCreate, type OrderCreateInput, type OrderCreatePort } from './order-create';
 import { planOrderEdit, orderEditInput, type OrderEditInput } from './order-edit';
 import { updateOrderDatesInHouse, type OrderDatesInput } from './order-dates';
@@ -146,10 +146,11 @@ export function updateOrderInHouse(id: string, input: OrderEditInput, branchId: 
 
 /** „Save Order" am Primary. */
 export async function createOrderOnPrimary(input: OrderCreateInput): Promise<OrderCreated> {
-  // POST-PARITY R7B PP-12 — Fotos neuer Artikel durch den EINEN Normalisierer (≤ 100 000 B), wie
-  // fern — vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
+  // v0.8.111 MEDIA STORAGE — Fotos neuer Artikel VOR der Klammer direkt in den Medienspeicher (Größenklasse aus
+  // size-profile.ts); verknüpft in der Klammer. Ohne Medienspeicher wie bisher (≤ 100 000 B in die Spalte).
   const lines: OrderCreateInput['lines'] = [];
-  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+  const fotoFiliale = currentBranchId();
+  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await prepareNewItemSpec(l.newProduct, fotoFiliale) } : l);
   // MEDIA-ORDER — die Vorlage des Sonderstücks geht in den Medienkern: aufnehmen VOR der Klammer
   // (Rust normalisiert, prüft, veröffentlicht), verknüpfen INNERHALB. Ins Schema kommt sie nicht
   // mehr — der Auftrag hält keine Bytes.

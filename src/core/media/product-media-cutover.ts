@@ -24,7 +24,7 @@ import type { FinalizeResult } from './coordinator.ts';
 import type { IngestAndFinalizeInput } from './orchestrator.ts';
 import { parseLegacyImages } from './product-media-resolver.ts';
 import { toIngestRequestId } from './ingest-request-id.ts';
-import { SIZE_PROFILE_NORM_PARAMS, type MediaSizeProfile } from './size-profile.ts';
+import { SIZE_PROFILE_NORM_PARAMS, sizeProfileFor, type MediaSizeProfile } from './size-profile.ts';
 
 // ── error contract ──────────────────────────────────────────────────────────
 
@@ -102,7 +102,7 @@ export interface ProductMediaCutoverDeps {
   decodeLegacyImage?: (src: string) => DecodedLegacyImage;
   /** The canonical request hash for the input bytes. Defaults to a client
    *  mirror of the Rust `canonical_request_hash`. */
-  computeRequestHash?: (bytes: Uint8Array, scope: string) => Promise<string>;
+  computeRequestHash?: (bytes: Uint8Array, scope: string, profile?: MediaSizeProfile) => Promise<string>;
 }
 
 const DEFAULT_ROLE = 'stock_image';
@@ -115,7 +115,7 @@ export class ProductMediaCutoverService {
   private readonly branchId: string;
   private readonly role: string;
   private readonly decode: (src: string) => DecodedLegacyImage;
-  private readonly hashOf: (bytes: Uint8Array, scope: string) => Promise<string>;
+  private readonly hashOf: (bytes: Uint8Array, scope: string, profile?: MediaSizeProfile) => Promise<string>;
 
   constructor(deps: ProductMediaCutoverDeps) {
     if (!deps.tenantId || !deps.branchId) {
@@ -150,6 +150,8 @@ export class ProductMediaCutoverService {
    */
   async ensureProductMediaCutover(productId: string): Promise<CutoverResult> {
     const db = this.deps.dbProvider();
+    // BILDSPEICHER — dieselbe Größenklasse wie jede andere Artikelaufnahme (size-profile.ts).
+    const sizeProfile = this.sizeProfileOf(db, productId);
     const legacyRaw = this.legacyImagesValue(db, productId);
     const parsed = parseLegacyImages(legacyRaw);
     if (!parsed.ok) {
@@ -192,7 +194,7 @@ export class ProductMediaCutoverService {
     const expected: FinalizeResult[] = [];
     for (let i = 0; i < decoded.length; i++) {
       const bytes = decoded[i].bytes;
-      const requestHash = await this.hashOf(bytes, this.tenantId);
+      const requestHash = await this.hashOf(bytes, this.tenantId, sizeProfile);
       const input: IngestAndFinalizeInput = {
         tenantId: this.tenantId,
         branchId: this.branchId,
@@ -205,6 +207,7 @@ export class ProductMediaCutoverService {
         isPrimary: i === 0,
         sortOrder: i,
         imageBytes: bytes,
+        sizeProfile,
       };
       try {
         expected.push(await this.deps.orchestrator.ingestAndFinalizeStockImage(input));
@@ -300,6 +303,7 @@ export class ProductMediaCutoverService {
     productId: string,
     images: Array<Uint8Array | DecodedLegacyImage>,
   ): Promise<FinalizeResult[]> {
+    const sizeProfile = this.sizeProfileOf(this.deps.dbProvider(), productId);
     if (images.length === 0) return [];
 
     // Product durability BEFORE the first publish. If the row is not on disk
@@ -321,7 +325,7 @@ export class ProductMediaCutoverService {
       const raw = images[k];
       const bytes = raw instanceof Uint8Array ? raw : raw.bytes;
       const slot = base + k;
-      const requestHash = await this.hashOf(bytes, this.tenantId);
+      const requestHash = await this.hashOf(bytes, this.tenantId, sizeProfile);
       const input: IngestAndFinalizeInput = {
         tenantId: this.tenantId,
         branchId: this.branchId,
@@ -334,6 +338,7 @@ export class ProductMediaCutoverService {
         isPrimary: slot === 0,
         sortOrder: slot,
         imageBytes: bytes,
+        sizeProfile,
       };
       try {
         out.push(await this.deps.orchestrator.ingestAndFinalizeStockImage(input));
@@ -362,11 +367,12 @@ export class ProductMediaCutoverService {
     productId: string,
     images: Array<Uint8Array | DecodedLegacyImage>,
   ): Promise<FinalizeResult[]> {
+    const sizeProfile = this.sizeProfileOf(this.deps.dbProvider(), productId);
     const out: FinalizeResult[] = [];
     for (let i = 0; i < images.length; i++) {
       const raw = images[i];
       const bytes = raw instanceof Uint8Array ? raw : raw.bytes;
-      const requestHash = await this.hashOf(bytes, this.tenantId);
+      const requestHash = await this.hashOf(bytes, this.tenantId, sizeProfile);
       const input: IngestAndFinalizeInput = {
         tenantId: this.tenantId,
         branchId: this.branchId,
@@ -379,6 +385,7 @@ export class ProductMediaCutoverService {
         isPrimary: i === 0,
         sortOrder: i,
         imageBytes: bytes,
+        sizeProfile,
       };
       try {
         out.push(await this.deps.orchestrator.ingestAndFinalizeStockImage(input));
@@ -451,6 +458,22 @@ export class ProductMediaCutoverService {
    * JOIN is the tenant binding and is not optional (a foreign scope reads
    * `undefined`, never another tenant's column).
    */
+  /** BILDSPEICHER — die Größenklasse des Artikels aus SEINER Kategorie (size-profile.ts ist die eine Regel). */
+  private sizeProfileOf(db: RawDb, productId: string): MediaSizeProfile {
+    // Ohne lesbare Kategorie gilt die sichere größere Klasse (60 KB) — dieselbe Regel wie „Unknown Category".
+    let r: Record<string, unknown> | null = null;
+    try { r = firstRow(
+      db,
+      `SELECT p.category_id AS category_id
+         FROM products p
+         JOIN branches b ON b.id = p.branch_id AND b.tenant_id = $t
+        WHERE p.id = $p AND p.branch_id = $br`,
+      { $t: this.tenantId, $p: productId, $br: this.branchId },
+    ); } catch { r = null; }
+    const cat = r && typeof r.category_id === 'string' ? r.category_id : null;
+    return sizeProfileFor({ categoryId: cat, role: this.role });
+  }
+
   private legacyImagesValue(db: RawDb, productId: string): unknown {
     const r = firstRow(
       db,

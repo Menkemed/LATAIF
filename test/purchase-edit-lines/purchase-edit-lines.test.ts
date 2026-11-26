@@ -828,8 +828,11 @@ const zustand = (db: Db): string => S({
   ok(/editPurchaseInHouse\(req, \{ \.\.\.localHouseCtx\(\), role: editRole \}, expectedRevision, PURCHASE_LINE_OPS\)/.test(ph) && /stageSpecImages\(pickProductSpec\(l\.newProduct, PURCHASE_PRODUCT_FIELDS\), stage\)/.test(ph),
     'M Primary: dieselbe Zeilenfolge; PC2: Fotos vorab in die Ablage');
   const pc = src('src/core/bridge/purchase-edit-commands.ts');
-  ok(/editPurchaseInHouse\(request, ctx, req\.expectedRevision, PURCHASE_LINE_OPS\)/.test(pc) && /mitFotos\(spec, owner, read\)/.test(pc),
-    'M Fernbefehl: dieselbe Zeilenfolge, Fotos in der Klammer gelesen');
+  // v0.8.111 MEDIA STORAGE — die Fotos werden VOR der Klammer gelesen und in den Medienspeicher aufgenommen; in der Klammer
+  // nur noch der vorab aufgenommene Entwurf (ohne Medienspeicher wie bisher selbst gelesen).
+  ok(/editPurchaseInHouse\(request, ctx, req\.expectedRevision, PURCHASE_LINE_OPS\)/.test(pc) && /entwurfMitFotos\(vorab, i, spec, owner, read\)/.test(pc)
+    && pc.indexOf('mitFotosVorab(') < pc.indexOf('runRemoteCommand(deps, identity, async () => {\n    if (fotoFehler) throw fotoFehler;'.replace(/\n/g, pc.includes('\r\n') ? '\r\n' : '\n')),
+    'M Fernbefehl: dieselbe Zeilenfolge, Fotos VOR der Klammer aufgenommen');
   const manifest = JSON.parse(src('src/core/sync/sync-business-schema.json')) as { tables: Record<string, { allowed_operations: string[] }> };
   ok(S(manifest.tables.purchase_lines.allowed_operations) === S(['insert', 'update', 'delete']), 'M Abgleichvertrag: eine Einkaufszeile darf gelöscht werden');
   const ps = src('src/stores/purchaseStore.ts');

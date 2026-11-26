@@ -31,7 +31,18 @@ export function pickProductSpec(spec: Partial<Product> | undefined, fields: read
     const v = (spec as Record<string, unknown>)[f];
     if (v !== undefined) out[f] = v;
   }
-  return out as Partial<Product>;
+  return keepNewItemPhotos(spec, out) as Partial<Product>;
+}
+
+/**
+ * v0.8.111 MEDIA STORAGE — die schon aufgenommenen Fotos eines Entwurfs (`photoMediaIds`, flüchtig `photoEmbedFrom`)
+ * reisen durch Auswahl und Prüfung mit. Gesetzt werden sie NUR am Primary nach der Aufnahme; ein Client-Rumpf kann
+ * sie nicht tragen (`parseSpec` lässt nur die Felder der Maske zu).
+ */
+export function keepNewItemPhotos<T extends Record<string, unknown>>(from: unknown, to: T): T {
+  const f = (from ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(f.photoMediaIds) || f.photoMediaIds.length === 0) return to;
+  return { ...to, photoMediaIds: [...f.photoMediaIds], ...(typeof f.photoEmbedFrom === 'string' ? { photoEmbedFrom: f.photoEmbedFrom } : {}) };
 }
 
 export class EmbeddedProductRejected extends Error {
@@ -65,7 +76,7 @@ export function checkEmbeddedProduct(spec: Partial<Product>, port: EmbeddedProdu
     throw new EmbeddedProductRejected(r.code, r.message);
   }
   const { sku, ...rest } = plan.data;
-  return sku ? { ...rest, sku } : rest;
+  return keepNewItemPhotos(spec, (sku ? { ...rest, sku } : rest) as Record<string, unknown>) as Partial<Product>;
 }
 
 /**
