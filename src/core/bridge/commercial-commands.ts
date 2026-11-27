@@ -676,7 +676,8 @@ export async function runConsignmentCreate(
       const hits = useProductStore.getState().findPossibleDuplicates({
         brand: req.product.brand, name: req.product.name, categoryId: req.product.categoryId,
         sku: req.product.sku, attributes: req.product.attributes,
-      } as never);
+      } as never, undefined, { forCreate: true }).filter((h) => h.hard);
+      // v0.8.113 — wie am Bildschirm: nur ein sicheres Signal (SKU, Seriennummer, Marke + Referenz/Modellnummer) fragt nach.
       if (hits.length > 0) {
         throw new CommandRejected(
           'POSSIBLE_DUPLICATE',

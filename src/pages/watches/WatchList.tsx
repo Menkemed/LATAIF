@@ -13,7 +13,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
-import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { buildBatchTagsZpl, tagProblem } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
@@ -210,6 +210,9 @@ export function WatchList() {
   // Duplicate Detection — Matches werden gefüllt, wenn handleCreate ein
   // mögliches Duplikat erkennt; User entscheidet "Cancel" oder "Create anyway".
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
+  const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
+  const [duplicateCompare, setDuplicateCompare] = useState(false);
   // Live-Duplicate-Check beim Tippen — Debounce 800ms. Refs verhindern
   // Wiederöffnen für dieselbe Eingabe nach Cancel.
   const lastCheckedFp = useRef('');
@@ -291,7 +294,7 @@ export function WatchList() {
   // Reset wenn das Modal gar nicht offen ist (showNew = false).
   const fp = duplicateFingerprint(form);
   useEffect(() => {
-    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; setDuplicateHints([]); return; }
     if (duplicateMatches.length > 0) return;
     if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim() && !nameFromAttributes(form.attributes)) return;
     if (fp === lastCheckedFp.current) return;
@@ -299,8 +302,9 @@ export function WatchList() {
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
       // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind beim „Add variant" erwartet ähnlich: keine Warnung (wie beim Speichern).
-      const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey)));
-      if (possible.length > 0) setDuplicateMatches(possible);
+      const { hard, soft } = splitDuplicates(findPossibleDuplicates(form, undefined, { forCreate: true }).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey))));
+      setDuplicateHints(soft);
+      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
     }, 800);
     return () => clearTimeout(t);
   }, [fp, showNew, duplicateMatches.length, form, findPossibleDuplicates, variantCtx, productModels]);
@@ -492,10 +496,13 @@ export function WatchList() {
     // Score-basierte Duplicate Detection (nicht-blockierend): wenn ähnliche
     // Items im Bestand existieren, Modal zeigen — User kann trotzdem anlegen.
     // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind erwartet ähnlich (nur ein Hinweis, keine Warnung); eine doppelte SKU bleibt gesperrt.
-    const possible = findPossibleDuplicates(form).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey)));
-    if (possible.length > 0) {
+    // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
+    const { hard, soft } = splitDuplicates(findPossibleDuplicates(form, undefined, { forCreate: true }).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey))));
+    setDuplicateHints(soft);
+    if (hard.length > 0 && fp !== lastDismissedFp.current) {
       lastCheckedFp.current = fp;          // the live detector must not ask the same question again
-      setDuplicateMatches(possible);
+      setDuplicateCompare(false);
+      setDuplicateMatches(hard);
       return;
     }
     void runCreate();
@@ -1234,8 +1241,9 @@ export function WatchList() {
                         attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                         images: form.images,
                       };
-                      const possible = findPossibleDuplicates(candidate);
-                      if (possible.length > 0) setDuplicateMatches(possible);
+                      const { hard, soft } = splitDuplicates(findPossibleDuplicates(candidate, undefined, { forCreate: true }));
+                      setDuplicateHints(soft);
+                      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
                     } catch (e) { alert(String(e)); }
                     finally { setAiBusy(false); }
                   }}
@@ -1335,6 +1343,7 @@ export function WatchList() {
             </div>
           )}
           {/* R5B — der Ausgang des Anlegens, auf beiden Rechnern an derselben Stelle. */}
+          <DuplicateHintLine matches={duplicateHints} onOpen={() => { setDuplicateCompare(true); setDuplicateMatches(duplicateHints); }} />
           <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
@@ -1349,6 +1358,7 @@ export function WatchList() {
       <DuplicateWarningModal
         open={duplicateMatches.length > 0}
         matches={duplicateMatches}
+        compareOnly={duplicateCompare}
         candidate={form}
         onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
         onCreateAnyway={confirmCreateAnyway}

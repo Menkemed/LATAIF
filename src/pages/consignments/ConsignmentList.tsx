@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/Input';
 import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
-import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
@@ -131,6 +131,9 @@ export function ConsignmentList() {
   // R7B PP-3 — auf PC2 erkennt der Primary; der Knopf weiß VOR dem Klick, ob das geht.
   const aiGate = useAiIdentifyGate((productForm.images || []).length > 0);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
+  const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
+  const [duplicateCompare, setDuplicateCompare] = useState(false);
   // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
   const aiReqRef = useRef(0);
   const aiMountedRef = useRef(true);
@@ -172,15 +175,16 @@ export function ConsignmentList() {
   // Live Duplicate Detection für Consignment-Produkt — siehe WatchList.
   const consignFp = duplicateFingerprint(productForm);
   useEffect(() => {
-    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; setDuplicateHints([]); return; }
     if (duplicateMatches.length > 0) return;
     if (!productForm.brand?.trim() && !productForm.name?.trim() && !productForm.sku?.trim()) return;
     if (consignFp === lastCheckedFp.current) return;
     if (consignFp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
       lastCheckedFp.current = consignFp;
-      const possible = findPossibleDuplicates(productForm);
-      if (possible.length > 0) setDuplicateMatches(possible);
+      const { hard, soft } = splitDuplicates(findPossibleDuplicates(productForm, undefined, { forCreate: true }));
+      setDuplicateHints(soft);
+      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
     }, 800);
     return () => clearTimeout(t);
   }, [consignFp, showNew, duplicateMatches.length, productForm, findPossibleDuplicates]);
@@ -373,9 +377,12 @@ export function ConsignmentList() {
       return;
     }
     // Score-basierte Duplicate Detection (nicht-blockierend).
-    const possible = findPossibleDuplicates(productForm);
-    if (possible.length > 0) {
-      setDuplicateMatches(possible);
+    // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
+    const { hard, soft } = splitDuplicates(findPossibleDuplicates(productForm, undefined, { forCreate: true }));
+    setDuplicateHints(soft);
+    if (hard.length > 0 && consignFp !== lastDismissedFp.current) {
+      setDuplicateCompare(false);
+      setDuplicateMatches(hard);
       return;
     }
     doCreate();
@@ -1184,8 +1191,9 @@ export function ConsignmentList() {
                           attributes: { ...(productForm.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                           images: productForm.images,
                         };
-                        const possible = findPossibleDuplicates(candidate);
-                        if (possible.length > 0) setDuplicateMatches(possible);
+                        const { hard, soft } = splitDuplicates(findPossibleDuplicates(candidate, undefined, { forCreate: true }));
+                        setDuplicateHints(soft);
+                        if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
                       } catch (e) { alert(String(e)); }
                       finally { setAiBusy(false); }
                     }}
@@ -1391,6 +1399,7 @@ export function ConsignmentList() {
             />
           </div>
 
+          <DuplicateHintLine matches={duplicateHints} onOpen={() => { setDuplicateCompare(true); setDuplicateMatches(duplicateHints); }} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <WriteError text={w.fehler} />
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
@@ -1487,6 +1496,7 @@ export function ConsignmentList() {
       <DuplicateWarningModal
         open={duplicateMatches.length > 0}
         matches={duplicateMatches}
+        compareOnly={duplicateCompare}
         candidate={productForm}
         onCancel={() => { lastDismissedFp.current = consignFp; setDuplicateMatches([]); }}
         onCreateAnyway={doCreate}

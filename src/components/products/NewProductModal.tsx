@@ -15,7 +15,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { buildSkuSeed } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
-import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
@@ -72,6 +72,9 @@ export function NewProductModal({
   const aiGate = useAiIdentifyGate((form.images || []).length > 0);
   const [skuError, setSkuError] = useState(false);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
+  // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
+  const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
+  const [duplicateCompare, setDuplicateCompare] = useState(false);
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
   // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
@@ -86,15 +89,16 @@ export function NewProductModal({
   // Live Duplicate Detection — siehe WatchList für die Mechanik.
   const fp = duplicateFingerprint(form);
   useEffect(() => {
-    if (!open) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
+    if (!open) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; setDuplicateHints([]); return; }
     if (duplicateMatches.length > 0) return;
     if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim() && !nameFromAttributes(form.attributes)) return;
     if (fp === lastCheckedFp.current) return;
     if (fp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
-      const possible = ohneGeschwister(findPossibleDuplicates(form));
-      if (possible.length > 0) setDuplicateMatches(possible);
+      const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(form, undefined, { forCreate: true })));
+      setDuplicateHints(soft);
+      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
     }, 800);
     return () => clearTimeout(t);
   }, [fp, open, duplicateMatches.length, form, findPossibleDuplicates]);
@@ -147,9 +151,12 @@ export function NewProductModal({
     if (form.sku && isSkuTaken(form.sku)) { setSkuError(true); return; }
     setSkuError(false);
     // Score-basierte Duplicate Detection (nicht-blockierend).
-    const possible = ohneGeschwister(findPossibleDuplicates(form));
-    if (possible.length > 0) {
-      setDuplicateMatches(possible);
+    // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
+    const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(form, undefined, { forCreate: true })));
+    setDuplicateHints(soft);
+    if (hard.length > 0 && fp !== lastDismissedFp.current) {
+      setDuplicateCompare(false);
+      setDuplicateMatches(hard);
       return;
     }
     onSubmit(submitPayload());
@@ -471,8 +478,9 @@ export function NewProductModal({
                       attributes: { ...(form.attributes || {}), ...(result.attributes || {}) } as Product['attributes'],
                       images: form.images,
                     };
-                    const possible = findPossibleDuplicates(candidate);
-                    if (possible.length > 0) setDuplicateMatches(possible);
+                    const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(candidate, undefined, { forCreate: true })));
+                    setDuplicateHints(soft);
+                    if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
                   } catch (e) { alert(String(e)); }
                   finally { setAiBusy(false); }
                 }}
@@ -550,6 +558,7 @@ export function NewProductModal({
             style={{ width: '100%', padding: '10px 12px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13, resize: 'vertical' }} />
         </div>
 
+        <DuplicateHintLine matches={duplicateHints} onOpen={() => { setDuplicateCompare(true); setDuplicateMatches(duplicateHints); }} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" onClick={handleSubmit}
@@ -563,6 +572,7 @@ export function NewProductModal({
       <DuplicateWarningModal
         open={duplicateMatches.length > 0}
         matches={duplicateMatches}
+        compareOnly={duplicateCompare}
         candidate={form}
         onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
         onCreateAnyway={confirmCreateAnyway}

@@ -65,3 +65,8 @@ export function fingerprintAfterCopy(
     attributes: { ...((form?.attributes || {}) as Record<string, unknown>), ...copiedAttributes(src) },
   });
 }
+
+/** v0.8.113 — harte Treffer (Popup) und weiche (stiller Hinweis) trennen. */
+export function splitDuplicates<T extends { hard?: boolean }>(list: readonly T[]): { hard: T[]; soft: T[] } {
+  return { hard: list.filter((m) => m.hard === true), soft: list.filter((m) => m.hard !== true) };
+}

@@ -557,8 +557,8 @@ interface ProductStore {
   findPossibleDuplicates: (
     candidate: Partial<Product>,
     excludeProductId?: string,
-    options?: { mode?: 'all' | 'image-only' },
-  ) => Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE' }>;
+    options?: { mode?: 'all' | 'image-only'; forCreate?: boolean },
+  ) => Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE'; hard: boolean }>;
   /**
    * Plan §Sync-Duplicate: vereinigt zwei Produkte. Übernimmt qty von Source ins
    * Target, kopiert Source-Bild falls Target noch keins hat, löscht Source.
@@ -1853,6 +1853,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     //   ───── alles andere wird ignoriert (pHash, Brand-only,
     //         Fuzzy-Name, Reference ohne Brand-Match, ...)
     const mode = options?.mode || 'all';
+    // v0.8.113 — beim ANLEGEN (Collections, Einkauf/New Item, Kommission) nur die verlässlichen Signale als harte Warnung;
+    // das Gold-Merkmal und die schwache Foto-Ähnlichkeit fallen dort weg, ein Foto zählt erst ab 0,95 (nur Hinweis).
+    const forCreate = options?.forCreate === true;
     const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
     const cSku = norm(candidate.sku);
     const cBrand = norm(candidate.brand);
@@ -1877,12 +1880,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const POSSIBLE_THRESHOLD = 60;
     const STRONG_THRESHOLD = 80;
 
-    const results: Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE' }> = [];
+    const results: Array<{ product: Product; score: number; reasons: string[]; matchClass: 'STRONG' | 'POSSIBLE'; hard: boolean }> = [];
 
     for (const p of get().products) {
       if (p.id === excludeProductId) continue;
       let score = 0;
       const reasons: string[] = [];
+      // „Hart" = ein Signal, das ein physisch selbes Stück bedeutet (SKU, Seriennummer, Marke + Referenz/Modellnummer).
+      let hard = false;
 
       const pSku = norm(p.sku);
       const pBrand = norm(p.brand);
@@ -1898,26 +1903,33 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // Mode 'image-only' = nur AI-Embedding zaehlt. Wird vom SyncDuplicateGuard
       // fuer Phone-Uploads benutzt wo Text-Felder oft Muell sind.
       const all = mode === 'all';
+      // v0.8.113 — tragen BEIDE eine Seriennummer und sind sie verschieden, sind es zwei Stücke: dann zählen weder Referenz,
+      // Modellnummer, Name, Gold-Merkmal noch Foto (gleiche SKU bleibt ein Fehler und wird weiter gemeldet).
+      const zweiStuecke = hasSerial && !!pSerial && cSerial !== pSerial;
 
       if (all) {
         // STRONG-Signale (Score >= 80):
         if (hasSku && cSku === pSku) {
           score += 100;
+          hard = true;
           reasons.push(`Same SKU (${p.sku})`);
         }
         if (hasSerial && cSerial === pSerial) {
           score += 100;
+          hard = true;
           reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
         }
         // Reference + Brand zusammen: hochzuverlaessig (Reference allein war
         // frueher 80 Punkte aber falsch positiv weil verschiedene Brands
         // dieselbe "1234" haben koennen).
-        if (hasRef && hasBrand && cRef === pRef && cBrand === pBrand) {
+        if (!zweiStuecke && hasRef && hasBrand && cRef === pRef && cBrand === pBrand) {
           score += 90;
+          hard = true;
           reasons.push(`Same Brand + Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
         }
-        if (hasModelNo && hasBrand && cModelNo === pModelNo && cBrand === pBrand) {
+        if (!zweiStuecke && hasModelNo && hasBrand && cModelNo === pModelNo && cBrand === pBrand) {
           score += 90;
+          hard = true;
           reasons.push(`Same Brand + Model No (${pAttrs.model_number})`);
         }
 
@@ -1926,14 +1938,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         // koennten aber auch zwei verschiedene Items mit identischem Namen
         // sein (z.B. zwei "Patek Nautilus" ohne Reference angegeben).
         // Erscheint daher nur als Hinweis, nicht als sicherer Cluster.
-        if (hasBrand && hasName && cBrand === pBrand && cName === pName) {
+        if (!zweiStuecke && hasBrand && hasName && cBrand === pBrand && cName === pName) {
           score += 60;
           reasons.push(`Same Brand + Name`);
         }
 
         // Gold-Fingerprint: weight ±0.5g + same karat + same item_type +
         // same category. Bei Schmuck oft das einzige Identitaets-Signal.
-        if (hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
+        if (!forCreate && !zweiStuecke && hasGoldFingerprint && pWeight > 0 && pKarat && pItemType
             && cCategory === p.categoryId
             && cKarat === pKarat && cItemType === pItemType
             && Math.abs(cWeight - pWeight) <= 0.5) {
@@ -1947,9 +1959,12 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // Hamming-Distance-Heuristik produzierte zu viele Falschalarme.
       const cEmb = (candidate as { imageEmbedding?: number[] }).imageEmbedding;
       const pEmb = p.imageEmbedding;
-      if (cEmb && cEmb.length > 0 && pEmb && pEmb.length > 0) {
+      if (!zweiStuecke && cEmb && cEmb.length > 0 && pEmb && pEmb.length > 0) {
         const sim = cosineSimilarity(cEmb, pEmb);
-        if (sim >= EMBEDDING_SAME_THRESHOLD) {
+        if (forCreate) {
+          // Beim Anlegen: ein Foto ist nie eine harte Warnung — nur ein Hinweis, und erst ab 0,95 (fast identisch).
+          if (sim >= 0.95) { score += 60; reasons.push(`Near-identical photo (AI: ${sim.toFixed(2)})`); }
+        } else if (sim >= EMBEDDING_SAME_THRESHOLD) {
           score += 100;
           reasons.push(`Same item (AI photo match: ${sim.toFixed(2)})`);
         } else if (sim >= EMBEDDING_SIMILAR_THRESHOLD) {
@@ -1960,7 +1975,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
 
       if (score >= POSSIBLE_THRESHOLD) {
         const matchClass: 'STRONG' | 'POSSIBLE' = score >= STRONG_THRESHOLD ? 'STRONG' : 'POSSIBLE';
-        results.push({ product: p, score, reasons, matchClass });
+        results.push({ product: p, score, reasons, matchClass, hard });
       }
     }
 

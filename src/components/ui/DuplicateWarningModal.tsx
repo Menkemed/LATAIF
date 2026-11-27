@@ -21,6 +21,8 @@ export interface DuplicateMatch {
   product: Product;
   score: number;
   reasons: string[];
+  /** v0.8.113 — sicheres Signal (SKU, Seriennummer, Marke + Referenz/Modellnummer): nur dann das Popup. */
+  hard?: boolean;
 }
 
 interface Props {
@@ -34,6 +36,8 @@ interface Props {
   onPickExisting?: (productId: string) => void;
   /** Optional — übernimmt die Stamm-Daten des Existing in den neuen Form (Brand/Name/Specs/Preis), ohne SKU/Serial/Bild. */
   onCopyDetails?: (productId: string) => void;
+  /** v0.8.113 — aus dem stillen Hinweis geöffnet: nur vergleichen, KEIN „Create anyway“ (angelegt wird mit dem normalen Knopf). */
+  compareOnly?: boolean;
 }
 
 function scoreLabel(score: number): { text: string; color: string; bg: string } {
@@ -114,7 +118,7 @@ function SpecGrid({ specs }: { specs: { label: string; value: string }[] }) {
   );
 }
 
-export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCreateAnyway, onPickExisting, onCopyDetails }: Props) {
+export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCreateAnyway, onPickExisting, onCopyDetails, compareOnly }: Props) {
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   if (matches.length === 0) return null;
   const top = matches[0];
@@ -289,9 +293,27 @@ export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCr
               <Copy size={14} /> Copy details
             </Button>
           )}
-          <Button variant="primary" onClick={onCreateAnyway}>Create anyway</Button>
+          {compareOnly
+            ? <Button variant="primary" onClick={onCancel} data-duplicate-compare-close>Close</Button>
+            : <Button variant="primary" onClick={onCreateAnyway}>Create anyway</Button>}
         </div>
       </div>
     </Modal>
   );
 }
+
+/**
+ * v0.8.113 — der stille Hinweis unter der Maske: ähnliche Stücke (gleiche Marke + Name, fast identisches Foto) blockieren
+ * nicht mehr; eine Zeile nennt sie, ein Klick öffnet den Vergleich (ohne „Create anyway“).
+ */
+export function DuplicateHintLine({ matches, onOpen }: { matches: readonly DuplicateMatch[]; onOpen: () => void }) {
+  if (matches.length === 0) return null;
+  return (
+    <div data-duplicate-hint={matches.length} style={{ marginTop: 8, fontSize: 12, color: '#6B7280' }}>
+      {matches.length} similar item{matches.length === 1 ? '' : 's'} in stock —{' '}
+      <button type="button" onClick={onOpen} data-duplicate-hint-open style={{ color: '#0F0F10', textDecoration: 'underline', background: 'none', border: 0, padding: 0, cursor: 'pointer', fontSize: 12 }}>compare</button>
+    </div>
+  );
+}
+
+export { splitDuplicates } from '@/core/products/duplicate-dismiss';

@@ -157,7 +157,7 @@ const crev = (db: Db, id: string): number => n(db, 'SELECT revision FROM consign
 
 const CONSIGN = {
   consignorId: 'cust-1',
-  product: { brand: 'Patek', name: 'Nautilus', categoryId: 'cat-w' },
+  product: { brand: 'Patek', name: 'Nautilus', categoryId: 'cat-w', attributes: { reference_number: '5711/1A' } },
   agreedPrice: 1000,
   payout: { model: 'percent', commissionRate: 20 },
 };
@@ -166,7 +166,8 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
 // ── 1) Der lokale Duplikatsvertrag — als BEFUND, nicht als Behauptung ─────
 {
   const list = src('src/pages/consignments/ConsignmentList.tsx');
-  ok(/const possible = findPossibleDuplicates\(productForm\);\s*\n\s*if \(possible\.length > 0\) \{\s*\n\s*setDuplicateMatches\(possible\);\s*\n\s*return;/.test(list),
+  // v0.8.113 — nur ein sicheres Signal (hart) kehrt um; ähnliche Stücke sind ein stiller Hinweis.
+  ok(/const \{ hard, soft \} = splitDuplicates\(findPossibleDuplicates\(productForm, undefined, \{ forCreate: true \}\)\);[\s\S]{0,200}?if \(hard\.length > 0 && consignFp !== lastDismissedFp\.current\) \{\s*\n\s*setDuplicateCompare\(false\);\s*\n\s*setDuplicateMatches\(hard\);\s*\n\s*return;/.test(list),
     'LOCAL beim Verdacht kehrt der Bildschirm um — vor jedem Schreiben');
   const doCreateAt = list.indexOf('function doCreate()');
   const handleAt = list.indexOf('function handleCreate');
@@ -185,12 +186,12 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   resetTransactionHealthForTest();
   const db = freshDb();
   const d = deps(db);
-  // Ein Artikel, der wie der neue aussieht (gleiche Marke + gleicher Name = der Treffer des Hauses).
+  // Ein Artikel, der derselbe sein koennte (v0.8.113: gleiche Marke + Referenz = ein sicheres Signal; Marke + Name allein ist nur ein Hinweis).
   db.run(
     `INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
        scope_of_delivery, purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock,
        images, attributes, source_type, created_at, updated_at)
-     VALUES ('twin','branch-main','cat-w','Patek','Nautilus','TWIN-1',1,'Pre-Owned','[]',0,'BHD','in_stock','MARGIN',0,'[]','{}','OWN',?,?)`,
+     VALUES ('twin','branch-main','cat-w','Patek','Nautilus','TWIN-1',1,'Pre-Owned','[]',0,'BHD','in_stock','MARGIN',0,'[]','{"reference_number":"5711/1A"}','OWN',?,?)`,
     [NOW, NOW],
   );
   useProductStore.getState().loadProducts();

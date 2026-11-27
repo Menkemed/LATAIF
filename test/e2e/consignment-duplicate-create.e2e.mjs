@@ -194,7 +194,7 @@ async function openNewConsignment(c) {
   await waitFor(c, '[data-cn-cat="cat-watch"]', 15000);
 }
 /** Fill the dialog the way a person does: pick the consignor, the category, then type. */
-async function fillForm(c, { brand, name }) {
+async function fillForm(c, { brand, name, ref }) {
   await clickSel(c, '[data-ss-trigger="Search clients..."]');
   await sleep(400);
   await waitFor(c, '[data-ss-option="dup-cust"]', 10000);
@@ -205,6 +205,8 @@ async function fillForm(c, { brand, name }) {
   await setVal(c, 'input[placeholder="e.g. Rolex, Hermes, Cartier"]', brand);
   await setVal(c, 'input[placeholder="e.g. Submariner, Birkin 30"]', name);
   await setVal(c, 'input[placeholder="Optional — set at sale"]', '1000');
+  // v0.8.113 — die Referenz VOR dem Auffüllen der übrigen Felder (gleiche Marke + Referenz = sicheres Signal).
+  if (ref) await c.ev(`const l=[...document.querySelectorAll('label')].find(x=>/^reference number/i.test(x.textContent.trim())); const i=l&&l.parentElement.querySelector('input'); if(!i) return 'NO'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i, ${JSON.stringify(ref)}); i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
   // Die Kategorie verlangt eigene Pflichtmerkmale (Dial, Material, …). Ohne sie bricht das
   // Anlegen mit einer Meldung ab — und die Meldung ist unter der Fernsteuerung unsichtbar.
   await c.ev("const set=(el,v)=>{const p=el.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(p,'value').set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};" +
@@ -256,9 +258,25 @@ ok(productsNamed('Copy Model').length === 1, 'and so is the one the copy case wo
 c = await startApp();
 await ensureSignedIn(c);
 
-// ── A) Create anyway: der Hinweis erscheint einmal, eine Anlage entsteht ─────
+// ── H) v0.8.113 (vor A, damit kein im Test angelegtes Stück dieselbe Platzhalter-Seriennummer trägt): nur Marke + Name gleich → stiller Hinweis, KEIN Popup; der Vergleich öffnet sich erst auf Klick ──
 await openNewConsignment(c);
 await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model' });
+await sleep(2500);
+ok(await dupOpen(c) === false, 'H same brand + name only: no popup while typing');
+ok(await exists(c, '[data-duplicate-hint]') === true, 'H …but a quiet "similar items" line under the form');
+await clickSel(c, '[data-duplicate-hint-open]');
+await sleep(800);
+ok(await dupOpen(c) === true && await exists(c, '[data-duplicate-compare-close]') === true
+  && !(await c.ev("return [...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Create anyway');")),
+  'H a click opens the comparison — with "Close", never "Create anyway"');
+await clickSel(c, '[data-duplicate-compare-close]');
+await sleep(600);
+await clickText(c, 'Cancel');
+await sleep(800);
+
+// ── A) Create anyway: der Hinweis erscheint einmal, eine Anlage entsteht ─────
+await openNewConsignment(c);
+await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model', ref: 'TWIN-1' });
 await captureAlerts(c);
 await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
@@ -278,7 +296,7 @@ await sleep(2500);
 
 // ── B) Copy details: uebernimmt, legt NICHTS an, und springt nicht wieder auf ─
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Copybrand', name: 'Copy Model' });
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', ref: 'COPY-1' });
 await captureAlerts(c);
 await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
@@ -317,7 +335,7 @@ if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); 
 
 // ── B2) Kein Dauer-Bypass: eine echte Aenderung laesst die Pruefung wieder laufen ─────
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Copybrand', name: 'Copy Model' });
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', ref: 'COPY-1' });
 await clickSel(c, '[data-cn-create]');
 await sleep(1500);
 ok(await dupOpen(c) === true, 'B2 the hint appears');
