@@ -28,8 +28,23 @@ export function karatOf(p: Product): string {
   return karatShort((p.attributes as Record<string, unknown> | undefined)?.karat);
 }
 
-/** PURCHASE ADD VARIANT — die Aufschlüsselung der Modellkarte: Größe und Karat & Color („17 · 18K WG"). */
+/** v0.8.113 — die freie Beschreibung eines Stücks (z. B. die Steinfarbe „Malachite"), getrimmt; leer, wenn nicht gesetzt. */
+export function descriptionOf(p: Product): string {
+  return String(((p.attributes as Record<string, unknown> | undefined)?.description) ?? '').replace(/\s+/g, ' ').trim();
+}
+
+/** Kürzt einen Text für Chip/Tabelle auf höchstens `max` Zeichen (mit „…"). */
+export function shortText(t: string, max: number): string {
+  return t.length > max ? t.slice(0, max - 1).trimEnd() + '…' : t;
+}
+
+/**
+ * PURCHASE ADD VARIANT — die Aufschlüsselung der Modellkarte: Größe und Karat & Color („17 · 18K WG").
+ * v0.8.113 — mit Description dahinter („18K YG · Malachite"); dann entfällt der Platzhalter für eine fehlende Größe.
+ */
 export function variantKeyOf(p: Product): string {
+  const d = descriptionOf(p);
+  if (d) return [sizeOf(p), karatOf(p), shortText(d, 18)].filter(Boolean).join(' · ');
   return [sizeOf(p) || '—', karatOf(p)].filter(Boolean).join(' · ');
 }
 

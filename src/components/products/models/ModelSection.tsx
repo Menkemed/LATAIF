@@ -12,7 +12,7 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { isSystemArticle, mayJoinModel } from '@/core/products/product-models';
-import { karatOf, modelMembers, modelTitle, sizeOf, summarizeModel, weightOf } from '@/core/products/product-models-view';
+import { descriptionOf, karatOf, modelMembers, modelTitle, shortText, sizeOf, summarizeModel, weightOf } from '@/core/products/product-models-view';
 import type { Product } from '@/core/models/types';
 import { GroupItemsModal } from './GroupItemsModal';
 import { EditGroupModal } from './EditGroupModal';
@@ -90,7 +90,7 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
         <thead>
           <tr style={{ background: '#FAFBFC', color: '#6B7280', fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '.05em' }}>
-            <th style={{ padding: '8px 12px' }} /><th style={{ padding: 8, textAlign: 'left' }}>SKU</th><th style={{ padding: 8, textAlign: 'left' }}>Size</th><th style={{ padding: 8, textAlign: 'left' }}>Karat &amp; Color</th>
+            <th style={{ padding: '8px 12px' }} /><th style={{ padding: 8, textAlign: 'left' }}>SKU</th><th style={{ padding: 8, textAlign: 'left' }}>Size</th><th style={{ padding: 8, textAlign: 'left' }}>Karat &amp; Color</th><th style={{ padding: 8, textAlign: 'left' }}>Description</th>
             <th style={{ padding: 8, textAlign: 'right' }}>Weight</th><th style={{ padding: 8, textAlign: 'right' }}>Sale</th><th style={{ padding: 8, textAlign: 'right' }}>Min</th>
             <th style={{ padding: 8, textAlign: 'left' }}>Status</th><th style={{ padding: 8, textAlign: 'left' }}>Ownership</th>
           </tr>
@@ -110,6 +110,7 @@ export function ModelSection({ product, tenantId, branchId, onMediaChanged }: Pr
               <td className="font-mono" style={{ padding: 8, whiteSpace: 'nowrap' }}>{m.sku || '—'}{m.id === product.id ? <span style={{ marginLeft: 6, fontSize: 10, color: '#5B3DCC' }}>this item</span> : null}</td>
               <td style={{ padding: 8 }}>{sizeOf(m) || '—'}</td>
               <td style={{ padding: 8, whiteSpace: 'nowrap' }} data-model-row-karat>{karatOf(m) || '—'}</td>
+              <td style={{ padding: 8, maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={descriptionOf(m) || undefined} data-model-row-description>{descriptionOf(m) ? shortText(descriptionOf(m), 40) : '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{weightOf(m) != null ? `${weightOf(m)!.toFixed(2)} g` : '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{m.plannedSalePrice ? <Bhd v={m.plannedSalePrice} /> : '—'}</td>
               <td className="font-mono" style={{ padding: 8, textAlign: 'right' }}>{m.minSalePrice ? <Bhd v={m.minSalePrice} /> : '—'}</td>
