@@ -14,6 +14,7 @@ import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateConflictKey } from '@/core/products/duplicate-dismiss';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { buildBatchTagsZpl, tagProblem } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
@@ -213,6 +214,9 @@ export function WatchList() {
   // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
   const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
   const [duplicateCompare, setDuplicateCompare] = useState(false);
+  // v0.8.113 — der Konflikt, den das offene Popup zeigt, und der zuletzt beantwortete: derselbe kommt nicht noch einmal.
+  const pendingDupKey = useRef('');
+  const confirmedDupKey = useRef('');
   // Live-Duplicate-Check beim Tippen — Debounce 800ms. Refs verhindern
   // Wiederöffnen für dieselbe Eingabe nach Cancel.
   const lastCheckedFp = useRef('');
@@ -303,8 +307,8 @@ export function WatchList() {
       lastCheckedFp.current = fp;
       // ARTIKELVARIANTEN — Stücke DESSELBEN Modells sind beim „Add variant" erwartet ähnlich: keine Warnung (wie beim Speichern).
       const { hard, soft } = splitDuplicates(findPossibleDuplicates(form, undefined, { forCreate: true }).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey))));
-      setDuplicateHints(soft);
-      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+      // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+      setDuplicateHints([...hard, ...soft]);
     }, 800);
     return () => clearTimeout(t);
   }, [fp, showNew, duplicateMatches.length, form, findPossibleDuplicates, variantCtx, productModels]);
@@ -499,7 +503,8 @@ export function WatchList() {
     // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
     const { hard, soft } = splitDuplicates(findPossibleDuplicates(form, undefined, { forCreate: true }).filter((m) => !variantCtx || (m.product.id !== variantCtx.templateId && (!variantCtx.modelKey || productModels[m.product.id] !== variantCtx.modelKey))));
     setDuplicateHints(soft);
-    if (hard.length > 0 && fp !== lastDismissedFp.current) {
+    if (hard.length > 0 && duplicateConflictKey(hard) !== confirmedDupKey.current) {
+      pendingDupKey.current = duplicateConflictKey(hard);
       lastCheckedFp.current = fp;          // the live detector must not ask the same question again
       setDuplicateCompare(false);
       setDuplicateMatches(hard);
@@ -516,6 +521,7 @@ export function WatchList() {
     // The hard rules still apply — "anyway" answers the similarity question, nothing else.
     if (stopOnErrors(blockingErrors())) return;
     lastDismissedFp.current = fp;
+    confirmedDupKey.current = pendingDupKey.current;
     setDuplicateMatches([]);
     void runCreate();
   }
@@ -1242,8 +1248,8 @@ export function WatchList() {
                         images: form.images,
                       };
                       const { hard, soft } = splitDuplicates(findPossibleDuplicates(candidate, undefined, { forCreate: true }));
-                      setDuplicateHints(soft);
-                      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+                      // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+                      setDuplicateHints([...hard, ...soft]);
                     } catch (e) { alert(String(e)); }
                     finally { setAiBusy(false); }
                   }}
@@ -1360,7 +1366,7 @@ export function WatchList() {
         matches={duplicateMatches}
         compareOnly={duplicateCompare}
         candidate={form}
-        onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
+        onCancel={() => { lastDismissedFp.current = fp; if (!duplicateCompare) confirmedDupKey.current = pendingDupKey.current; setDuplicateCompare(false); setDuplicateMatches([]); }}
         onCreateAnyway={confirmCreateAnyway}
         onPickExisting={(id) => { setDuplicateMatches([]); setShowNew(false); navigate(`/collection/${id}`); }}
         onCopyDetails={(id) => {

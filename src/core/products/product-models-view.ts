@@ -44,7 +44,7 @@ export function shortText(t: string, max: number): string {
  */
 export function variantKeyOf(p: Product): string {
   const d = descriptionOf(p);
-  if (d) return [sizeOf(p), karatOf(p), shortText(d, 18)].filter(Boolean).join(' · ');
+  if (d) return [sizeOf(p), karatOf(p), shortText(d, 16)].filter(Boolean).join(' · ');
   return [sizeOf(p) || '—', karatOf(p)].filter(Boolean).join(' · ');
 }
 

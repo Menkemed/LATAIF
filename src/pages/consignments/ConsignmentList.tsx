@@ -16,6 +16,7 @@ import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateConflictKey } from '@/core/products/duplicate-dismiss';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
@@ -134,6 +135,9 @@ export function ConsignmentList() {
   // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
   const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
   const [duplicateCompare, setDuplicateCompare] = useState(false);
+  // v0.8.113 — der Konflikt, den das offene Popup zeigt, und der zuletzt beantwortete: derselbe kommt nicht noch einmal.
+  const pendingDupKey = useRef('');
+  const confirmedDupKey = useRef('');
   // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
   const aiReqRef = useRef(0);
   const aiMountedRef = useRef(true);
@@ -183,8 +187,8 @@ export function ConsignmentList() {
     const t = setTimeout(() => {
       lastCheckedFp.current = consignFp;
       const { hard, soft } = splitDuplicates(findPossibleDuplicates(productForm, undefined, { forCreate: true }));
-      setDuplicateHints(soft);
-      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+      // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+      setDuplicateHints([...hard, ...soft]);
     }, 800);
     return () => clearTimeout(t);
   }, [consignFp, showNew, duplicateMatches.length, productForm, findPossibleDuplicates]);
@@ -380,7 +384,8 @@ export function ConsignmentList() {
     // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
     const { hard, soft } = splitDuplicates(findPossibleDuplicates(productForm, undefined, { forCreate: true }));
     setDuplicateHints(soft);
-    if (hard.length > 0 && consignFp !== lastDismissedFp.current) {
+    if (hard.length > 0 && duplicateConflictKey(hard) !== confirmedDupKey.current) {
+      pendingDupKey.current = duplicateConflictKey(hard);
       setDuplicateCompare(false);
       setDuplicateMatches(hard);
       return;
@@ -1192,8 +1197,8 @@ export function ConsignmentList() {
                           images: productForm.images,
                         };
                         const { hard, soft } = splitDuplicates(findPossibleDuplicates(candidate, undefined, { forCreate: true }));
-                        setDuplicateHints(soft);
-                        if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+                        // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+                        setDuplicateHints([...hard, ...soft]);
                       } catch (e) { alert(String(e)); }
                       finally { setAiBusy(false); }
                     }}
@@ -1498,8 +1503,8 @@ export function ConsignmentList() {
         matches={duplicateMatches}
         compareOnly={duplicateCompare}
         candidate={productForm}
-        onCancel={() => { lastDismissedFp.current = consignFp; setDuplicateMatches([]); }}
-        onCreateAnyway={doCreate}
+        onCancel={() => { lastDismissedFp.current = consignFp; if (!duplicateCompare) confirmedDupKey.current = pendingDupKey.current; setDuplicateCompare(false); setDuplicateMatches([]); }}
+        onCreateAnyway={() => { confirmedDupKey.current = pendingDupKey.current; void doCreate(); }}
         onPickExisting={(id) => { setDuplicateMatches([]); setShowNew(false); navigate(`/collection/${id}`); }}
         onCopyDetails={(id) => {
           const src = products.find(p => p.id === id);

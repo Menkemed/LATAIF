@@ -173,7 +173,7 @@ function seedFixtures() {
          purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock, quantity,
          images, attributes, source_type, created_at, updated_at)
        VALUES (?,?, 'cat-watch', 'Dupebrand', 'Twin Model', 'DUP-WCH-001', 'Pre-Owned','[]',100,'BHD','in_stock','MARGIN',0,1,'[]',?, 'OWN',?,?)`
-    ).run('dup-existing', branchId, JSON.stringify({ reference_number: 'TWIN-1', dial: 'Blue' }), now, now);
+    ).run('dup-existing', branchId, JSON.stringify({ reference_number: 'TWIN-1', serial_number: 'TWIN-SN', dial: 'Blue' }), now, now);
     // Ein EIGENER vorhandener Artikel fuer den Kopier-Fall. Sonst ist der naechste Treffer der
     // Artikel, den Fall A gerade selbst angelegt hat — dessen Merkmale sind mit der Eingabe
     // identisch, und nach dem Kopieren waere nichts zu sehen, obwohl kopiert wurde.
@@ -182,7 +182,14 @@ function seedFixtures() {
          purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock, quantity,
          images, attributes, source_type, created_at, updated_at)
        VALUES (?,?, 'cat-watch', 'Copybrand', 'Copy Model', 'CPY-WCH-001', 'Pre-Owned','[]',100,'BHD','in_stock','MARGIN',0,1,'[]',?, 'OWN',?,?)`
-    ).run('dup-copy-src', branchId, JSON.stringify({ reference_number: 'COPY-1', dial: 'Green', material: 'Steel' }), now, now);
+    ).run('dup-copy-src', branchId, JSON.stringify({ reference_number: 'COPY-1', serial_number: 'COPY-SN', dial: 'Green', material: 'Steel' }), now, now);
+    // v0.8.113 — ein Stück OHNE Seriennummer: gleiche Marke + Name ist dazu nur ein stiller Hinweis.
+    db.prepare(
+      `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+         purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock, quantity,
+         images, attributes, source_type, created_at, updated_at)
+       VALUES (?,?, 'cat-watch', 'Hintbrand', 'Hint Model', 'HNT-WCH-001', 'Pre-Owned','[]',100,'BHD','in_stock','MARGIN',0,1,'[]','{}', 'OWN',?,?)`
+    ).run('dup-hint', branchId, now, now);
     return branchId;
   } finally { try { db.close(); } catch {} }
 }
@@ -194,7 +201,10 @@ async function openNewConsignment(c) {
   await waitFor(c, '[data-cn-cat="cat-watch"]', 15000);
 }
 /** Fill the dialog the way a person does: pick the consignor, the category, then type. */
-async function fillForm(c, { brand, name, ref }) {
+async function setSerial(c, v) {
+  return c.ev(`const l=[...document.querySelectorAll('label')].find(x=>/^serial number/i.test(x.textContent.trim())); const i=l&&l.parentElement.querySelector('input'); if(!i) return 'NO'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i, ${JSON.stringify(v)}); i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+}
+async function fillForm(c, { brand, name, serial }) {
   await clickSel(c, '[data-ss-trigger="Search clients..."]');
   await sleep(400);
   await waitFor(c, '[data-ss-option="dup-cust"]', 10000);
@@ -205,8 +215,8 @@ async function fillForm(c, { brand, name, ref }) {
   await setVal(c, 'input[placeholder="e.g. Rolex, Hermes, Cartier"]', brand);
   await setVal(c, 'input[placeholder="e.g. Submariner, Birkin 30"]', name);
   await setVal(c, 'input[placeholder="Optional — set at sale"]', '1000');
-  // v0.8.113 — die Referenz VOR dem Auffüllen der übrigen Felder (gleiche Marke + Referenz = sicheres Signal).
-  if (ref) await c.ev(`const l=[...document.querySelectorAll('label')].find(x=>/^reference number/i.test(x.textContent.trim())); const i=l&&l.parentElement.querySelector('input'); if(!i) return 'NO'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(i, ${JSON.stringify(ref)}); i.dispatchEvent(new Event('input',{bubbles:true})); i.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+  // v0.8.113 — die Seriennummer VOR dem Auffüllen der übrigen Felder (gleiche Marke + Seriennummer = Popup beim Speichern).
+  if (serial) await setSerial(c, serial);
   // Die Kategorie verlangt eigene Pflichtmerkmale (Dial, Material, …). Ohne sie bricht das
   // Anlegen mit einer Meldung ab — und die Meldung ist unter der Fernsteuerung unsichtbar.
   await c.ev("const set=(el,v)=>{const p=el.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(p,'value').set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};" +
@@ -260,7 +270,7 @@ await ensureSignedIn(c);
 
 // ── H) v0.8.113 (vor A, damit kein im Test angelegtes Stück dieselbe Platzhalter-Seriennummer trägt): nur Marke + Name gleich → stiller Hinweis, KEIN Popup; der Vergleich öffnet sich erst auf Klick ──
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model' });
+await fillForm(c, { brand: 'Hintbrand', name: 'Hint Model' });
 await sleep(2500);
 ok(await dupOpen(c) === false, 'H same brand + name only: no popup while typing');
 ok(await exists(c, '[data-duplicate-hint]') === true, 'H …but a quiet "similar items" line under the form');
@@ -276,7 +286,9 @@ await sleep(800);
 
 // ── A) Create anyway: der Hinweis erscheint einmal, eine Anlage entsteht ─────
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model', ref: 'TWIN-1' });
+await fillForm(c, { brand: 'Dupebrand', name: 'Twin Model', serial: 'TWIN-SN' });
+await sleep(2000);
+ok(await dupOpen(c) === false, 'A no popup while typing — even for the same serial number');
 await captureAlerts(c);
 await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
@@ -296,7 +308,7 @@ await sleep(2500);
 
 // ── B) Copy details: uebernimmt, legt NICHTS an, und springt nicht wieder auf ─
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', ref: 'COPY-1' });
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', serial: 'COPY-SN' });
 await captureAlerts(c);
 await clickSel(c, '[data-cn-create]');
 await sleep(600); { const al = await takenAlerts(c); if (al) console.log('   alert:', al); }
@@ -335,7 +347,7 @@ if (await dupOpen(c)) { await clickText(c, 'Create anyway'); await sleep(2500); 
 
 // ── B2) Kein Dauer-Bypass: eine echte Aenderung laesst die Pruefung wieder laufen ─────
 await openNewConsignment(c);
-await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', ref: 'COPY-1' });
+await fillForm(c, { brand: 'Copybrand', name: 'Copy Model', serial: 'COPY-SN' });
 await clickSel(c, '[data-cn-create]');
 await sleep(1500);
 ok(await dupOpen(c) === true, 'B2 the hint appears');
@@ -346,10 +358,14 @@ ok(await dupOpen(c) === false, 'B2 …and stays away after the copy');
   // Jetzt aendert der Benutzer wirklich etwas Duplikat-Relevantes.
   await setVal(c, 'input[placeholder="e.g. Submariner, Birkin 30"]', 'Twin Model');
   await setVal(c, 'input[placeholder="e.g. Rolex, Hermes, Cartier"]', 'Dupebrand');
+  await setSerial(c, 'TWIN-SN');
+  await sleep(2000);
+  ok(await dupOpen(c) === false, 'B2 typing the new conflict opens nothing by itself');
+  await clickSel(c, '[data-cn-create]');
   const end2 = Date.now() + 12000;
   let back = false;
   while (Date.now() < end2 && !back) { await sleep(400); back = await dupOpen(c); }
-  ok(back === true, 'B2 a real change to a duplicate-relevant field lets the check run again — no permanent bypass');
+  ok(back === true, 'B2 a changed conflict asks again on save — no permanent bypass');
   // Den Hinweis schliessen, ohne den Anlegen-Dialog zu treffen: sein Cancel steht zuletzt.
   await c.ev("const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Cancel').pop(); if(!b) return 'NO'; b.click(); return 'OK';");
   await sleep(800);

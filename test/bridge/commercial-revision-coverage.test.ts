@@ -157,7 +157,7 @@ const crev = (db: Db, id: string): number => n(db, 'SELECT revision FROM consign
 
 const CONSIGN = {
   consignorId: 'cust-1',
-  product: { brand: 'Patek', name: 'Nautilus', categoryId: 'cat-w', attributes: { reference_number: '5711/1A' } },
+  product: { brand: 'Patek', name: 'Nautilus', categoryId: 'cat-w', attributes: { serial_number: 'SN-5711' } },
   agreedPrice: 1000,
   payout: { model: 'percent', commissionRate: 20 },
 };
@@ -167,14 +167,15 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
 {
   const list = src('src/pages/consignments/ConsignmentList.tsx');
   // v0.8.113 — nur ein sicheres Signal (hart) kehrt um; ähnliche Stücke sind ein stiller Hinweis.
-  ok(/const \{ hard, soft \} = splitDuplicates\(findPossibleDuplicates\(productForm, undefined, \{ forCreate: true \}\)\);[\s\S]{0,200}?if \(hard\.length > 0 && consignFp !== lastDismissedFp\.current\) \{\s*\n\s*setDuplicateCompare\(false\);\s*\n\s*setDuplicateMatches\(hard\);\s*\n\s*return;/.test(list),
+  ok(/const \{ hard, soft \} = splitDuplicates\(findPossibleDuplicates\(productForm, undefined, \{ forCreate: true \}\)\);[\s\S]{0,200}?if \(hard\.length > 0 && duplicateConflictKey\(hard\) !== confirmedDupKey\.current\) \{\s*\n\s*pendingDupKey\.current = duplicateConflictKey\(hard\);\s*\n\s*setDuplicateCompare\(false\);\s*\n\s*setDuplicateMatches\(hard\);\s*\n\s*return;/.test(list),
     'LOCAL beim Verdacht kehrt der Bildschirm um — vor jedem Schreiben');
   const doCreateAt = list.indexOf('function doCreate()');
   const handleAt = list.indexOf('function handleCreate');
   const between = list.slice(Math.min(handleAt, doCreateAt), Math.max(handleAt, doCreateAt));
   ok(!/createProduct\(|createConsignment\(/.test(between),
     'LOCAL …und zwischen Prüfung und Umkehr wird nichts angelegt');
-  ok(/onCreateAnyway=\{doCreate\}/.test(list),
+  // v0.8.113 — die Antwort merkt sich den Konflikt (derselbe kommt nicht noch einmal), dann doCreate().
+  ok(/onCreateAnyway=\{\(\) => \{ confirmedDupKey\.current = pendingDupKey\.current; void doCreate\(\); \}\}/.test(list),
     'LOCAL „Create anyway" ist der bewusste zweite Klick, und er faehrt doCreate()');
   ok(/if \(createInFlight\.current\) return;/.test(list),
     'LOCAL …und ein Doppelklick darauf legt nichts zweimal an');
@@ -186,12 +187,12 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   resetTransactionHealthForTest();
   const db = freshDb();
   const d = deps(db);
-  // Ein Artikel, der derselbe sein koennte (v0.8.113: gleiche Marke + Referenz = ein sicheres Signal; Marke + Name allein ist nur ein Hinweis).
+  // Ein Artikel, der derselbe sein koennte (v0.8.113 Owner: gleiche Marke + Seriennummer = Popup; Referenz oder Name allein sind nur ein Hinweis).
   db.run(
     `INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
        scope_of_delivery, purchase_price, purchase_currency, stock_status, tax_scheme, days_in_stock,
        images, attributes, source_type, created_at, updated_at)
-     VALUES ('twin','branch-main','cat-w','Patek','Nautilus','TWIN-1',1,'Pre-Owned','[]',0,'BHD','in_stock','MARGIN',0,'[]','{"reference_number":"5711/1A"}','OWN',?,?)`,
+     VALUES ('twin','branch-main','cat-w','Patek','Nautilus','TWIN-1',1,'Pre-Owned','[]',0,'BHD','in_stock','MARGIN',0,'[]','{"serial_number":"SN-5711"}','OWN',?,?)`,
     [NOW, NOW],
   );
   useProductStore.getState().loadProducts();

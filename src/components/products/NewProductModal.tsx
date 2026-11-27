@@ -16,6 +16,7 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { buildSkuSeed } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, DuplicateHintLine, splitDuplicates, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
+import { duplicateConflictKey } from '@/core/products/duplicate-dismiss';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
@@ -75,6 +76,9 @@ export function NewProductModal({
   // v0.8.113 — weiche Treffer (stiller Hinweis) und ob das Fenster nur zum Vergleichen offen ist.
   const [duplicateHints, setDuplicateHints] = useState<DuplicateMatch[]>([]);
   const [duplicateCompare, setDuplicateCompare] = useState(false);
+  // v0.8.113 — der Konflikt, den das offene Popup zeigt, und der zuletzt beantwortete: derselbe kommt nicht noch einmal.
+  const pendingDupKey = useRef('');
+  const confirmedDupKey = useRef('');
   const lastCheckedFp = useRef('');
   const lastDismissedFp = useRef('');
   // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
@@ -97,8 +101,8 @@ export function NewProductModal({
     const t = setTimeout(() => {
       lastCheckedFp.current = fp;
       const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(form, undefined, { forCreate: true })));
-      setDuplicateHints(soft);
-      if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+      // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+      setDuplicateHints([...hard, ...soft]);
     }, 800);
     return () => clearTimeout(t);
   }, [fp, open, duplicateMatches.length, form, findPossibleDuplicates]);
@@ -154,7 +158,8 @@ export function NewProductModal({
     // v0.8.113 — nur harte Treffer halten an, und nicht noch einmal, wenn genau diese Eingabe schon weggeklickt wurde.
     const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(form, undefined, { forCreate: true })));
     setDuplicateHints(soft);
-    if (hard.length > 0 && fp !== lastDismissedFp.current) {
+    if (hard.length > 0 && duplicateConflictKey(hard) !== confirmedDupKey.current) {
+      pendingDupKey.current = duplicateConflictKey(hard);
       setDuplicateCompare(false);
       setDuplicateMatches(hard);
       return;
@@ -169,6 +174,7 @@ export function NewProductModal({
   }
 
   function confirmCreateAnyway() {
+    confirmedDupKey.current = pendingDupKey.current;
     setDuplicateMatches([]);
     onSubmit(submitPayload());
   }
@@ -479,8 +485,8 @@ export function NewProductModal({
                       images: form.images,
                     };
                     const { hard, soft } = splitDuplicates(ohneGeschwister(findPossibleDuplicates(candidate, undefined, { forCreate: true })));
-                    setDuplicateHints(soft);
-                    if (hard.length > 0) { setDuplicateCompare(false); setDuplicateMatches(hard); }
+                    // v0.8.113 Owner — während der Eingabe nie ein Popup; harte Treffer zeigt erst das Speichern.
+                    setDuplicateHints([...hard, ...soft]);
                   } catch (e) { alert(String(e)); }
                   finally { setAiBusy(false); }
                 }}
@@ -574,7 +580,7 @@ export function NewProductModal({
         matches={duplicateMatches}
         compareOnly={duplicateCompare}
         candidate={form}
-        onCancel={() => { lastDismissedFp.current = fp; setDuplicateMatches([]); }}
+        onCancel={() => { lastDismissedFp.current = fp; if (!duplicateCompare) confirmedDupKey.current = pendingDupKey.current; setDuplicateCompare(false); setDuplicateMatches([]); }}
         onCreateAnyway={confirmCreateAnyway}
         onCopyDetails={(id) => {
           const src = products.find(p => p.id === id);

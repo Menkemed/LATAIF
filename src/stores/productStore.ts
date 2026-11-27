@@ -1853,7 +1853,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     //   ───── alles andere wird ignoriert (pHash, Brand-only,
     //         Fuzzy-Name, Reference ohne Brand-Match, ...)
     const mode = options?.mode || 'all';
-    // v0.8.113 — beim ANLEGEN (Collections, Einkauf/New Item, Kommission) nur die verlässlichen Signale als harte Warnung;
+    // v0.8.113 — beim ANLEGEN (Collections, Einkauf/New Item, Kommission): hart (Popup beim Speichern) nur gleiche SKU und gleiche
+    // Seriennummer bei gleicher Marke; Marke + Referenz/Modellnummer, Name und Foto sind ein stiller Hinweis;
     // das Gold-Merkmal und die schwache Foto-Ähnlichkeit fallen dort weg, ein Foto zählt erst ab 0,95 (nur Hinweis).
     const forCreate = options?.forCreate === true;
     const norm = (v: unknown) => String(v ?? '').trim().toUpperCase();
@@ -1916,7 +1917,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         }
         if (hasSerial && cSerial === pSerial) {
           score += 100;
-          hard = true;
+          // v0.8.113 Owner — beim Anlegen ist die gleiche Seriennummer nur bei GLEICHER Marke ein Popup, sonst ein Hinweis.
+          if (!forCreate || (hasBrand && cBrand === pBrand)) hard = true;
           reasons.push(`Same Serial No (${pAttrs.serial_number || pAttrs.serialNo})`);
         }
         // Reference + Brand zusammen: hochzuverlaessig (Reference allein war
@@ -1924,12 +1926,13 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         // dieselbe "1234" haben koennen).
         if (!zweiStuecke && hasRef && hasBrand && cRef === pRef && cBrand === pBrand) {
           score += 90;
-          hard = true;
+          // v0.8.113 Owner — gleiche Marke + Referenz ist beim Anlegen nur ein stiller Hinweis (oft ein weiteres Stück desselben Modells).
+          if (!forCreate) hard = true;
           reasons.push(`Same Brand + Reference (${pAttrs.reference_number || pAttrs.reference || pAttrs.referenceNo})`);
         }
         if (!zweiStuecke && hasModelNo && hasBrand && cModelNo === pModelNo && cBrand === pBrand) {
           score += 90;
-          hard = true;
+          if (!forCreate) hard = true;
           reasons.push(`Same Brand + Model No (${pAttrs.model_number})`);
         }
 

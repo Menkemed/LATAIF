@@ -70,3 +70,8 @@ export function fingerprintAfterCopy(
 export function splitDuplicates<T extends { hard?: boolean }>(list: readonly T[]): { hard: T[]; soft: T[] } {
   return { hard: list.filter((m) => m.hard === true), soft: list.filter((m) => m.hard !== true) };
 }
+
+/** v0.8.113 — der „Konflikt" eines Popups: welche Stücke aus welchen Gründen. Derselbe Konflikt wird nach einer Antwort nicht wiederholt. */
+export function duplicateConflictKey(list: ReadonlyArray<{ product: { id: string }; reasons: readonly string[] }>): string {
+  return list.map((m) => `${m.product.id}:${[...m.reasons].sort().join(',')}`).sort().join('|');
+}

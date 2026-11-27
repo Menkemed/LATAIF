@@ -56,14 +56,20 @@ const find = (c: Record<string, unknown>) => useProductStore.getState().findPoss
   const { hard } = splitDuplicates(find({ sku: 'VCA-1', brand: 'X', name: 'Y' }));
   ok(hard.length === 1 && hard[0].product.id === '1', '2 gleiche SKU: Popup');
 }
-// 3 gleiche Marke + Referenz → hart; aber verschiedene Seriennummern → zwei Stücke, kein Treffer
+// 3 Owner-Regel v0.8.113: Marke + Referenz = nur Hinweis; verschiedene Seriennummern = zwei Stücke; gleiche Seriennummer
+//   nur bei GLEICHER Marke ein Popup
 {
   const gleich = splitDuplicates(find({ brand: 'Rolex', name: 'Submariner', attributes: { reference_number: '126610LN' } }));
-  ok(gleich.hard.length === 1, '3 gleiche Marke + Referenz ohne Seriennummer: Popup (könnte dasselbe Stück sein)');
+  ok(gleich.hard.length === 0 && gleich.soft.length === 1, `3 gleiche Marke + Referenz: KEIN Popup, nur Hinweis (${gleich.hard.length}/${gleich.soft.length})`);
   const zwei = find({ brand: 'Rolex', name: 'Submariner', attributes: { reference_number: '126610LN', serial_number: 'Z222' } });
   ok(zwei.length === 0, `3 gleiche Referenz, aber andere Seriennummer: zwei Stücke — keine Warnung, kein Hinweis (${zwei.length})`);
   const selbe = splitDuplicates(find({ brand: 'Rolex', name: 'Sub', attributes: { serial_number: 'Z111' } }));
-  ok(selbe.hard.length === 1, '3 gleiche Seriennummer: Popup');
+  ok(selbe.hard.length === 1, '3 gleiche Seriennummer + gleiche Marke: Popup');
+  const fremd = splitDuplicates(find({ brand: 'Omega', name: 'Speedmaster', attributes: { serial_number: 'Z111' } }));
+  ok(fremd.hard.length === 0 && fremd.soft.length === 1, '3 gleiche Seriennummer, ANDERE Marke: nur Hinweis');
+  const sku = splitDuplicates(find({ brand: 'Rolex', name: 'Submariner', sku: 'RLX-3', attributes: { serial_number: 'Z999' } }));
+  ok(sku.hard.length === 1 && useProductStore.getState().isSkuTaken('RLX-3'),
+    '3 SKU-Konflikt bleibt hart, auch bei anderer Seriennummer — und isSkuTaken sperrt das Speichern ohnehin');
 }
 // 4 Foto: beim Anlegen nie hart; schwach (0,80–0,87) gar nicht, fast identisch nur Hinweis
 {
@@ -82,6 +88,29 @@ const find = (c: Record<string, unknown>) => useProductStore.getState().findPoss
   ok(VIEW.variantKeyOf({ attributes: { size: '16', karat: '18K Yellow' } } as never) === '16 · 18K YG', '5 ohne Description wie bisher: „16 · 18K YG"');
   ok(VIEW.shortText('Mother of Pearl and Diamonds', 18) === 'Mother of Pearl a…' && VIEW.descriptionOf({ attributes: { description: '  Onyx \n  5 motifs ' } } as never) === 'Onyx 5 motifs',
     '5 lange Descriptions werden gekürzt, Leerraum zusammengefasst');
+  const lang = VIEW.variantKeyOf({ attributes: { karat: '18K Yellow', description: 'Mother of Pearl and Diamonds' } } as never);
+  ok(lang === '18K YG · Mother of Pearl…' && lang.length <= 26, `5 Chip kompakt gekürzt (${lang})`);
+}
+// 6 Qty: die Chips zählen Stücke, nicht Zeilen
+{
+  const m = [
+    { id: 'a', stockStatus: 'in_stock', quantity: 2, attributes: { karat: '18K Yellow', description: 'Malachite' } },
+    { id: 'b', stockStatus: 'in_stock', quantity: 1, attributes: { karat: '18K Yellow', description: 'Malachite' } },
+    { id: 'c', stockStatus: 'in_stock', quantity: 1, attributes: { karat: '18K Yellow', description: 'Onyx' } },
+    { id: 'd', stockStatus: 'sold', quantity: 1, attributes: { karat: '18K Yellow', description: 'Carnelian' } },
+  ] as never[];
+  const s = VIEW.summarizeModel('mdl', m);
+  const chips = Object.fromEntries(s.sizes.map((z: { size: string; count: number }) => [z.size, z.count]));
+  ok(chips['18K YG · Malachite'] === 3 && chips['18K YG · Onyx'] === 1 && !('18K YG · Carnelian' in chips),
+    `6 Chips mit Qty: Malachite ×3 (2+1), Onyx ×1, verkauftes Carnelian nicht als verfügbar (${JSON.stringify(chips)})`);
+}
+// 7 derselbe Konflikt wird erkannt (nicht wiederholen), ein geänderter nicht
+{
+  const { duplicateConflictKey } = await import('../../src/core/products/duplicate-dismiss.ts');
+  const a = duplicateConflictKey([{ product: { id: 'x' }, reasons: ['Same Serial No (1)', 'Same SKU (A)'] }]);
+  const b = duplicateConflictKey([{ product: { id: 'x' }, reasons: ['Same SKU (A)', 'Same Serial No (1)'] }]);
+  const c = duplicateConflictKey([{ product: { id: 'y' }, reasons: ['Same Serial No (1)'] }]);
+  ok(a === b && a !== c, '7 Konflikt-Schlüssel: gleiche Treffer = gleich (keine Wiederholung), anderer Treffer = neu');
 }
 
 console.log(`\nduplicate-create-rules: ${PASS} passed, ${fails.length} failed`);
